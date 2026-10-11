@@ -66,6 +66,7 @@ tags:
     question: Does this email contain an invoice or bill that I need to pay?
     threshold: 0.8
 
+# Only applied to emails that stay in the inbox (action keep, or low confidence).
 needs_reply:
   label: Jev/Responder
   question: Does the sender expect a reply or an action from me personally?

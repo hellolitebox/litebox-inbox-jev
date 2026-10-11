@@ -3,7 +3,7 @@
 import pytest
 from conftest import GMAIL_PASS, make_classification
 
-from inbox_jev import triage
+from inbox_jev import digest, triage
 from inbox_jev.config import Mode, Settings
 from inbox_jev.db import Message, SenderRule, Unsubscribe, make_session_factory
 from inbox_jev.gmail import Email
@@ -120,6 +120,15 @@ def test_dry_run_touches_nothing_then_label_reprocesses(setup):
     triage.run_account(ctx, account, Mode.DRY_RUN)
     assert all(add == [] and rem == [] for _, add, rem in gmail.modified)
     assert gmail.sent == []
+
+    with ctx.sessions() as s:
+        rows = {m.gmail_id: m for m in s.query(Message)}
+        assert "Jev/Responder" in rows["1"].decided_labels
+        assert all(m.labels_added == [] for m in rows.values())
+        text = digest.build(s, ctx.cfg, account.email)
+    reply_section = text.split("Piden respuesta (1)*", 1)[1].split("\n\n", 1)[0]
+    assert "Proposal" in reply_section
+    assert not any(subj in reply_section for subj in ("50% off", "Internal", "Maybe promo"))
 
     run = triage.run_account(ctx, account, Mode.LABEL)
     assert run.processed == 4

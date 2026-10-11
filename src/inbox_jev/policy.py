@@ -52,7 +52,7 @@ def decide(
         # Unknown answer (config changed under us): treat as uncertain.
         decision = Decision(category="important", confidence=0.0, source="jev", low_confidence=True)
         decision.add_labels.append(cfg.review_label)
-        return decision
+        return _add_flags(cfg, classification, decision)
 
     decision = Decision(category=category, confidence=classification.confidence, source="jev")
 
@@ -74,7 +74,17 @@ def decide(
     else:
         _apply(cfg, decision)
 
-    if classification.needs_reply >= cfg.needs_reply.threshold:
+    return _add_flags(cfg, classification, decision)
+
+
+def _add_flags(
+    cfg: CategoriesConfig, classification: Classification, decision: Decision
+) -> Decision:
+    # Cold outreach also "expects a reply": only flag emails that stay in the inbox
+    # (kept categories, low-confidence guesses, unknown categories), never archived or spammed.
+    if classification.needs_reply >= cfg.needs_reply.threshold and not (
+        decision.archive or decision.spam
+    ):
         decision.add_labels.append(cfg.needs_reply.label)
     for tag in cfg.tags:
         if classification.tags.get(tag.key, 0.0) >= tag.threshold:

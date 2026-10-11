@@ -146,6 +146,7 @@ def process(
     msg.downgraded_to_spam = decision.downgraded_to_spam
     msg.mode = mode.value
     msg.labels_added = actions.add_labels
+    msg.decided_labels = decision.add_labels
     msg.archived, msg.spammed = actions.archived, actions.spammed
     msg.processed_at = now()
 
@@ -168,6 +169,7 @@ def process(
             "labels": actions.add_labels,
             "archived": actions.archived,
             "spammed": actions.spammed,
+            "request_id": classification.request_id if classification else None,
         },
     )
     return msg

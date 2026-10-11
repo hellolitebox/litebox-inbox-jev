@@ -69,6 +69,13 @@ def test_unknown_category_goes_to_review(cfg, account):
     assert d.low_confidence and d.add_labels == ["Jev/Revisar"]
 
 
+def test_unknown_category_still_flags_needs_reply(cfg, account):
+    c = make_classification("deleted_category", 0.99, needs_reply=0.95)
+    d = decide(cfg, account, make_signals(), c)
+    assert d.low_confidence and not (d.archive or d.spam)
+    assert d.add_labels == ["Jev/Revisar", "Jev/Responder"]
+
+
 def test_needs_reply_and_tags(cfg, account):
     c = make_classification("important", 0.9, needs_reply=0.8, tags={"invoice_to_pay": 0.9})
     d = decide(cfg, account, make_signals(), c)
@@ -93,3 +100,26 @@ def test_plan_spam(cfg, account):
 
 def test_rule_keys():
     assert rule_keys("a@b.com") == ["a@b.com", "@b.com"]
+
+
+def test_needs_reply_only_for_kept_emails(cfg, account):
+    c = make_classification("spam", 0.95, needs_reply=0.95)
+    d = decide(cfg, account, make_signals(), c)
+    assert "Jev/Responder" not in d.add_labels
+
+
+def test_needs_reply_skipped_for_downgraded_marketing(cfg, account):
+    # Sponsorship pitch without DMARC: marketing -> spam, never flagged as needing a reply.
+    c = make_classification("marketing", 0.95, needs_reply=0.95)
+    d = decide(cfg, account, make_signals(dmarc_pass=False), c)
+    assert d.downgraded_to_spam and d.spam
+    assert "Jev/Responder" not in d.add_labels
+
+
+@pytest.mark.parametrize("category", ["spam", "newsletter"])
+def test_needs_reply_flagged_for_low_confidence(cfg, account, category):
+    # Low confidence keeps the email in the inbox, so the reply flag still applies.
+    c = make_classification(category, 0.5, needs_reply=0.95)
+    d = decide(cfg, account, make_signals(), c)
+    assert d.low_confidence and not (d.archive or d.spam)
+    assert "Jev/Responder" in d.add_labels

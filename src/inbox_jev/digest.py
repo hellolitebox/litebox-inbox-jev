@@ -24,6 +24,12 @@ def _line(account: str, m: Message, suffix: str = "") -> str:
     return f"• <{gmail_link(account, m.gmail_id)}|{subject}> — {m.sender}{suffix}"
 
 
+def _needs_reply(cfg: CategoriesConfig, m: Message) -> bool:
+    if m.decided_labels is None:  # rows stored before decided_labels existed
+        return (m.needs_reply or 0) >= cfg.needs_reply.threshold
+    return cfg.needs_reply.label in m.decided_labels
+
+
 def build(session: Session, cfg: CategoriesConfig, account: str, hours: int = 24) -> str:
     since = now() - timedelta(hours=hours)
     msgs = session.scalars(
@@ -47,7 +53,7 @@ def build(session: Session, cfg: CategoriesConfig, account: str, hours: int = 24
     low = [m for m in done if m.low_confidence]
     out.append(f"{len(done)} procesados — {summary or 'nada'} · a revisar: {len(low)}")
 
-    reply = [m for m in done if (m.needs_reply or 0) >= cfg.needs_reply.threshold]
+    reply = [m for m in done if _needs_reply(cfg, m)]
     if reply:
         out.append(f"\n*⚡ Piden respuesta ({len(reply)})*")
         out += [_line(account, m) for m in reply[:MAX_ITEMS]]

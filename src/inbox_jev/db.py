@@ -15,8 +15,12 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    inspect,
+    literal,
+    text,
 )
 from sqlalchemy.engine import Engine, make_url
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 
@@ -64,7 +68,8 @@ class Message(Base):
     low_confidence: Mapped[bool] = mapped_column(Boolean, default=False)
     downgraded_to_spam: Mapped[bool] = mapped_column(Boolean, default=False)
     mode: Mapped[str] = mapped_column(String(16))
-    labels_added: Mapped[list | None] = mapped_column(JSON)
+    labels_added: Mapped[list | None] = mapped_column(JSON)  # applied in Gmail
+    decided_labels: Mapped[list | None] = mapped_column(JSON)  # policy output, any mode
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
     spammed: Mapped[bool] = mapped_column(Boolean, default=False)
     corrected_category: Mapped[str | None] = mapped_column(String(64))
@@ -112,7 +117,50 @@ def make_engine(url: str) -> Engine:
         Path(parsed.database).parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(url)
     Base.metadata.create_all(engine)
+    _add_missing_columns(engine)
     return engine
+
+
+def _add_missing_columns(engine: Engine) -> None:
+    """Poor man's migration: create_all doesn't add new columns to existing tables.
+
+    Nullable columns are added as-is. NOT NULL columns are added with ``DEFAULT <literal>``
+    when the model declares a scalar default; otherwise startup fails with a clear error,
+    since existing rows can't be backfilled. Anything more involved needs a real migration
+    tool.
+
+    Limitations: indexes and constraints declared on a new column (``index=True``,
+    ``unique=True``) are not created. If two processes upgrade the same database at once,
+    the loser's ALTER fails with "duplicate column"; that is tolerated by re-inspecting.
+    """
+    preparer = engine.dialect.identifier_preparer
+    for table in Base.metadata.sorted_tables:
+        existing = {c["name"] for c in inspect(engine).get_columns(table.name)}
+        for col in table.columns:
+            if col.name in existing:
+                continue
+            col_type = col.type.compile(dialect=engine.dialect)
+            ddl = (
+                f"ALTER TABLE {preparer.format_table(table)} "
+                f"ADD COLUMN {preparer.format_column(col)} {col_type}"
+            )
+            if not col.nullable:
+                if col.default is None or not col.default.is_scalar:
+                    raise RuntimeError(
+                        f"{table.name}.{col.name} is NOT NULL without a scalar default and is "
+                        "missing from the database; migrate it manually"
+                    )
+                default = literal(col.default.arg, col.type).compile(
+                    dialect=engine.dialect, compile_kwargs={"literal_binds": True}
+                )
+                ddl += f" NOT NULL DEFAULT {default}"
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text(ddl))
+            except DBAPIError:
+                # Another process may have added it first.
+                if col.name not in {c["name"] for c in inspect(engine).get_columns(table.name)}:
+                    raise
 
 
 def make_session_factory(url: str) -> sessionmaker:
