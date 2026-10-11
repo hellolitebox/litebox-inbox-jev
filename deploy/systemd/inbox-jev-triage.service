@@ -1,0 +1,10 @@
+[Unit]
+Description=inbox-jev triage pass
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/inbox-jev
+ExecStart=/usr/bin/docker compose run --rm -T app run
+TimeoutStartSec=15min

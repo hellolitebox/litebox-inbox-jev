@@ -1,0 +1,17 @@
+# Copy to accounts.yaml (gitignored). One entry per Gmail account.
+# Each account needs a token: `inbox-jev auth add you@example.com`
+accounts:
+  - email: you@example.com
+    # Slack member ID to DM the daily digest to (Profile → ⋯ → Copy member ID). Optional.
+    slack_user_id: U0123456789
+    # Overrides the global MODE for this account. Optional.
+    mode: label
+    # Never touched: always "important", never archived or unsubscribed.
+    allow_domains:
+      - example.com
+      - mybank.com
+    allow_senders:
+      - boss@partner.com
+    # Per-account confidence overrides by category key. Optional.
+    min_confidence:
+      marketing: 0.95

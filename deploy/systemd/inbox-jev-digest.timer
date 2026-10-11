@@ -1,0 +1,9 @@
+[Unit]
+Description=Send the inbox-jev digest every morning
+
+[Timer]
+OnCalendar=*-*-* 08:00:00 America/Argentina/Buenos_Aires
+Persistent=true
+
+[Install]
+WantedBy=timers.target

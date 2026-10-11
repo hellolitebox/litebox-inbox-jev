@@ -1,0 +1,25 @@
+# Secrets and local config — only the *.example files are committed
+.env
+.env.*
+!.env.example
+accounts.yaml
+secrets/
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+client_secret*.json
+token*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+
+.DS_Store

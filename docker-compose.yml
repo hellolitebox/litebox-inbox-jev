@@ -1,0 +1,32 @@
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  app:
+    build: .
+    image: inbox-jev:latest
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-sqlite:////app/data/inbox-jev.db}
+    volumes:
+      - ./data:/app/data
+      - ./secrets:/app/secrets          # rw: OAuth tokens get refreshed
+      - ./accounts.yaml:/app/accounts.yaml:ro
+      - ./categories.yaml:/app/categories.yaml:ro
+    logging: *logging
+
+  # Optional read-only DB browser: `docker compose --profile viewer up -d viewer`
+  # then `ssh -L 8001:localhost:8001 <host>` → http://localhost:8001
+  viewer:
+    profiles: ["viewer"]
+    image: datasetteproject/datasette:0.65.1
+    command: datasette serve -i /data/inbox-jev.db -h 0.0.0.0 -p 8001
+    volumes:
+      - ./data:/data:ro
+    ports:
+      - "127.0.0.1:8001:8001"
+    restart: unless-stopped
+    logging: *logging

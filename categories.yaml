@@ -1,0 +1,81 @@
+# Categories Jev chooses between (exactly one per email). Add an entry to create a new label —
+# no code changes needed. The Gmail label is created on the next run.
+#
+# action:
+#   keep                 stay in the inbox
+#   archive              remove from inbox
+#   archive_unsubscribe  remove from inbox and unsubscribe (only with dmarc=pass + List-Unsubscribe;
+#                        otherwise the email is downgraded to the `spam` category)
+#   spam                 move to Gmail Spam
+# min_confidence: below it, nothing destructive happens; the email stays in the inbox with the
+#   review label plus the suggested category label.
+categories:
+  - key: important
+    label: Jev/Importante
+    criteria: >-
+      Written by a real person specifically to me: clients, teammates, partners, investors,
+      candidates, decisions, questions or requests addressed to me.
+    action: keep
+    min_confidence: 0.0
+
+  - key: transactional
+    label: Jev/Transaccional
+    criteria: >-
+      Automated record of something I did or bought: receipts, invoices, payment or order
+      confirmations, bookings, shipping updates, password resets, verification codes.
+    action: archive
+    min_confidence: 0.80
+
+  - key: notification
+    label: Jev/Notificaciones
+    criteria: >-
+      Automated alerts from software tools I use: GitHub, Slack, Google Calendar/Drive/Docs,
+      Jira, Linear, Notion, monitoring, CI, security alerts.
+    action: archive
+    min_confidence: 0.80
+
+  - key: newsletter
+    label: Jev/Newsletters
+    criteria: >-
+      Editorial content I subscribed to: newsletters, digests, blog updates, industry news.
+      Mostly informative, not primarily trying to sell something.
+    action: archive
+    min_confidence: 0.80
+
+  - key: marketing
+    label: Jev/Marketing
+    criteria: >-
+      Promotional email from a legitimate company: ads, sales, discounts, product launches,
+      webinars, event promotions, upsells.
+    action: archive_unsubscribe
+    min_confidence: 0.90
+
+  - key: spam
+    label: Jev/Spam
+    criteria: >-
+      Unsolicited or suspicious email: mass cold outreach from strangers, lead-gen sequences,
+      scams, phishing, SEO/link-building pitches.
+    action: spam
+    min_confidence: 0.90
+
+# Extra yes/no questions. Additive: a label is applied when probability >= threshold,
+# on top of the category. Remove the list or leave it empty to skip.
+tags:
+  - key: invoice_to_pay
+    label: Jev/Facturas
+    question: Does this email contain an invoice or bill that I need to pay?
+    threshold: 0.8
+
+needs_reply:
+  label: Jev/Responder
+  question: Does the sender expect a reply or an action from me personally?
+  threshold: 0.7
+
+review_label: Jev/Revisar
+processed_label: Jev/Procesado
+
+# A sender becomes an automatic rule (skips Jev) after this many consistent
+# classifications at or above this confidence.
+auto_rule:
+  hits: 3
+  min_confidence: 0.95

@@ -1,0 +1,10 @@
+.env
+.env.*
+accounts.yaml
+secrets/
+data/
+.venv/
+.git/
+**/__pycache__
+.pytest_cache/
+.ruff_cache/
