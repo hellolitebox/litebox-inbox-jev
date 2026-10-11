@@ -97,9 +97,9 @@ def test_act_mode_end_to_end(setup):
     assert ctx._classifier.calls == 3  # allowlisted sender skips Jev
 
     mods = {m[0]: m for m in gmail.modified}
-    assert "Label_Jev/Responder" in mods["1"][1] and mods["1"][2] == []
+    assert "Label_Jev/Needs Reply" in mods["1"][1] and mods["1"][2] == []
     assert mods["2"][2] == ["INBOX"]
-    assert "Label_Jev/Revisar" in mods["4"][1] and mods["4"][2] == []
+    assert "Label_Jev/Review" in mods["4"][1] and mods["4"][2] == []
     assert gmail.sent == ["u@shop.com"]
 
     with ctx.sessions() as s:
@@ -123,7 +123,7 @@ def test_dry_run_touches_nothing_then_label_reprocesses(setup):
 
     with ctx.sessions() as s:
         rows = {m.gmail_id: m for m in s.query(Message)}
-        assert "Jev/Responder" in rows["1"].decided_labels
+        assert "Jev/Needs Reply" in rows["1"].decided_labels
         assert all(m.labels_added == [] for m in rows.values())
         text = digest.build(s, ctx.cfg, account.email)
     reply_section = text.split("Piden respuesta (1)*", 1)[1].split("\n\n", 1)[0]

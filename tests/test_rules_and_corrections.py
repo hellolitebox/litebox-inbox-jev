@@ -20,7 +20,7 @@ def msg(**kw) -> Message:
 
 
 def test_detect_label_change(cfg):
-    assert detect(msg(), {"Jev/Newsletters", "Jev/Procesado"}, cfg) == "newsletter"
+    assert detect(msg(), {"Jev/Newsletters", "Jev/Processed"}, cfg) == "newsletter"
 
 
 def test_detect_pulled_back_to_inbox(cfg):
@@ -29,14 +29,14 @@ def test_detect_pulled_back_to_inbox(cfg):
 
 def test_detect_accepted_low_confidence_suggestion(cfg):
     m = msg(low_confidence=True, archived=False)
-    assert detect(m, {"INBOX", "Jev/Marketing", "Jev/Revisar"}, cfg) is None
+    assert detect(m, {"INBOX", "Jev/Marketing", "Jev/Review"}, cfg) is None
     assert detect(m, {"INBOX", "Jev/Marketing"}, cfg) == "marketing"
 
 
 def test_detect_untouched(cfg):
-    assert detect(msg(), {"Jev/Marketing", "Jev/Procesado"}, cfg) is None
+    assert detect(msg(), {"Jev/Marketing", "Jev/Processed"}, cfg) is None
     assert (
-        detect(msg(archived=False, category="important"), {"INBOX", "Jev/Importante"}, cfg) is None
+        detect(msg(archived=False, category="important"), {"INBOX", "Jev/Important"}, cfg) is None
     )
 
 

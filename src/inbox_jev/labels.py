@@ -1,0 +1,87 @@
+"""Rename a Gmail label in place, keeping it on the emails that already have it."""
+
+from __future__ import annotations
+
+from typing import Protocol
+
+from sqlalchemy import select, update
+from sqlalchemy.orm import Session
+
+from .db import Message
+
+
+class LabelApi(Protocol):
+    def labels(self) -> dict[str, str]: ...
+    def user_labels(self) -> set[str]: ...
+    def label_message_count(self, label_id: str) -> int: ...
+    def delete_label(self, label_id: str) -> None: ...
+    def rename_label(self, label_id: str, new_name: str) -> None: ...
+
+
+def _check(existing: dict[str, str], user: set[str], old: str, new: str) -> None:
+    """Refuse renames Gmail would reject or that would leave things half-renamed."""
+    if old in existing:
+        if old not in user:
+            raise ValueError(f"{old!r} is a system label and can't be renamed")
+        # The API renames only this label; children keep the old path in their names.
+        children = [n for n in existing if n.casefold().startswith(old.casefold() + "/")]
+        if children:
+            raise ValueError(f"{old!r} has child labels ({', '.join(sorted(children))})")
+    # Gmail label names are case-insensitive. A case-only rename of OLD itself is fine.
+    clash = next((n for n in existing if n.casefold() == new.casefold() and n != old), None)
+    if clash is not None and clash not in user:
+        raise ValueError(f"{new!r} conflicts with the system label {clash!r}")
+    if clash is not None and clash != new:
+        raise ValueError(f"{new!r} conflicts with the existing label {clash!r}")
+
+
+def rename(gmail: LabelApi, session: Session, account: str, old: str, new: str) -> str:
+    """Rename OLD to NEW in Gmail and in the stored label lists. Safe to re-run.
+
+    Returns what happened in Gmail: "renamed", "renamed (replaced empty NEW)",
+    "already renamed" or "not in gmail". If both exist and NEW is empty (e.g. a triage pass
+    created it after the config changed), NEW is deleted first. Refuses (ValueError) when
+    NEW already holds emails, since merging them is not supported.
+    """
+    if old == new:
+        raise ValueError("old and new names are the same")
+    existing = gmail.labels()
+    _check(existing, gmail.user_labels(), old, new)
+    if old in existing and new in existing:
+        if gmail.label_message_count(existing[new]) > 0:
+            raise ValueError(
+                f"both {old!r} and {new!r} exist in Gmail and {new!r} has emails; "
+                "merge them by hand first"
+            )
+        gmail.delete_label(existing[new])
+        gmail.rename_label(existing[old], new)
+        outcome = "renamed (replaced empty NEW)"
+    elif old in existing:
+        gmail.rename_label(existing[old], new)
+        outcome = "renamed"
+    elif new in existing:
+        outcome = "already renamed"
+    else:
+        outcome = "not in gmail"
+
+    rows = session.execute(
+        select(Message.id, Message.labels_added, Message.decided_labels).where(
+            Message.account == account
+        )
+    )
+    changes = []
+    for row_id, added, decided in rows:
+        if (added and old in added) or (decided and old in decided):
+            changes.append(
+                {
+                    "id": row_id,
+                    "labels_added": [new if n == old else n for n in added] if added else added,
+                    "decided_labels": (
+                        [new if n == old else n for n in decided] if decided else decided
+                    ),
+                }
+            )
+    if changes:
+        session.execute(update(Message), changes)  # bulk UPDATE by primary key
+    session.commit()
+    return outcome

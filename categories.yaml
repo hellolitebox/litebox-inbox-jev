@@ -11,7 +11,7 @@
 #   review label plus the suggested category label.
 categories:
   - key: important
-    label: Jev/Importante
+    label: Jev/Important
     criteria: >-
       Written by a real person specifically to me: clients, teammates, partners, investors,
       candidates, decisions, questions or requests addressed to me.
@@ -19,7 +19,7 @@ categories:
     min_confidence: 0.0
 
   - key: transactional
-    label: Jev/Transaccional
+    label: Jev/Transactional
     criteria: >-
       Automated record of something I did or bought: receipts, invoices, payment or order
       confirmations, bookings, shipping updates, password resets, verification codes.
@@ -27,7 +27,7 @@ categories:
     min_confidence: 0.80
 
   - key: notification
-    label: Jev/Notificaciones
+    label: Jev/Notifications
     criteria: >-
       Automated alerts from software tools I use: GitHub, Slack, Google Calendar/Drive/Docs,
       Jira, Linear, Notion, monitoring, CI, security alerts.
@@ -62,18 +62,18 @@ categories:
 # on top of the category. Remove the list or leave it empty to skip.
 tags:
   - key: invoice_to_pay
-    label: Jev/Facturas
+    label: Jev/Invoices
     question: Does this email contain an invoice or bill that I need to pay?
     threshold: 0.8
 
 # Only applied to emails that stay in the inbox (action keep, or low confidence).
 needs_reply:
-  label: Jev/Responder
+  label: Jev/Needs Reply
   question: Does the sender expect a reply or an action from me personally?
   threshold: 0.7
 
-review_label: Jev/Revisar
-processed_label: Jev/Procesado
+review_label: Jev/Review
+processed_label: Jev/Processed
 
 # A sender becomes an automatic rule (skips Jev) after this many consistent
 # classifications at or above this confidence.

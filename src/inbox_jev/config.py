@@ -59,7 +59,7 @@ class Tag(BaseModel):
 
 
 class NeedsReply(BaseModel):
-    label: str = "Jev/Responder"
+    label: str = "Jev/Needs Reply"
     question: str = "Does the sender expect a reply or an action from me personally?"
     threshold: float = 0.7
 
@@ -73,8 +73,8 @@ class CategoriesConfig(BaseModel):
     categories: list[Category]
     tags: list[Tag] = Field(default_factory=list)
     needs_reply: NeedsReply = Field(default_factory=NeedsReply)
-    review_label: str = "Jev/Revisar"
-    processed_label: str = "Jev/Procesado"
+    review_label: str = "Jev/Review"
+    processed_label: str = "Jev/Processed"
     auto_rule: AutoRule = Field(default_factory=AutoRule)
 
     @model_validator(mode="after")

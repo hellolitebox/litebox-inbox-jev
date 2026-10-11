@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 
 from . import digest as digest_mod
 from . import gmail as gmail_mod
-from . import logs, rules, triage
+from . import labels, logs, rules, triage
 from . import unsubscribe as unsub
 from .config import Account, Mode, Settings, load_accounts, load_categories
 from .db import Message, SenderRule, Unsubscribe, make_session_factory, now
@@ -20,8 +20,10 @@ from .db import Message, SenderRule, Unsubscribe, make_session_factory, now
 app = typer.Typer(no_args_is_help=True, help="Triage Gmail with TypeSafe Jev.")
 auth_app = typer.Typer(no_args_is_help=True, help="Manage Gmail OAuth tokens.")
 rules_app = typer.Typer(no_args_is_help=True, help="Per-sender rules (skip Jev).")
+labels_app = typer.Typer(no_args_is_help=True, help="Manage Jev labels in Gmail.")
 app.add_typer(auth_app, name="auth")
 app.add_typer(rules_app, name="rules")
+app.add_typer(labels_app, name="labels")
 
 log = logging.getLogger("inbox_jev")
 
@@ -234,6 +236,36 @@ def rules_delete(
         session.delete(rule)
         session.commit()
     typer.echo(f"Deleted rule for {sender}")
+
+
+@labels_app.command("rename")
+def labels_rename(old: str, new: str, account: AccountOpt = None) -> None:
+    """Rename label OLD to NEW in Gmail (emails keep it) and in the DB. Update
+    categories.yaml to NEW as well, and run this before the next triage pass, or that pass
+    creates NEW as a separate, empty label."""
+    s = _settings()
+    if new not in load_categories(s.categories_file).all_labels():
+        typer.echo(f"warning: {new!r} is not a label in {s.categories_file}", err=True)
+    sessions = make_session_factory(s.database_url)
+    failed = False
+    for acc in _accounts(s, account):
+        # One account failing (refusal, missing token, Gmail error) doesn't stop the others.
+        try:
+            gmail = gmail_mod.Gmail(gmail_mod.load_credentials(s.google_tokens_dir, acc.email))
+            with sessions() as session:
+                outcome = labels.rename(gmail, session, acc.email, old, new)
+        except ValueError as exc:
+            failed = True
+            typer.echo(f"{acc.email}: refused: {exc}", err=True)
+            continue
+        except Exception as exc:
+            failed = True
+            log.exception("label rename failed", extra={"account": acc.email})
+            typer.echo(f"{acc.email}: failed: {exc}", err=True)
+            continue
+        typer.echo(f"{acc.email}: {old} -> {new}: {outcome}")
+    if failed:
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

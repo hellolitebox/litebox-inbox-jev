@@ -44,7 +44,7 @@ def test_low_confidence_keeps_in_inbox_with_review_label(cfg, account):
     d = decide(cfg, account, make_signals(), make_classification("marketing", 0.85))
     assert d.low_confidence
     assert not (d.archive or d.spam or d.unsubscribe)
-    assert d.add_labels[:2] == ["Jev/Revisar", "Jev/Marketing"]
+    assert d.add_labels[:2] == ["Jev/Review", "Jev/Marketing"]
 
 
 def test_asymmetric_thresholds(cfg, account):
@@ -66,20 +66,20 @@ def test_important_never_low_confidence(cfg, account):
 
 def test_unknown_category_goes_to_review(cfg, account):
     d = decide(cfg, account, make_signals(), make_classification("deleted_category", 0.99))
-    assert d.low_confidence and d.add_labels == ["Jev/Revisar"]
+    assert d.low_confidence and d.add_labels == ["Jev/Review"]
 
 
 def test_unknown_category_still_flags_needs_reply(cfg, account):
     c = make_classification("deleted_category", 0.99, needs_reply=0.95)
     d = decide(cfg, account, make_signals(), c)
     assert d.low_confidence and not (d.archive or d.spam)
-    assert d.add_labels == ["Jev/Revisar", "Jev/Responder"]
+    assert d.add_labels == ["Jev/Review", "Jev/Needs Reply"]
 
 
 def test_needs_reply_and_tags(cfg, account):
     c = make_classification("important", 0.9, needs_reply=0.8, tags={"invoice_to_pay": 0.9})
     d = decide(cfg, account, make_signals(), c)
-    assert "Jev/Responder" in d.add_labels and "Jev/Facturas" in d.add_labels
+    assert "Jev/Needs Reply" in d.add_labels and "Jev/Invoices" in d.add_labels
 
 
 def test_plan_by_mode(cfg, account):
@@ -87,7 +87,7 @@ def test_plan_by_mode(cfg, account):
     dry = plan(cfg, d, Mode.DRY_RUN)
     assert dry.add_labels == [] and not dry.unsubscribe
     lbl = plan(cfg, d, Mode.LABEL)
-    assert lbl.add_labels == ["Jev/Marketing", "Jev/Procesado"] and lbl.remove_labels == []
+    assert lbl.add_labels == ["Jev/Marketing", "Jev/Processed"] and lbl.remove_labels == []
     act = plan(cfg, d, Mode.ACT)
     assert act.remove_labels == ["INBOX"] and act.archived and act.unsubscribe
 
@@ -105,7 +105,7 @@ def test_rule_keys():
 def test_needs_reply_only_for_kept_emails(cfg, account):
     c = make_classification("spam", 0.95, needs_reply=0.95)
     d = decide(cfg, account, make_signals(), c)
-    assert "Jev/Responder" not in d.add_labels
+    assert "Jev/Needs Reply" not in d.add_labels
 
 
 def test_needs_reply_skipped_for_downgraded_marketing(cfg, account):
@@ -113,7 +113,7 @@ def test_needs_reply_skipped_for_downgraded_marketing(cfg, account):
     c = make_classification("marketing", 0.95, needs_reply=0.95)
     d = decide(cfg, account, make_signals(dmarc_pass=False), c)
     assert d.downgraded_to_spam and d.spam
-    assert "Jev/Responder" not in d.add_labels
+    assert "Jev/Needs Reply" not in d.add_labels
 
 
 @pytest.mark.parametrize("category", ["spam", "newsletter"])
@@ -122,4 +122,4 @@ def test_needs_reply_flagged_for_low_confidence(cfg, account, category):
     c = make_classification(category, 0.5, needs_reply=0.95)
     d = decide(cfg, account, make_signals(), c)
     assert d.low_confidence and not (d.archive or d.spam)
-    assert "Jev/Responder" in d.add_labels
+    assert "Jev/Needs Reply" in d.add_labels

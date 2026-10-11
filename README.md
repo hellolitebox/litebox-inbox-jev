@@ -3,10 +3,10 @@
 Triage your Gmail inbox with [TypeSafe Jev](https://typesafe.ai). Every few minutes it reads
 new inbox emails, asks Jev which category they belong to (with a calibrated confidence), and:
 
-- **labels** them (`Jev/Importante`, `Jev/Transaccional`, `Jev/Marketing`, …),
+- **labels** them (`Jev/Important`, `Jev/Transactional`, `Jev/Marketing`, …),
 - **archives** receipts, tool notifications and newsletters,
 - **unsubscribes** from marketing (RFC 8058 one-click or `mailto:`) and **moves spam to Spam**,
-- leaves anything it is **not sure about** in the inbox with `Jev/Revisar`,
+- leaves anything it is **not sure about** in the inbox with `Jev/Review`,
 - **learns** from your corrections (change a label or move an email back → sender rule),
 - sends a **daily Slack digest** of what it did.
 
@@ -49,6 +49,17 @@ next run and Jev starts choosing it.
   min_confidence: 0.8
 ```
 
+### Renaming a label
+
+Changing a `label:` in `categories.yaml` alone makes the next run create a new, empty label and
+leaves the old one on past emails. To rename instead, stop the triage timer, update
+`categories.yaml`, then run `inbox-jev labels rename "Jev/Old" "Jev/New"` for each label before
+the next pass. Gmail keeps the label id, so emails keep it, and the DB history is rewritten so
+`restore` and the digest still match. It is safe to re-run. If a triage pass already created
+NEW as an empty label, it is deleted and OLD is renamed onto it; if NEW already has emails, the
+command refuses. It also refuses labels with children (`Jev/Old/...`): the API renames only that
+label, not its sublabels, so rename the children first (or use the Gmail web UI).
+
 ## Setup
 
 ### 1. Credentials
@@ -86,6 +97,7 @@ uv run inbox-jev digest --dry-print
 | `inbox-jev rules list [--all]` / `rules set -a EMAIL @domain.com newsletter` / `rules delete` | Sender rules |
 | `inbox-jev unsubscribe-retry` | Retry failed unsubscribes |
 | `inbox-jev stats [--days 7]` | Counts per category |
+| `inbox-jev labels rename OLD NEW [-a EMAIL]` | Rename a label in Gmail and the DB (see below) |
 
 ## Deploy (Docker + systemd timers)
 

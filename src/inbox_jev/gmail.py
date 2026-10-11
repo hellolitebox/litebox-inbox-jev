@@ -135,6 +135,7 @@ class Gmail:
     def __init__(self, creds: Credentials):
         self._svc = build("gmail", "v1", credentials=creds, cache_discovery=False).users()
         self._label_ids: dict[str, str] | None = None
+        self._user_labels: set[str] = set()
 
     def list_inbox_ids(self, lookback: str, limit: int) -> list[str]:
         ids: list[str] = []
@@ -188,7 +189,24 @@ class Gmail:
         if self._label_ids is None:
             resp = self._svc.labels().list(userId="me").execute()
             self._label_ids = {lbl["name"]: lbl["id"] for lbl in resp.get("labels", [])}
+            self._user_labels = {
+                lbl["name"] for lbl in resp.get("labels", []) if lbl.get("type") == "user"
+            }
         return self._label_ids
+
+    def user_labels(self) -> set[str]:
+        """Names of user-created labels (system labels like INBOX can't be renamed)."""
+        self.labels()
+        return self._user_labels
+
+    def label_message_count(self, label_id: str) -> int:
+        resp = self._svc.labels().get(userId="me", id=label_id).execute()
+        return int(resp.get("messagesTotal", 0))
+
+    def delete_label(self, label_id: str) -> None:
+        self._svc.labels().delete(userId="me", id=label_id).execute()
+        self._label_ids = None
+        log.info("deleted label", extra={"label_id": label_id})
 
     def ensure_labels(self, names: list[str]) -> dict[str, str]:
         existing = self.labels()
@@ -207,8 +225,15 @@ class Gmail:
                     .execute()
                 )
                 existing[name] = created["id"]
+                self._user_labels.add(name)
                 log.info("created label", extra={"label": name})
         return existing
+
+    def rename_label(self, label_id: str, new_name: str) -> None:
+        """Rename keeps the label id, so emails that have it keep it."""
+        self._svc.labels().patch(userId="me", id=label_id, body={"name": new_name}).execute()
+        self._label_ids = None
+        log.info("renamed label", extra={"label": new_name})
 
     def modify(self, message_id: str, add: list[str], remove: list[str]) -> None:
         if not add and not remove:
