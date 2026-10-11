@@ -4,8 +4,10 @@ See [README.md](README.md) for what the tool does and how it is configured.
 
 ## Development workflow (mandatory for every change)
 
-`main` is production: the VPS deploys from it, and the org ruleset only accepts changes through
-pull requests. Every change, however small, follows this loop:
+`main` is production: the VPS deploys from it. The repo ruleset "main: PR + CI" only accepts
+changes through squash-merged pull requests with green `test` and `secrets` checks and no
+unresolved review threads; it requires no approving review. Every change, however small,
+follows this loop:
 
 1. **Branch** off `main`: `feat/…`, `fix/…`, `chore/…`.
 2. **Implement** with tests. Before pushing, run `ruff format`, `ruff check` and `pytest` and
@@ -21,12 +23,11 @@ pull requests. Every change, however small, follows this loop:
      user instead of looping further.
 5. **Merge to production**, only after the final push, with all of these true:
    - QA's latest verdict is `APPROVED` for the current head commit.
-   - CI is green: `gh pr checks <n>` exits 0 when run right before merging. The ruleset doesn't
-     require status checks yet, so CI is enforced only by this process. Adding `test` and
-     `secrets` as required status checks on the `main` ruleset is recommended.
+   - CI is green (`gh pr checks <n>`). The ruleset also enforces this.
    - No unresolved review threads (CodeRabbit or human). `dev-fixer` addresses or replies to
-     them. Check this yourself: `--admin` bypasses the ruleset's thread-resolution rule.
-   - Then the orchestrating session merges (see "Merge and approval" below).
+     them; the ruleset also enforces this.
+   - Then the orchestrating session runs `gh pr merge <n> --squash --delete-branch`. The user
+     authorized this as the standing merge path; no human approval is needed.
 6. **Deploy** (once the VPS is set up): `cd /opt/inbox-jev && git pull && docker compose build`.
    The systemd timers pick up the new image on their next run.
 
@@ -34,12 +35,9 @@ Never merge with failing CI, an unresolved review thread or a QA verdict other t
 Subagents (`qa-reviewer`, `dev-fixer`) never merge, approve or use `--admin`.
 
 ### Merge and approval
-The `hellolitebox` org ruleset requires 1 approving review on every PR. The PR author can't
-approve their own PR, so the QA subagent can't satisfy that rule. The user has authorized an
-admin bypass as the standing path: once the conditions in step 5 hold, the orchestrating session
-runs `gh pr merge <n> --squash --delete-branch --admin`. A teammate approval is not required.
-If a teammate approval is used instead, request it only after the final push and QA APPROVED.
-The ruleset dismisses stale approvals on push, so any later push means asking again.
+`inbox-jev` is excluded from the `hellolitebox` org ruleset "AI review gate" (which requires a
+human approval); the repo ruleset above replaces it. Never use `--admin`, and never weaken or
+bypass the ruleset. If a check fails, fix it through the loop.
 
 ### Secret scanning
 CI runs gitleaks over the full history. If it flags a real secret, **rotate it first**, then add
