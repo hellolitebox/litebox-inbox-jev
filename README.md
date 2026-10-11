@@ -92,7 +92,18 @@ uv run inbox-jev digest --dry-print
 ```bash
 git clone <repo> /opt/inbox-jev && cd /opt/inbox-jev
 # copy .env, accounts.yaml, secrets/client_secret.json and secrets/tokens/*.json from your laptop
-mkdir -p data && sudo chown -R 1000:1000 data secrets   # the container runs as uid 1000
+# The container runs as APP_UID:APP_GID. Make sure .env sets both (see .env.example): an older
+# .env without them falls back to 1000:1000 and the app gets PermissionError on data/ and secrets/.
+# Pick ids no host user has. Read them from .env (no sourcing: other values may contain spaces):
+APP_UID=$(grep -E '^APP_UID=' .env | tail -n1 | cut -d= -f2- | cut -d'#' -f1 | tr -d "\"' \r\t")
+APP_GID=$(grep -E '^APP_GID=' .env | tail -n1 | cut -d= -f2- | cut -d'#' -f1 | tr -d "\"' \r\t")
+if ! echo "$APP_UID:$APP_GID" | grep -Eq '^[0-9]+:[0-9]+$'; then
+  echo "Set numeric APP_UID and APP_GID in .env first (see .env.example)"
+elif getent passwd "$APP_UID" >/dev/null; then
+  echo "uid $APP_UID belongs to a host user: pick another APP_UID in .env"
+else
+  mkdir -p data && sudo chown -R "$APP_UID:$APP_GID" data secrets && sudo chmod 700 data secrets
+fi
 docker compose build
 docker compose run --rm app run --mode dry_run --limit 20   # smoke test
 sudo cp deploy/systemd/* /etc/systemd/system/

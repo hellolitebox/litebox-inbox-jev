@@ -8,6 +8,9 @@ services:
   app:
     build: .
     image: inbox-jev:latest
+    # Pick a uid/gid no host user owns: whoever has that uid on the host can read data/ and
+    # secrets/ (Gmail tokens). Set APP_UID/APP_GID in .env.
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
     env_file: .env
     environment:
       DATABASE_URL: ${DATABASE_URL:-sqlite:////app/data/inbox-jev.db}
