@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .classifier import Classification
-from .config import CategoriesConfig
+from .config import Action, CategoriesConfig
 from .db import SenderRule
 from .policy import Decision, rule_keys
 
@@ -43,17 +43,40 @@ def record_auto(
     classification: Classification,
     decision: Decision,
 ) -> None:
-    """Count consistent high-confidence answers; activate after cfg.auto_rule.hits."""
-    # Unverified marketing never earns a rule: a rule skips the DMARC/List-Unsubscribe check.
-    if (
-        decision.low_confidence
-        or decision.downgraded_to_spam
-        or classification.confidence < cfg.auto_rule.min_confidence
-    ):
-        return
+    """Count consistent high-confidence answers; activate after cfg.auto_rule.hits.
+
+    Only touches automatic rules: manual and correction rules are never changed here.
+    """
+    is_keep = _is_keep(cfg, decision.category)
+    other_keep = sum(
+        p
+        for key, p in classification.probabilities.items()
+        if key != decision.category and _is_keep(cfg, key)
+    )
+    keep_signal = other_keep >= cfg.auto_rule.max_keep_probability
     rule = session.scalar(
         select(SenderRule).where(SenderRule.account == account, SenderRule.sender_key == sender)
     )
+    # The sender sends mail that may need to stay in the inbox (e.g. a "payment failed" from a
+    # notifications address): restart a pending rule that would archive it.
+    if (
+        (is_keep or keep_signal)
+        and rule is not None
+        and rule.source == "auto"
+        and not rule.active
+        and not _is_keep(cfg, rule.category)
+    ):
+        rule.hits = 0
+    # Unverified marketing never earns a rule: a rule skips the DMARC/List-Unsubscribe check.
+    # A group archive never does either: the top category alone was below its threshold.
+    if (
+        decision.low_confidence
+        or decision.downgraded_to_spam
+        or decision.archive_group
+        or keep_signal
+        or classification.confidence < cfg.auto_rule.min_confidence
+    ):
+        return
     if rule is None:
         session.add(
             SenderRule(
@@ -73,3 +96,7 @@ def record_auto(
         rule.active = rule.hits >= cfg.auto_rule.hits
     else:
         rule.category, rule.hits = decision.category, 1
+
+
+def _is_keep(cfg: CategoriesConfig, key: str) -> bool:
+    return key in cfg.by_key and cfg.by_key[key].action == Action.KEEP

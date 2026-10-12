@@ -82,6 +82,9 @@ class NeedsReply(BaseModel):
 class AutoRule(BaseModel):
     hits: int = 3
     min_confidence: float = 0.95
+    # An answer only counts when the keep categories (other than the decided one) add up to less
+    # than this: senders that mix routine and action-needed mail never earn an archive rule.
+    max_keep_probability: float = Field(default=0.02, ge=0.0, le=1.0)
 
 
 class CategoriesConfig(BaseModel):
@@ -91,6 +94,9 @@ class CategoriesConfig(BaseModel):
     review_label: str = "Jev/Review"
     processed_label: str = "Jev/Processed"
     auto_rule: AutoRule = Field(default_factory=AutoRule)
+    # Archive when the archive categories' probabilities add up to this, even if the top one
+    # alone is below its min_confidence. None disables it.
+    archive_group_min_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
 
     @model_validator(mode="after")
     def _validate(self) -> CategoriesConfig:

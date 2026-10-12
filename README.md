@@ -16,15 +16,35 @@ Everything is recorded in a database (SQLite by default) so it can be audited an
 
 1. **Allowlist** (`accounts.yaml`): matching senders/domains are always *important*, never touched.
 2. **Sender rules**: learned from your corrections, set manually (`inbox-jev rules set`), or
-   created automatically after 3 consistent high-confidence answers. They skip Jev.
+   created automatically after 3 consistent high-confidence answers. They skip Jev. An answer
+   doesn't count toward an automatic rule when it was a group archive (see below) or when the
+   keep categories (`important`, `action_required`) together get `auto_rule.max_keep_probability`
+   (0.02) or more, and a keep answer restarts a pending archive rule, so senders that mix routine
+   and action-needed mail (for example `noreply@github.com`) keep going through Jev.
 3. **Jev**: one `Choice` over the categories in [`categories.yaml`](categories.yaml), one `Noul`
-   for "needs a reply", plus one `Noul` per tag.
+   for "needs a reply", plus one `Noul` per tag. Jev also gets `previous_contact`: whether you
+   ever sent an email to the sender (`wrote_to_sender`), to someone else at their domain
+   (`wrote_to_their_domain`, skipped for free mail providers and your own domain) or `never`.
+   It comes from one or two Gmail searches over your sent mail, cached per run, and is the
+   strongest hint that a personal-looking email is cold outreach.
 4. **Safety checks**:
    - *marketing* without `dmarc=pass` or without a `List-Unsubscribe` header keeps its category
      and label and is archived, but never unsubscribed (unsubscribing from an unverified sender
      only confirms your address) and never moved to Spam. The `downgraded_to_spam` column keeps
      its historical name and now means "unsubscribe skipped: unverified sender".
-   - Below a category's `min_confidence` nothing destructive happens.
+   - Below a category's `min_confidence` nothing destructive happens, with one exception:
+     when Jev's top answer is an archive category and all archive categories together reach
+     `archive_group_min_confidence` (0.90 by default), the email is archived under the top
+     category. Jev is sure it goes away, just not which label fits (for example notification
+     0.55 / newsletter 0.42). This never unsubscribes or moves to Spam, and it can only add
+     confidence, never lower the bar: the floor is at least the top category's own threshold
+     (including an account-level `min_confidence`); a category whose account-level
+     `min_confidence` is above that floor doesn't count toward the sum; with `act_categories`,
+     only the archive categories listed there count; and an email Jev thinks expects a reply
+     (`needs_reply` at or above its threshold) stays in Review with `Jev/Needs Reply`.
+   - Categories with `action: keep` other than `important` (by default `action_required`:
+     automated emails that need you to approve, pay, verify or fix something) stay in the inbox
+     and get their own section in the digest.
    - Unsubscribe URLs must be public `https` hosts (no redirects, no private IPs).
    - Each list is unsubscribed from at most once, and each run has a cap.
 

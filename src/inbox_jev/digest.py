@@ -9,7 +9,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .config import CategoriesConfig
+from .config import Action, CategoriesConfig
 from .db import Message, Run, Unsubscribe, now
 
 MAX_ITEMS = 15
@@ -53,7 +53,19 @@ def build(session: Session, cfg: CategoriesConfig, account: str, hours: int = 24
     low = [m for m in done if m.low_confidence]
     out.append(f"{len(done)} procesados — {summary or 'nada'} · a revisar: {len(low)}")
 
-    reply = [m for m in done if _needs_reply(cfg, m)]
+    # Categories that stay in the inbox on purpose (besides "important") get their own section,
+    # e.g. automated emails that need an action. Emails listed there aren't repeated below.
+    listed: set[int] = set()
+    for cat in cfg.categories:
+        if cat.action != Action.KEEP or cat.key == "important":
+            continue
+        kept = [m for m in done if m.category == cat.key and not m.low_confidence]
+        if kept:
+            out.append(f"\n*🔔 {cat.label} ({len(kept)})*")
+            out += [_line(account, m) for m in kept[:MAX_ITEMS]]
+            listed.update(id(m) for m in kept)
+
+    reply = [m for m in done if _needs_reply(cfg, m) and id(m) not in listed]
     if reply:
         out.append(f"\n*⚡ Piden respuesta ({len(reply)})*")
         out += [_line(account, m) for m in reply[:MAX_ITEMS]]

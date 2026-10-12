@@ -156,3 +156,95 @@ def test_cold_outreach_is_archived_not_spammed(cfg, account):
     assert act.remove_labels == ["INBOX"] and "SPAM" not in act.add_labels
     low = decide(cfg, account, make_signals(), make_classification("cold_outreach", 0.75))
     assert low.low_confidence and not low.archive
+
+
+def probs(category, confidence, **others):
+    c = make_classification(category, confidence)
+    c.probabilities = {category: confidence, **others}
+    return c
+
+
+def test_archive_group_archives_when_unsure_which_archive_label(cfg, account):
+    d = decide(cfg, account, make_signals(), probs("notification", 0.55, newsletter=0.42))
+    assert d.archive and d.archive_group and not d.low_confidence
+    assert d.category == "notification" and d.add_labels == ["Jev/Notifications"]
+    assert plan(cfg, d, Mode.ACT).archived
+
+
+def test_archive_group_never_unsubscribes(cfg, account):
+    d = decide(cfg, account, make_signals(), probs("marketing", 0.6, newsletter=0.35))
+    assert d.archive and d.archive_group and not d.unsubscribe
+    assert not plan(cfg, d, Mode.ACT).unsubscribe
+
+
+@pytest.mark.parametrize(
+    "classification",
+    [
+        probs("notification", 0.6, important=0.35),  # might be personal
+        probs("notification", 0.5, action_required=0.45),  # keep category not in the group
+        probs("newsletter", 0.5, marketing=0.35, spam=0.15),  # spam not in the group
+        probs("spam", 0.5, cold_outreach=0.45),  # top answer must be an archive category
+    ],
+)
+def test_archive_group_stays_in_review_otherwise(cfg, account, classification):
+    d = decide(cfg, account, make_signals(), classification)
+    assert d.low_confidence and not (d.archive or d.spam or d.archive_group)
+    assert "Jev/Review" in d.add_labels
+
+
+def test_archive_group_disabled(cfg, account):
+    cfg = cfg.model_copy(update={"archive_group_min_confidence": None})
+    d = decide(cfg, account, make_signals(), probs("notification", 0.55, newsletter=0.45))
+    assert d.low_confidence and not d.archive
+
+
+def test_archive_group_respects_stricter_account_threshold(cfg, account):
+    account.min_confidence = {"notification": 0.99}
+    d = decide(cfg, account, make_signals(), probs("notification", 0.55, newsletter=0.42))
+    assert d.low_confidence and not d.archive
+
+
+def test_action_required_stays_in_inbox(cfg, account):
+    d = decide(cfg, account, make_signals(), make_classification("action_required", 0.6))
+    assert not (d.low_confidence or d.archive or d.spam)
+    assert d.add_labels == ["Jev/Action"]
+
+
+def test_archive_group_floor_is_at_least_top_threshold(cfg, account):
+    cfg = cfg.model_copy(update={"archive_group_min_confidence": 0.5})
+    # 0.75 is above the configured 0.5 but below cold_outreach's own 0.80.
+    d = decide(cfg, account, make_signals(), probs("cold_outreach", 0.55, newsletter=0.20))
+    assert d.low_confidence and not d.archive
+    d = decide(cfg, account, make_signals(), probs("cold_outreach", 0.55, important=0.45))
+    assert d.low_confidence and not d.archive
+    d = decide(cfg, account, make_signals(), probs("cold_outreach", 0.55, newsletter=0.40))
+    assert d.archive and d.archive_group  # 0.95 >= max(0.5, 0.80)
+
+
+def test_archive_group_only_counts_act_categories(cfg, account):
+    account.act_categories = ["notification"]
+    d = decide(cfg, account, make_signals(), probs("notification", 0.50, marketing=0.45))
+    assert d.low_confidence and not d.archive
+    account.act_categories = ["notification", "newsletter"]
+    d = decide(cfg, account, make_signals(), probs("notification", 0.50, newsletter=0.45))
+    assert d.archive and d.archive_group
+
+
+def test_archive_group_top_category_outside_act_categories(cfg, account):
+    account.act_categories = ["newsletter"]
+    d = decide(cfg, account, make_signals(), probs("notification", 0.50, newsletter=0.45))
+    assert d.low_confidence and not d.archive
+
+
+def test_archive_group_skips_member_with_stricter_account_threshold(cfg, account):
+    account.min_confidence = {"marketing": 0.99}
+    d = decide(cfg, account, make_signals(), probs("newsletter", 0.50, marketing=0.45))
+    assert d.low_confidence and not d.archive
+
+
+def test_archive_group_vetoed_by_needs_reply(cfg, account):
+    c = probs("cold_outreach", 0.50, transactional=0.42, important=0.08)
+    c.needs_reply = 0.95
+    d = decide(cfg, account, make_signals(), c)
+    assert d.low_confidence and not d.archive and not d.archive_group
+    assert {"Jev/Review", "Jev/Needs Reply"} <= set(d.add_labels)

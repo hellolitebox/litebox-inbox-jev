@@ -77,3 +77,74 @@ def test_domain_rule_and_correction_override(cfg, session):
     rules.set_rule(session, "me@acme.com", "x@sub.com", "important", source="correction")
     session.commit()
     assert rules.lookup(session, "me@acme.com", "x@sub.com").category == "important"
+
+
+def auto_rule(session):
+    from sqlalchemy import select
+
+    from inbox_jev.db import SenderRule
+
+    return session.scalar(select(SenderRule).where(SenderRule.sender_key == "n@sub.com"))
+
+
+def test_group_archive_does_not_count(cfg, session):
+    c = make_classification("notification", 0.96)
+    d = Decision(category="notification", confidence=0.96, source="jev", archive_group=True)
+    for _ in range(5):
+        rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", c, d)
+    session.commit()
+    assert auto_rule(session) is None
+
+
+@pytest.mark.parametrize("keep", ["important", "action_required"])
+def test_keep_probability_blocks_auto_rule(cfg, session, keep):
+    c = make_classification("notification", 0.97)
+    c.probabilities = {"notification": 0.97, keep: 0.03}
+    d = Decision(category="notification", confidence=0.97, source="jev")
+    for _ in range(5):
+        rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", c, d)
+    session.commit()
+    assert auto_rule(session) is None
+
+
+def test_keep_answer_restarts_pending_archive_rule(cfg, session):
+    note = make_classification("notification", 0.97)
+    d = Decision(category="notification", confidence=0.97, source="jev")
+    for _ in range(cfg.auto_rule.hits - 1):
+        rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", note, d)
+    # "Your token expires tomorrow": a keep answer below the auto-rule confidence.
+    act = make_classification("action_required", 0.8)
+    act_d = Decision(category="action_required", confidence=0.8, source="jev")
+    rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", act, act_d)
+    rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", note, d)
+    session.commit()
+    rule = auto_rule(session)
+    assert not rule.active and rule.hits == 1
+    assert rules.lookup(session, "me@acme.com", "n@sub.com") is None
+
+
+def test_keep_signal_restarts_pending_rule_even_when_low_confidence(cfg, session):
+    note = make_classification("notification", 0.97)
+    d = Decision(category="notification", confidence=0.97, source="jev")
+    for _ in range(cfg.auto_rule.hits - 1):
+        rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", note, d)
+    unsure = make_classification("notification", 0.6)
+    unsure.probabilities = {"notification": 0.6, "action_required": 0.4}
+    low = Decision(category="notification", confidence=0.6, source="jev", low_confidence=True)
+    rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", unsure, low)
+    session.commit()
+    assert auto_rule(session).hits == 0
+
+
+def test_keep_answer_leaves_manual_and_correction_rules_alone(cfg, session):
+    rules.set_rule(session, "me@acme.com", "n@sub.com", "notification", source="manual")
+    session.commit()
+    rule = auto_rule(session)
+    rule.active = False  # even an inactive manual rule is never touched
+    rule.hits = 2
+    act = make_classification("action_required", 0.97)
+    act_d = Decision(category="action_required", confidence=0.97, source="jev")
+    rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", act, act_d)
+    session.commit()
+    rule = auto_rule(session)
+    assert (rule.source, rule.category, rule.hits) == ("manual", "notification", 2)

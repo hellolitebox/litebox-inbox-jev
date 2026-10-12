@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -20,6 +21,24 @@ from .policy import decide, plan
 log = logging.getLogger(__name__)
 
 MAX_UNSUB_ATTEMPTS = 3
+SAFE_ADDRESS = re.compile(r"^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$")
+FREE_MAIL = frozenset(
+    {
+        "gmail.com",
+        "googlemail.com",
+        "outlook.com",
+        "hotmail.com",
+        "live.com",
+        "msn.com",
+        "yahoo.com",
+        "icloud.com",
+        "me.com",
+        "aol.com",
+        "proton.me",
+        "protonmail.com",
+        "gmx.com",
+    }
+)
 
 
 @dataclass
@@ -174,10 +193,11 @@ def process(
         return prev
     rule = rules.lookup(session, account.email, sig.sender)
 
-    classification = None
+    classification, contact = None, None
     if not account.is_allowed(sig.sender) and rule is None:
+        contact = previous_contact(gmail, account.email, sig.sender)
         classification = ctx.classifier.classify(
-            build_state(email, account.email, ctx.settings.body_chars)
+            build_state(email, account.email, ctx.settings.body_chars, contact)
         )
     decision = decide(ctx.cfg, account, sig, classification, rule.category if rule else None)
     actions = plan(ctx.cfg, decision, mode, account.act_categories)
@@ -229,6 +249,8 @@ def process(
             "confidence": round(decision.confidence, 3),
             "source": decision.source,
             "low_confidence": decision.low_confidence,
+            "archive_group": decision.archive_group,
+            "previous_contact": contact,
             "labels": actions.add_labels,
             "archived": actions.archived,
             "spammed": actions.spammed,
@@ -236,6 +258,28 @@ def process(
         },
     )
     return msg
+
+
+def previous_contact(gmail: Gmail, account: str, sender: str) -> str | None:
+    """wrote_to_sender | wrote_to_their_domain | never, or None if it can't be checked.
+
+    The domain check is skipped for free mail providers (a gmail.com sender says nothing about
+    who else I wrote to) and for my own domain (colleagues are allowlisted, if at all).
+    """
+    sender = sender.lower()
+    if not SAFE_ADDRESS.match(sender):
+        return None  # odd characters would change the Gmail search query
+    domain = sender.rsplit("@", 1)[-1]
+    try:
+        if gmail.has_written_to(sender):
+            return "wrote_to_sender"
+        own = account.lower().rsplit("@", 1)[-1]
+        if domain not in FREE_MAIL and domain != own and gmail.has_written_to(domain):
+            return "wrote_to_their_domain"
+    except Exception:
+        log.warning("previous contact check failed", extra={"account": account}, exc_info=True)
+        return None
+    return "never"
 
 
 def _user_touched(

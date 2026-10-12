@@ -136,6 +136,7 @@ class Gmail:
         self._svc = build("gmail", "v1", credentials=creds, cache_discovery=False).users()
         self._label_ids: dict[str, str] | None = None
         self._user_labels: set[str] = set()
+        self._written: dict[str, bool] = {}
 
     def list_inbox_ids(self, lookback: str, limit: int) -> list[str]:
         ids: list[str] = []
@@ -183,6 +184,17 @@ class Gmail:
                 return None
             raise
         return msg.get("labelIds", [])
+
+    def has_written_to(self, query: str) -> bool:
+        """Whether any sent email matches `to:<query>` (an address or a domain). Cached."""
+        if query not in self._written:
+            resp = (
+                self._svc.messages()
+                .list(userId="me", q=f"in:sent to:{query}", maxResults=1)
+                .execute()
+            )
+            self._written[query] = bool(resp.get("messages"))
+        return self._written[query]
 
     def labels(self) -> dict[str, str]:
         """Label name -> id (user and system labels)."""

@@ -8,6 +8,8 @@ from .classifier import Classification
 from .config import Account, Action, CategoriesConfig, Mode
 from .signals import Signals
 
+ARCHIVE_ACTIONS = (Action.ARCHIVE, Action.ARCHIVE_UNSUBSCRIBE)
+
 
 @dataclass
 class Decision:
@@ -22,6 +24,8 @@ class Decision:
     archive: bool = False
     spam: bool = False
     unsubscribe: bool = False
+    # Archived because the archive categories together were confident, not the top one alone.
+    archive_group: bool = False
 
 
 @dataclass
@@ -66,15 +70,56 @@ def decide(
     decision.downgraded_to_spam = unverified
 
     threshold = account.min_confidence.get(category, cfg.by_key[category].min_confidence)
-    if decision.confidence < threshold:
-        decision.low_confidence = True
-        decision.add_labels += [cfg.review_label, cfg.by_key[category].label]
-    else:
+    if decision.confidence >= threshold:
         _apply(cfg, decision)
         if unverified:
             decision.unsubscribe = False
+    elif _archive_group_confident(cfg, account, classification, threshold):
+        # Jev is sure the email gets archived, just not which archive category fits best
+        # (e.g. notification 0.55 / newsletter 0.45). Archive it under the top category, but
+        # never unsubscribe: that still needs the category's own confidence.
+        _apply(cfg, decision)
+        decision.unsubscribe = False
+        decision.archive_group = True
+    else:
+        decision.low_confidence = True
+        decision.add_labels += [cfg.review_label, cfg.by_key[category].label]
 
     return _add_flags(cfg, classification, decision)
+
+
+def _archive_group_confident(
+    cfg: CategoriesConfig, account: Account, classification: Classification, threshold: float
+) -> bool:
+    """True when the archive categories together reach `archive_group_min_confidence`.
+
+    Only applies when Jev's top answer is itself an archive category. Spam is never part of the
+    group: moving to Spam always needs the spam category's own confidence. The group can only add
+    confidence, never lower the bar:
+    - the floor is at least the top category's own threshold (`threshold`, which already
+      includes an account-level min_confidence), so a stricter setting is never bypassed;
+    - a member whose account-level min_confidence is above the floor doesn't count;
+    - with `act_categories`, only categories the account acts on count;
+    - an email Jev thinks expects a reply (needs_reply >= threshold) stays in Review.
+    """
+    floor = cfg.archive_group_min_confidence
+    top = classification.category
+    if floor is None or cfg.by_key[top].action not in ARCHIVE_ACTIONS:
+        return False
+    if classification.needs_reply >= cfg.needs_reply.threshold:
+        return False
+    floor = max(floor, threshold)
+    acts = account.act_categories
+
+    def counts(key: str) -> bool:
+        if key not in cfg.by_key or cfg.by_key[key].action not in ARCHIVE_ACTIONS:
+            return False
+        if acts is not None and key not in acts:
+            return False
+        return key == top or account.min_confidence.get(key, 0.0) <= floor
+
+    total = sum(p for key, p in classification.probabilities.items() if counts(key))
+    return total >= floor
 
 
 def _add_flags(
@@ -95,7 +140,7 @@ def _add_flags(
 def _apply(cfg: CategoriesConfig, decision: Decision) -> Decision:
     category = cfg.by_key[decision.category]
     decision.add_labels.append(category.label)
-    decision.archive = category.action in (Action.ARCHIVE, Action.ARCHIVE_UNSUBSCRIBE)
+    decision.archive = category.action in ARCHIVE_ACTIONS
     decision.spam = category.action == Action.SPAM
     decision.unsubscribe = category.action == Action.ARCHIVE_UNSUBSCRIBE
     return decision

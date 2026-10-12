@@ -9,7 +9,8 @@
 #                        unsubscribed or spammed)
 #   spam                 move to Gmail Spam
 # min_confidence: below it, nothing destructive happens; the email stays in the inbox with the
-#   review label plus the suggested category label.
+#   review label plus the suggested category label (unless archive_group_min_confidence below
+#   applies).
 categories:
   - key: important
     label: Jev/Important
@@ -19,19 +20,31 @@ categories:
     action: keep
     min_confidence: 0.0
 
+  - key: action_required
+    label: Jev/Action
+    criteria: >-
+      Automated email from a service I use that needs me to do something: approve a payment or
+      request, update a payment method or expiring card, verify my account or domain, act on a
+      security alert, or fix or renew something before a deadline. Not receipts, reminders of
+      things already done, or FYI alerts.
+    action: keep
+    min_confidence: 0.0
+
   - key: transactional
     label: Jev/Transactional
     criteria: >-
-      Automated record of something I did or bought: receipts, invoices, payment or order
-      confirmations, bookings, shipping updates, password resets, verification codes.
+      Automated record of something I did or bought, with nothing left for me to do: receipts,
+      paid invoices, payment or order confirmations, bookings, shipping updates, password
+      resets, verification codes.
     action: archive
     min_confidence: 0.80
 
   - key: notification
     label: Jev/Notifications
     criteria: >-
-      Automated alerts from software tools I use: GitHub, Slack, Google Calendar/Drive/Docs,
-      Jira, Linear, Notion, monitoring, CI, security alerts.
+      Automated FYI alerts and digests from software tools I use: GitHub, Slack, Google
+      Calendar/Drive/Docs, Jira, Linear, Notion, analytics, monitoring, CI, policy or product
+      updates. Nothing for me to do.
     action: archive
     min_confidence: 0.80
 
@@ -56,7 +69,8 @@ categories:
     criteria: >-
       Unsolicited sales or partnership pitch from someone I have no relationship with, written
       to look personal: agencies, freelancers, lead-gen, recruiting or dev-shop offers, "quick
-      question" and follow-up sequences, event or sponsorship pitches, SEO/link-building offers.
+      question" and follow-up sequences, meeting or podcast invitations, event or sponsorship
+      pitches, SEO/link-building offers. Usually from someone I have never written to.
     action: archive
     min_confidence: 0.80
 
@@ -67,6 +81,11 @@ categories:
       impersonation, or bulk mail with forged or failing sender authentication.
     action: spam
     min_confidence: 0.90
+
+# Archive when the archive categories (archive and archive_unsubscribe actions) add up to this
+# probability, even if Jev's top category alone is below its min_confidence: it is sure the email
+# goes away, just not which label fits best. Never unsubscribes or spams. Remove to disable.
+archive_group_min_confidence: 0.90
 
 # Extra yes/no questions. Additive: a label is applied when probability >= threshold,
 # on top of the category. Remove the list or leave it empty to skip.
@@ -86,7 +105,10 @@ review_label: Jev/Review
 processed_label: Jev/Processed
 
 # A sender becomes an automatic rule (skips Jev) after this many consistent
-# classifications at or above this confidence.
+# classifications at or above this confidence. An answer doesn't count when the keep categories
+# (other than the decided one) add up to max_keep_probability or more, and a keep answer restarts
+# a pending archive rule: senders that mix routine and action-needed mail keep going through Jev.
 auto_rule:
   hits: 3
   min_confidence: 0.95
+  max_keep_probability: 0.02

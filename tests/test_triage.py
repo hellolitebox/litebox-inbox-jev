@@ -14,6 +14,7 @@ class FakeGmail:
         self.emails = {e.id: e for e in emails}
         self.modified = []
         self.sent = []
+        self.written_queries = []
         self._labels = {"INBOX": "INBOX", "SPAM": "SPAM"}
 
     def ensure_labels(self, names):
@@ -42,14 +43,22 @@ class FakeGmail:
     def send(self, to, subject, body):
         self.sent.append(to)
 
+    written = frozenset({"c@client.com"})
+
+    def has_written_to(self, query):
+        self.written_queries.append(query)
+        return query in self.written
+
 
 class FakeClassifier:
     def __init__(self, answers):
         self.answers = answers
         self.calls = 0
+        self.states = []
 
     def classify(self, state):
         self.calls += 1
+        self.states.append(state)
         return self.answers[state["subject"]]
 
     def close(self):
@@ -430,3 +439,70 @@ def test_mark_for_reprocess_skips_label_mode_and_error_rows(setup):
     triage.run_account(ctx, account, Mode.LABEL)
     with ctx.sessions() as s:
         assert triage.mark_for_reprocess(s, ctx.cfg, account.email, "marketing") == 0
+
+
+def test_previous_contact_is_sent_to_jev(setup):
+    ctx, gmail, account = setup
+    triage.run_account(ctx, account, Mode.LABEL)
+    contacts = {s["subject"]: s.get("previous_contact") for s in ctx._classifier.states}
+    assert contacts == {"Proposal": "wrote_to_sender", "50% off": "never", "Maybe promo": "never"}
+    assert "acme.com" not in gmail.written_queries  # allowlisted sender: no lookup at all
+
+
+class ContactGmail:
+    def __init__(self, written=(), fail=False):
+        self.written, self.fail, self.queries = set(written), fail, []
+
+    def has_written_to(self, query):
+        self.queries.append(query)
+        if self.fail:
+            raise RuntimeError("boom")
+        return query in self.written
+
+
+@pytest.mark.parametrize(
+    ("written", "sender", "expected", "queries"),
+    [
+        ({"a@corp.com"}, "A@Corp.com", "wrote_to_sender", ["a@corp.com"]),
+        ({"corp.com"}, "b@corp.com", "wrote_to_their_domain", ["b@corp.com", "corp.com"]),
+        ((), "b@corp.com", "never", ["b@corp.com", "corp.com"]),
+        ({"gmail.com"}, "x@gmail.com", "never", ["x@gmail.com"]),  # free mail: no domain check
+        ({"acme.com"}, "y@acme.com", "never", ["y@acme.com"]),  # my own domain
+        ((), "x@corp.com OR from:me", None, []),  # never builds a query from odd input
+    ],
+)
+def test_previous_contact(written, sender, expected, queries):
+    gmail = ContactGmail(written)
+    assert triage.previous_contact(gmail, "me@acme.com", sender) == expected
+    assert gmail.queries == queries
+
+
+def test_previous_contact_error_is_unknown():
+    assert triage.previous_contact(ContactGmail(fail=True), "me@acme.com", "a@b.com") is None
+
+
+def test_digest_lists_kept_action_category(setup):
+    ctx, gmail, account = setup
+    gmail.emails["5"] = email("5", "Bank <alerts@bank.com>", "Approve payment")
+    ctx._classifier.answers["Approve payment"] = make_classification("action_required", 0.7)
+    triage.run_account(ctx, account, Mode.ACT)
+    assert all(m[2] == [] for m in gmail.modified if m[0] == "5")  # stays in the inbox
+    with ctx.sessions() as s:
+        text = digest.build(s, ctx.cfg, account.email)
+    assert "Jev/Action (1)" in text and "Approve payment" in text
+
+
+def test_digest_does_not_repeat_kept_emails_in_needs_reply(setup):
+    ctx, gmail, account = setup
+    gmail.emails["5"] = email("5", "Bank <alerts@bank.com>", "Approve payment")
+    ctx._classifier.answers["Approve payment"] = make_classification(
+        "action_required", 0.7, needs_reply=0.9
+    )
+    gmail.emails["6"] = email("6", "Ana <ana@client.com>", "Can we meet?")
+    ctx._classifier.answers["Can we meet?"] = make_classification("important", 0.9, needs_reply=0.9)
+    triage.run_account(ctx, account, Mode.ACT)
+    with ctx.sessions() as s:
+        text = digest.build(s, ctx.cfg, account.email)
+    assert text.count("Approve payment") == 1
+    reply = text.split("Piden respuesta")[1]
+    assert "Can we meet?" in reply and "Approve payment" not in reply

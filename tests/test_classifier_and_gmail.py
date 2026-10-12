@@ -48,6 +48,8 @@ def test_build_state_truncates_body():
     assert len(state["body"]) == 100
     assert state["is_mailing_list"] is True
     assert state["subject"] == "Hi"
+    assert "previous_contact" not in state
+    assert build_state(email, "me@acme.com", 100, "never")["previous_contact"] == "never"
 
 
 def test_classifier_parses_api_response(cfg):

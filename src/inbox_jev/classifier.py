@@ -16,7 +16,11 @@ TAG_PREFIX = "tag_"
 
 CATEGORY_INSTRUCTIONS = (
     "Classify this email received in my work inbox into exactly one category. "
-    "Judge by who wrote it and why, not only by the topic."
+    "Judge by who wrote it and why, not only by the topic. "
+    "previous_contact says whether I have ever sent an email to this sender (wrote_to_sender), "
+    "to someone else at their company domain (wrote_to_their_domain) or never (never); it is "
+    "missing when unknown. A personal-looking pitch from a sender I never wrote to is usually "
+    "cold outreach, not important."
 )
 
 
@@ -30,9 +34,11 @@ class Classification:
     request_id: str | None = None
 
 
-def build_state(email: Email, account_email: str, body_chars: int) -> dict:
+def build_state(
+    email: Email, account_email: str, body_chars: int, previous_contact: str | None = None
+) -> dict:
     sig = email.signals
-    return {
+    state = {
         "recipient": account_email,
         "from": email.header("From"),
         "to": email.header("To"),
@@ -43,6 +49,9 @@ def build_state(email: Email, account_email: str, body_chars: int) -> dict:
         "precedence": email.header("Precedence") or None,
         "body": (email.body or email.snippet)[:body_chars],
     }
+    if previous_contact is not None:
+        state["previous_contact"] = previous_contact
+    return state
 
 
 def build_questions(cfg: CategoriesConfig) -> dict:
