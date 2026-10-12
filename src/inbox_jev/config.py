@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 from functools import cached_property
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Gmail `newer_than:` units: days, months, years.
+LOOKBACK_RE = re.compile(r"^\d+[dmy]$")
+
+
+def check_lookback(value: str) -> str:
+    if not LOOKBACK_RE.match(value):
+        raise ValueError(f"invalid lookback {value!r}: use a number plus d, m or y, e.g. 2d or 30d")
+    return value
 
 
 class Mode(StrEnum):
@@ -41,6 +51,11 @@ class Settings(BaseSettings):
     max_unsubscribes_per_run: int = 20
     body_chars: int = 3000
     log_level: str = "INFO"
+
+    @field_validator("lookback")
+    @classmethod
+    def _check_lookback(cls, value: str) -> str:
+        return check_lookback(value)
 
 
 class Category(BaseModel):
@@ -105,6 +120,19 @@ class Account(BaseModel):
     allow_domains: list[str] = Field(default_factory=list)
     allow_senders: list[str] = Field(default_factory=list)
     min_confidence: dict[str, float] = Field(default_factory=dict)
+    # In act mode, only these category keys get their action; the rest are labeled only.
+    # Absent = all categories act; [] = none do. An explicit empty key is rejected (fail closed).
+    act_categories: list[str] | None = None
+
+    @field_validator("act_categories", mode="before")
+    @classmethod
+    def _reject_null_act_categories(cls, value: object) -> object:
+        if value is None:
+            raise ValueError(
+                "act_categories is empty: use [] to act on nothing, or remove the key to act "
+                "on every category"
+            )
+        return value
 
     def is_allowed(self, sender: str) -> bool:
         sender = sender.lower()

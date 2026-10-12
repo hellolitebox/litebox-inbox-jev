@@ -63,17 +63,17 @@ def check(session: Session, gmail: Gmail, account: str, cfg: CategoriesConfig) -
             continue
         category = detect(msg, {names.get(i, i) for i in label_ids}, cfg)
         if category:
-            msg.corrected_category = category
-            rules.set_rule(session, account, msg.sender, category, source="correction")
+            record(session, account, msg, category)
             corrected += 1
-            log.info(
-                "correction learned",
-                extra={
-                    "account": account,
-                    "sender": msg.sender,
-                    "from": msg.category,
-                    "to": category,
-                },
-            )
     session.commit()
     return corrected
+
+
+def record(session: Session, account: str, msg: Message, category: str) -> None:
+    """Store a detected correction and turn it into a sender rule."""
+    msg.corrected_category = category
+    rules.set_rule(session, account, msg.sender, category, source="correction")
+    log.info(
+        "correction learned",
+        extra={"account": account, "sender": msg.sender, "from": msg.category, "to": category},
+    )

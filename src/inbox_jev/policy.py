@@ -101,7 +101,14 @@ def _apply(cfg: CategoriesConfig, decision: Decision) -> Decision:
     return decision
 
 
-def plan(cfg: CategoriesConfig, decision: Decision, mode: Mode) -> Plan:
+def plan(
+    cfg: CategoriesConfig,
+    decision: Decision,
+    mode: Mode,
+    act_categories: list[str] | None = None,
+) -> Plan:
+    if mode == Mode.ACT and act_categories is not None and decision.category not in act_categories:
+        mode = Mode.LABEL
     if mode == Mode.DRY_RUN:
         return Plan([], [], archived=False, spammed=False, unsubscribe=False)
     labels = list(dict.fromkeys([*decision.add_labels, cfg.processed_label]))

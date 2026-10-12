@@ -36,6 +36,30 @@ Everything is recorded in a database (SQLite by default) so it can be audited an
 
 Start with `dry_run` or `label` for a week or two. Switch to `act` when the labels look right.
 
+To roll out `act` gradually, set `act_categories` on the account in `accounts.yaml`, for example
+`[transactional, notification, newsletter]`. Only those categories are archived, spammed or
+unsubscribed, and the rest just get their labels. Emails still in the inbox that were seen in a
+weaker mode (`dry_run`, or `label` when running `act`) are processed once more when you switch, so
+they are covered too. Labels from the previous pass that no longer apply are removed. Widening
+`act_categories` later only affects new emails.
+
+- `act_categories` is matched against the final category, so listing `spam` also spams marketing
+  emails that were downgraded to spam for missing DMARC or `List-Unsubscribe`.
+- `act_categories: []` acts on nothing. Leaving the key empty (for example with every entry
+  commented out) is rejected; remove the key entirely to act on every category.
+- Emails you restored with `inbox-jev restore` are never processed again. If you changed a Jev
+  category label since the last pass, that is learned as a correction first. Otherwise, if you
+  removed one of Jev's labels (for example `Jev/Needs Reply`), added one Jev hadn't set (for
+  example `Jev/Needs Reply`, or a second category label), or starred the email, it is left alone:
+  not archived, relabeled or revisited. A starred email is left alone even after a correction.
+  Starring only counts for emails seen in an earlier pass; new starred emails are processed
+  normally.
+
+To clean up an existing inbox, run one pass with a longer window:
+`inbox-jev run --lookback 30d --limit 500`. `--lookback` takes Gmail `newer_than` values (`2d`,
+`3m`, `1y`). Every email reprocessed by that run counts as processed today, so that day's digest
+shows the whole backlog, including re-listed "needs reply" and low-confidence emails.
+
 ### Adding a category / label
 
 Add an entry to `categories.yaml`. No code changes are needed: the Gmail label is created on the
@@ -91,7 +115,7 @@ uv run inbox-jev digest --dry-print
 
 | Command | What it does |
 |---|---|
-| `inbox-jev run [-a EMAIL] [--mode M] [--limit N]` | One triage pass (what the timer runs) |
+| `inbox-jev run [-a EMAIL] [--mode M] [--limit N] [--lookback 30d]` | One triage pass (what the timer runs) |
 | `inbox-jev digest [-a EMAIL] [--hours 24] [--dry-print]` | Slack digest |
 | `inbox-jev restore -a EMAIL --since 1d [--category marketing]` | Undo: back to inbox, remove labels |
 | `inbox-jev rules list [--all]` / `rules set -a EMAIL @domain.com newsletter` / `rules delete` | Sender rules |

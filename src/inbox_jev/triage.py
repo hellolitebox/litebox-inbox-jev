@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from . import corrections, rules
@@ -46,9 +46,16 @@ def effective_mode(settings: Settings, account: Account, override: Mode | None) 
 
 
 def run_account(
-    ctx: Context, account: Account, mode_override: Mode | None = None, limit: int | None = None
+    ctx: Context,
+    account: Account,
+    mode_override: Mode | None = None,
+    limit: int | None = None,
+    lookback: str | None = None,
 ) -> Run:
     mode = effective_mode(ctx.settings, account, mode_override)
+    unknown = set(account.act_categories or []) - set(ctx.cfg.by_key)
+    if unknown:
+        raise ValueError(f"{account.email}: unknown act_categories {sorted(unknown)}")
     gmail = Gmail(load_credentials(ctx.settings.google_tokens_dir, account.email))
     label_ids = gmail.ensure_labels(ctx.cfg.all_labels()) if mode != Mode.DRY_RUN else {}
 
@@ -61,16 +68,27 @@ def run_account(
                 corrections.check(session, gmail, account.email, ctx.cfg)
 
             ids = gmail.list_inbox_ids(
-                ctx.settings.lookback, limit or ctx.settings.max_messages_per_run
+                lookback or ctx.settings.lookback, limit or ctx.settings.max_messages_per_run
             )
-            # Emails seen only in dry_run get processed again once labels/actions are enabled.
+            # Emails still in the inbox that were seen in a weaker mode (dry_run, or label when
+            # running act) get processed once more, so switching modes also covers them.
+            # Restored rows are never touched again: the user explicitly undid them.
+            weaker = {
+                Mode.DRY_RUN: [],
+                Mode.LABEL: [Mode.DRY_RUN],
+                Mode.ACT: [Mode.DRY_RUN, Mode.LABEL],
+            }
             done_query = select(Message.gmail_id).where(
                 Message.account == account.email,
-                Message.status == "done",
                 Message.gmail_id.in_(ids),
+                or_(
+                    Message.restored.is_(True),
+                    and_(
+                        Message.status == "done",
+                        Message.mode.not_in([m.value for m in weaker[mode]]),
+                    ),
+                ),
             )
-            if mode != Mode.DRY_RUN:
-                done_query = done_query.where(Message.mode != Mode.DRY_RUN.value)
             done = set(session.scalars(done_query))
             budget = [ctx.settings.max_unsubscribes_per_run]
             for message_id in ids:
@@ -117,6 +135,12 @@ def process(
 ) -> Message:
     email = gmail.get(message_id)
     sig = email.signals
+    prev = _find_message(session, account.email, message_id)
+    if mode != Mode.DRY_RUN and _user_touched(ctx.cfg, session, account, prev, email, label_ids):
+        # Leave Gmail and labels_added as they are; just don't revisit it in this mode.
+        prev.status, prev.error, prev.mode = "done", None, mode.value
+        session.commit()
+        return prev
     rule = rules.lookup(session, account.email, sig.sender)
 
     classification = None
@@ -125,15 +149,23 @@ def process(
             build_state(email, account.email, ctx.settings.body_chars)
         )
     decision = decide(ctx.cfg, account, sig, classification, rule.category if rule else None)
-    actions = plan(ctx.cfg, decision, mode)
+    actions = plan(ctx.cfg, decision, mode, account.act_categories)
 
+    msg = _upsert_message(session, account.email, email)
+    # Reprocessing (e.g. label -> act): drop labels from the previous pass that no longer apply.
+    stale = [
+        label_ids[name]
+        for name in (msg.labels_added or [])
+        # "SPAM" is a defensive guard: only act rows carry it and those are never reprocessed,
+        # but if one ever were, removing SPAM here would silently un-spam the email.
+        if name not in actions.add_labels and name in label_ids and name != "SPAM"
+    ]
     gmail.modify(
         message_id,
         add=[label_ids.get(name, name) for name in actions.add_labels],
-        remove=actions.remove_labels,
+        remove=actions.remove_labels + stale,
     )
 
-    msg = _upsert_message(session, account.email, email)
     msg.status, msg.error = "done", None
     msg.source = decision.source
     msg.jev_category = classification.category if classification else None
@@ -175,6 +207,48 @@ def process(
     return msg
 
 
+def _user_touched(
+    cfg: CategoriesConfig,
+    session: Session,
+    account: Account,
+    msg: Message | None,
+    email: Email,
+    label_ids: dict[str, str],
+) -> bool:
+    """Check an email labeled by an earlier pass against its current Gmail labels.
+
+    A changed category label is recorded as a correction (the sender rule then decides the
+    category). Otherwise, hands off (returns True) if the user starred the email, removed a label
+    of ours, or added one of our labels that the last pass didn't set.
+    """
+    if msg is None or not msg.labels_added:
+        return False  # new, or nothing of ours in Gmail yet (dry_run)
+    names = {v: k for k, v in label_ids.items()}
+    current = {names.get(i, i) for i in email.label_ids}
+    if msg.corrected_category is None:
+        category = corrections.detect(msg, current, cfg)
+        if category:
+            corrections.record(session, account.email, msg, category)
+    reason, labels = None, []
+    if "STARRED" in current:
+        reason = "starred"  # a strong "keep" signal, even after a correction
+    elif msg.corrected_category is not None:
+        return False
+    elif removed := [n for n in msg.labels_added if n != cfg.processed_label and n not in current]:
+        reason, labels = "removed", removed
+    else:
+        managed = set(cfg.all_labels()) - {cfg.processed_label}
+        if added := sorted((current & managed) - set(msg.labels_added)):
+            reason, labels = "added", added
+    if reason is None:
+        return False
+    log.info(
+        "left alone: user edited the email",
+        extra={"account": account.email, "id": msg.gmail_id, "reason": reason, "labels": labels},
+    )
+    return True
+
+
 def _unsubscribe(session: Session, gmail: Gmail, account: Account, email: Email) -> bool:
     """Unsubscribe once per (account, list). Returns True if an attempt was made."""
     sig = email.signals
@@ -207,10 +281,14 @@ def _unsubscribe(session: Session, gmail: Gmail, account: Account, email: Email)
     return True
 
 
-def _upsert_message(session: Session, account: str, email: Email) -> Message:
-    msg = session.scalar(
-        select(Message).where(Message.account == account, Message.gmail_id == email.id)
+def _find_message(session: Session, account: str, gmail_id: str) -> Message | None:
+    return session.scalar(
+        select(Message).where(Message.account == account, Message.gmail_id == gmail_id)
     )
+
+
+def _upsert_message(session: Session, account: str, email: Email) -> Message:
+    msg = _find_message(session, account, email.id)
     if msg is None:
         msg = Message(account=account, gmail_id=email.id)
         session.add(msg)
@@ -225,9 +303,7 @@ def _upsert_message(session: Session, account: str, email: Email) -> Message:
 def _record_error(
     session: Session, account: str, mode: Mode, message_id: str, exc: Exception
 ) -> None:
-    msg = session.scalar(
-        select(Message).where(Message.account == account, Message.gmail_id == message_id)
-    )
+    msg = _find_message(session, account, message_id)
     if msg is None:
         msg = Message(account=account, gmail_id=message_id, thread_id="", sender="")
         session.add(msg)

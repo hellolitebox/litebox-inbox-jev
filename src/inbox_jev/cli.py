@@ -14,7 +14,7 @@ from . import digest as digest_mod
 from . import gmail as gmail_mod
 from . import labels, logs, rules, triage
 from . import unsubscribe as unsub
-from .config import Account, Mode, Settings, load_accounts, load_categories
+from .config import Account, Mode, Settings, check_lookback, load_accounts, load_categories
 from .db import Message, SenderRule, Unsubscribe, make_session_factory, now
 
 app = typer.Typer(no_args_is_help=True, help="Triage Gmail with TypeSafe Jev.")
@@ -45,6 +45,15 @@ def _accounts(settings: Settings, only: str | None) -> list[Account]:
     return accounts
 
 
+def _lookback_option(value: str | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        return check_lookback(value)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
 def _parse_since(value: str) -> timedelta:
     match = re.fullmatch(r"(\d+)([hd])", value.strip())
     if not match:
@@ -66,6 +75,13 @@ def run(
     account: AccountOpt = None,
     mode: Annotated[Mode | None, typer.Option(help="Override MODE for this run.")] = None,
     limit: Annotated[int | None, typer.Option(help="Max inbox messages to look at.")] = None,
+    lookback: Annotated[
+        str | None,
+        typer.Option(
+            help="Override LOOKBACK, e.g. 30d to clean up the backlog.",
+            callback=_lookback_option,
+        ),
+    ] = None,
 ) -> None:
     """Classify new inbox emails and apply labels/actions."""
     s = _settings()
@@ -76,7 +92,7 @@ def run(
     try:
         for acc in _accounts(s, account):
             try:
-                triage.run_account(ctx, acc, mode, limit)
+                triage.run_account(ctx, acc, mode, limit, lookback)
             except Exception:
                 failed = True
                 log.exception("account run failed", extra={"account": acc.email})

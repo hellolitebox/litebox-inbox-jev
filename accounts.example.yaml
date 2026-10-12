@@ -12,6 +12,9 @@ accounts:
       - mybank.com
     allow_senders:
       - boss@partner.com
+    # In act mode, only these categories are archived/spammed/unsubscribed; the others just get
+    # their labels. Useful to roll out act gradually. Optional (default: all categories).
+    act_categories: [transactional, notification, newsletter]
     # Per-account confidence overrides by category key. Optional.
     min_confidence:
       marketing: 0.95

@@ -123,3 +123,14 @@ def test_needs_reply_flagged_for_low_confidence(cfg, account, category):
     d = decide(cfg, account, make_signals(), c)
     assert d.low_confidence and not (d.archive or d.spam)
     assert "Jev/Needs Reply" in d.add_labels
+
+
+def test_plan_act_categories_limits_actions_to_listed_categories(cfg, account):
+    d = decide(cfg, account, make_signals(), make_classification("marketing", 0.95))
+    held = plan(cfg, d, Mode.ACT, act_categories=["notification"])
+    assert held.add_labels == ["Jev/Marketing", "Jev/Processed"]
+    assert held.remove_labels == [] and not (held.archived or held.spammed or held.unsubscribe)
+    acted = plan(cfg, d, Mode.ACT, act_categories=["marketing"])
+    assert acted.archived and acted.unsubscribe
+    assert plan(cfg, d, Mode.ACT, act_categories=None).archived  # default: all categories
+    assert plan(cfg, d, Mode.LABEL, act_categories=["marketing"]).remove_labels == []
