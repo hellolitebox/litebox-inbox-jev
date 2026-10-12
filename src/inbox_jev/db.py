@@ -66,6 +66,8 @@ class Message(Base):
     needs_reply: Mapped[float | None] = mapped_column(Float)
     tags: Mapped[dict | None] = mapped_column(JSON)
     low_confidence: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Historical name, kept to avoid a migration: now means "unsubscribe skipped: unverified
+    # sender" (marketing without dmarc=pass or List-Unsubscribe; archived, not spammed).
     downgraded_to_spam: Mapped[bool] = mapped_column(Boolean, default=False)
     mode: Mapped[str] = mapped_column(String(16))
     labels_added: Mapped[list | None] = mapped_column(JSON)  # applied in Gmail

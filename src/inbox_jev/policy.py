@@ -15,6 +15,8 @@ class Decision:
     confidence: float
     source: str  # jev | rule | allowlist
     low_confidence: bool = False
+    # Historical name (kept to match the DB column): it now means "unsubscribe skipped:
+    # unverified sender". The email keeps its archive_unsubscribe category and is archived only.
     downgraded_to_spam: bool = False
     add_labels: list[str] = field(default_factory=list)
     archive: bool = False
@@ -57,22 +59,20 @@ def decide(
     decision = Decision(category=category, confidence=classification.confidence, source="jev")
 
     # Never unsubscribe from something that can't prove who it is: it confirms the address.
-    if cfg.by_key[category].action == Action.ARCHIVE_UNSUBSCRIBE and not (
+    # The email keeps its category (unverified isn't fraud) and is only archived, never spammed.
+    unverified = cfg.by_key[category].action == Action.ARCHIVE_UNSUBSCRIBE and not (
         sig.dmarc_pass and sig.has_unsubscribe
-    ):
-        spam = next((c for c in cfg.categories if c.action == Action.SPAM), None)
-        if spam:
-            decision.category = spam.key
-            decision.downgraded_to_spam = True
-
-    threshold = account.min_confidence.get(
-        decision.category, cfg.by_key[decision.category].min_confidence
     )
+    decision.downgraded_to_spam = unverified
+
+    threshold = account.min_confidence.get(category, cfg.by_key[category].min_confidence)
     if decision.confidence < threshold:
         decision.low_confidence = True
-        decision.add_labels += [cfg.review_label, cfg.by_key[decision.category].label]
+        decision.add_labels += [cfg.review_label, cfg.by_key[category].label]
     else:
         _apply(cfg, decision)
+        if unverified:
+            decision.unsubscribe = False
 
     return _add_flags(cfg, classification, decision)
 

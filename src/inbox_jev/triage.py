@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from . import corrections, rules
@@ -121,6 +121,37 @@ def run_account(
                 },
             )
     return run
+
+
+def mark_for_reprocess(
+    session: Session,
+    cfg: CategoriesConfig,
+    account: str,
+    category: str,
+    low_confidence_only: bool = False,
+) -> int:
+    """Mark act-mode rows still in the inbox as `label`, so the next `act` run redoes them.
+
+    Only rows Jev left in the inbox (not archived, spammed or restored) qualify. The next run
+    takes them through the normal path (user-edit checks, stale label removal), but only if
+    they are within its `--lookback` window. Returns how many rows were marked.
+    """
+    if category not in cfg.by_key:
+        raise ValueError(f"unknown category {category!r}; one of {', '.join(cfg.by_key)}")
+    query = update(Message).where(
+        Message.account == account,
+        Message.status == "done",
+        Message.mode == Mode.ACT.value,
+        Message.category == category,
+        Message.archived.is_(False),
+        Message.spammed.is_(False),
+        Message.restored.is_(False),
+    )
+    if low_confidence_only:
+        query = query.where(Message.low_confidence.is_(True))
+    count = session.execute(query.values(mode=Mode.LABEL.value)).rowcount
+    session.commit()
+    return count
 
 
 def process(

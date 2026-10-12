@@ -5,7 +5,8 @@
 #   keep                 stay in the inbox
 #   archive              remove from inbox
 #   archive_unsubscribe  remove from inbox and unsubscribe (only with dmarc=pass + List-Unsubscribe;
-#                        otherwise the email is downgraded to the `spam` category)
+#                        otherwise it keeps its category and label and is only archived, never
+#                        unsubscribed or spammed)
 #   spam                 move to Gmail Spam
 # min_confidence: below it, nothing destructive happens; the email stays in the inbox with the
 #   review label plus the suggested category label.
@@ -50,11 +51,20 @@ categories:
     action: archive_unsubscribe
     min_confidence: 0.90
 
+  - key: cold_outreach
+    label: Jev/Outreach
+    criteria: >-
+      Unsolicited sales or partnership pitch from someone I have no relationship with, written
+      to look personal: agencies, freelancers, lead-gen, recruiting or dev-shop offers, "quick
+      question" and follow-up sequences, event or sponsorship pitches, SEO/link-building offers.
+    action: archive
+    min_confidence: 0.80
+
   - key: spam
     label: Jev/Spam
     criteria: >-
-      Unsolicited or suspicious email: mass cold outreach from strangers, lead-gen sequences,
-      scams, phishing, SEO/link-building pitches.
+      Fraudulent or malicious email: scams, phishing, fake invoices or account alerts, malware,
+      impersonation, or bulk mail with forged or failing sender authentication.
     action: spam
     min_confidence: 0.90
 

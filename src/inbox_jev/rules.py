@@ -44,6 +44,7 @@ def record_auto(
     decision: Decision,
 ) -> None:
     """Count consistent high-confidence answers; activate after cfg.auto_rule.hits."""
+    # Unverified marketing never earns a rule: a rule skips the DMARC/List-Unsubscribe check.
     if (
         decision.low_confidence
         or decision.downgraded_to_spam

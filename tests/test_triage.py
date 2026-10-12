@@ -270,18 +270,21 @@ def test_reprocess_leaves_alone_email_whose_needs_reply_was_removed(setup):
     assert gmail.modified == []
 
 
-def test_marketing_downgraded_to_spam_is_not_spammed_when_only_marketing_acts(setup):
+def test_unverified_marketing_is_archived_not_spammed_or_unsubscribed(setup):
     ctx, gmail, account = setup
-    # "Maybe promo" has no List-Unsubscribe: confident marketing gets downgraded to spam
+    # "Maybe promo" has no List-Unsubscribe: confident marketing is archived, never unsubscribed
     ctx._classifier.answers["Maybe promo"] = make_classification("marketing", 0.97)
     account.act_categories = ["marketing"]
     triage.run_account(ctx, account, Mode.ACT)
     [(_, add, remove)] = _mods(gmail, "4")
-    assert remove == [] and "SPAM" not in add and "Label_Jev/Spam" in add
+    assert remove == ["INBOX"] and "SPAM" not in add
+    assert "Label_Jev/Marketing" in add and "Label_Jev/Spam" not in add
+    assert gmail.sent == ["u@shop.com"]  # only "50% off", which has List-Unsubscribe
     with ctx.sessions() as s:
         row = s.query(Message).filter_by(gmail_id="4").one()
-        assert row.category == "spam" and row.downgraded_to_spam
-        assert not row.spammed and not row.archived
+        assert row.category == "marketing" and row.downgraded_to_spam
+        assert row.archived and not row.spammed
+        assert s.query(Unsubscribe).filter_by(sender="w@weird.biz").count() == 0
 
 
 def test_empty_act_categories_acts_on_nothing(setup):
@@ -374,3 +377,56 @@ def test_starred_new_email_is_processed(setup):
     triage.run_account(ctx, account, Mode.ACT)
     [(_, _, remove)] = _mods(gmail, "2")
     assert remove == ["INBOX"]
+
+
+def _act_with_only(ctx, account, categories):
+    account.act_categories = categories
+    return triage.run_account(ctx, account, Mode.ACT)
+
+
+def test_mark_for_reprocess_redoes_rows_after_widening_act_categories(setup):
+    ctx, gmail, account = setup
+    # First pass: only notification acts, so marketing rows stay in the inbox as mode=act.
+    _act_with_only(ctx, account, ["notification"])
+    assert _act_with_only(ctx, account, ["notification", "marketing"]).processed == 0
+
+    with ctx.sessions() as s:
+        assert triage.mark_for_reprocess(s, ctx.cfg, account.email, "marketing") == 2  # "2", "4"
+    gmail.modified.clear()
+    run = _act_with_only(ctx, account, ["notification", "marketing"])
+    assert run.processed == 2
+    [(_, _, remove)] = _mods(gmail, "2")
+    assert remove == ["INBOX"]  # confident marketing archived now
+    [(_, _, remove)] = _mods(gmail, "4")
+    assert remove == []  # low confidence: still in the inbox
+    with ctx.sessions() as s:
+        rows = {m.gmail_id: m for m in s.query(Message)}
+        assert rows["2"].archived and rows["2"].mode == "act"
+        assert not rows["4"].archived and rows["4"].mode == "act"
+        # archived now: no longer eligible
+        assert triage.mark_for_reprocess(s, ctx.cfg, account.email, "marketing") == 1
+
+
+def test_mark_for_reprocess_filters(setup):
+    ctx, gmail, account = setup
+    _act_with_only(ctx, account, ["notification"])
+    with ctx.sessions() as s:
+        rows = {m.gmail_id: m for m in s.query(Message)}
+        rows["2"].restored = True
+        s.commit()
+        # "4" is low confidence, "2" is restored
+        n = triage.mark_for_reprocess(s, ctx.cfg, account.email, "marketing", True)
+        assert n == 1
+        assert triage.mark_for_reprocess(s, ctx.cfg, "other@x.com", "marketing") == 0
+        assert triage.mark_for_reprocess(s, ctx.cfg, account.email, "important") == 2  # "1", "3"
+        rows = {m.gmail_id: m for m in s.query(Message)}
+        assert rows["2"].mode == "act" and rows["4"].mode == "label"
+        with pytest.raises(ValueError, match="unknown category"):
+            triage.mark_for_reprocess(s, ctx.cfg, account.email, "nope")
+
+
+def test_mark_for_reprocess_skips_label_mode_and_error_rows(setup):
+    ctx, gmail, account = setup
+    triage.run_account(ctx, account, Mode.LABEL)
+    with ctx.sessions() as s:
+        assert triage.mark_for_reprocess(s, ctx.cfg, account.email, "marketing") == 0

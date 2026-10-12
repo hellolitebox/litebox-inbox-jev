@@ -34,10 +34,22 @@ def test_marketing_high_confidence_unsubscribes(cfg, account):
 @pytest.mark.parametrize(
     "signals_kw", [{"dmarc_pass": False}, {"unsubscribe_https": [], "unsubscribe_mailto": []}]
 )
-def test_marketing_without_proof_is_spam(cfg, account, signals_kw):
+def test_marketing_without_proof_is_archived_without_unsubscribe(cfg, account, signals_kw):
     d = decide(cfg, account, make_signals(**signals_kw), make_classification("marketing", 0.95))
-    assert d.category == "spam" and d.downgraded_to_spam
-    assert d.spam and not d.unsubscribe
+    assert d.category == "marketing" and d.downgraded_to_spam
+    assert d.archive and not d.spam and not d.unsubscribe
+    assert "Jev/Marketing" in d.add_labels and "Jev/Spam" not in d.add_labels
+    act = plan(cfg, d, Mode.ACT)
+    assert act.archived and not act.spammed and not act.unsubscribe
+    assert "SPAM" not in act.add_labels
+
+
+def test_unverified_marketing_below_threshold_stays_in_inbox(cfg, account):
+    c = make_classification("marketing", 0.85)
+    d = decide(cfg, account, make_signals(dmarc_pass=False), c)
+    assert d.low_confidence and d.downgraded_to_spam
+    assert not (d.archive or d.spam or d.unsubscribe)
+    assert d.add_labels[:2] == ["Jev/Review", "Jev/Marketing"]
 
 
 def test_low_confidence_keeps_in_inbox_with_review_label(cfg, account):
@@ -108,11 +120,11 @@ def test_needs_reply_only_for_kept_emails(cfg, account):
     assert "Jev/Needs Reply" not in d.add_labels
 
 
-def test_needs_reply_skipped_for_downgraded_marketing(cfg, account):
-    # Sponsorship pitch without DMARC: marketing -> spam, never flagged as needing a reply.
+def test_needs_reply_skipped_for_unverified_marketing(cfg, account):
+    # Sponsorship pitch without DMARC: archived as marketing, never flagged as needing a reply.
     c = make_classification("marketing", 0.95, needs_reply=0.95)
     d = decide(cfg, account, make_signals(dmarc_pass=False), c)
-    assert d.downgraded_to_spam and d.spam
+    assert d.downgraded_to_spam and d.archive and not d.spam
     assert "Jev/Needs Reply" not in d.add_labels
 
 
@@ -134,3 +146,13 @@ def test_plan_act_categories_limits_actions_to_listed_categories(cfg, account):
     assert acted.archived and acted.unsubscribe
     assert plan(cfg, d, Mode.ACT, act_categories=None).archived  # default: all categories
     assert plan(cfg, d, Mode.LABEL, act_categories=["marketing"]).remove_labels == []
+
+
+def test_cold_outreach_is_archived_not_spammed(cfg, account):
+    d = decide(cfg, account, make_signals(), make_classification("cold_outreach", 0.85))
+    assert not d.low_confidence and d.archive and not d.spam and not d.unsubscribe
+    assert "Jev/Outreach" in d.add_labels
+    act = plan(cfg, d, Mode.ACT, act_categories=["cold_outreach"])
+    assert act.remove_labels == ["INBOX"] and "SPAM" not in act.add_labels
+    low = decide(cfg, account, make_signals(), make_classification("cold_outreach", 0.75))
+    assert low.low_confidence and not low.archive

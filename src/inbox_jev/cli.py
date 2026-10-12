@@ -158,6 +158,28 @@ def restore(
     typer.echo(f"Restored {count} emails. Unsubscribes cannot be undone.")
 
 
+@app.command()
+def reprocess(
+    account: Annotated[str, typer.Option("--account", "-a")],
+    category: Annotated[str, typer.Option(help="Category key from categories.yaml.")],
+    low_confidence_only: Annotated[
+        bool, typer.Option("--low-confidence-only", help="Only low-confidence rows.")
+    ] = False,
+) -> None:
+    """Have the next act run redo CATEGORY emails Jev left in the inbox."""
+    s = _settings()
+    cfg = load_categories(s.categories_file)
+    with make_session_factory(s.database_url)() as session:
+        try:
+            count = triage.mark_for_reprocess(session, cfg, account, category, low_confidence_only)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    typer.echo(
+        f"Marked {count} emails for reprocessing. The next `run` in act mode redoes them, but "
+        "only those inside its window: use `run --lookback` wide enough to reach the oldest one."
+    )
+
+
 @app.command("unsubscribe-retry")
 def unsubscribe_retry(account: AccountOpt = None) -> None:
     """Retry failed unsubscribes (up to 3 attempts each)."""
