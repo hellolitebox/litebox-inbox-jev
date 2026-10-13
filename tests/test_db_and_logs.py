@@ -11,9 +11,12 @@ from sqlalchemy.orm import Session
 from typesafe_sdk import Noul, RetryPolicy, TypeSafeClient, TypeSafeError
 
 from inbox_jev import logs
-from inbox_jev.config import load_categories
-from inbox_jev.db import SQLITE_BUSY_TIMEOUT_MS, Base, Message, make_engine
+from inbox_jev.config import Mode, load_categories
+from inbox_jev.db import SQLITE_BUSY_TIMEOUT_MS, Base, Message, MessageStatus, make_engine
 from inbox_jev.digest import build
+from inbox_jev.policy import DecisionSource
+from inbox_jev.rules import RuleSource
+from inbox_jev.unsubscribe import UnsubscribeMethod, UnsubscribeStatus
 
 
 def test_sqlite_file_database_uses_wal_and_busy_timeout(tmp_path):
@@ -173,3 +176,39 @@ def test_sdk_filter_matches_the_installed_sdk_log_records(caplog, monkeypatch):
     assert [r.args[2] for r in replies] == [200, 503]
     f = logs.DropSdkSuccess()
     assert [f.filter(r) for r in replies] == [False, True]  # success dropped, error kept
+
+
+@pytest.mark.parametrize(
+    "enum, stored",
+    [
+        (MessageStatus, {"done", "error"}),
+        (DecisionSource, {"jev", "rule", "allowlist"}),
+        (UnsubscribeMethod, {"one_click", "mailto", "manual"}),
+        (UnsubscribeStatus, {"ok", "failed", "manual_pending", "skipped"}),
+        (RuleSource, {"manual", "correction", "auto"}),
+        (Mode, {"dry_run", "label", "act"}),
+    ],
+)
+def test_stored_enum_values_never_change(enum, stored):
+    """These strings are in deployed databases: renaming a value needs a data migration."""
+    assert {member.value for member in enum} == stored
+
+
+def test_enum_members_are_stored_as_their_plain_value():
+    engine = make_engine("sqlite:///:memory:")
+    with Session(engine) as session:
+        session.add(
+            Message(
+                account="me@x.com",
+                gmail_id="1",
+                thread_id="t1",
+                sender="a@b.com",
+                status=MessageStatus.ERROR,
+                source=DecisionSource.ALLOWLIST,
+                mode=Mode.DRY_RUN,
+            )
+        )
+        session.commit()
+        raw = session.execute(text("SELECT status, source, mode FROM messages")).one()
+    assert tuple(raw) == ("error", "allowlist", "dry_run")
+    assert all(type(value) is str for value in raw)

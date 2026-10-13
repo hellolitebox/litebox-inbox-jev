@@ -9,8 +9,8 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from . import rules
-from .config import CategoriesConfig
-from .db import Message, now
+from .config import CategoriesConfig, Mode
+from .db import Message, MessageStatus, now
 from .gmail import Gmail
 
 log = logging.getLogger(__name__)
@@ -40,8 +40,8 @@ def check(session: Session, gmail: Gmail, account: str, cfg: CategoriesConfig) -
         select(Message)
         .where(
             Message.account == account,
-            Message.status == "done",
-            Message.mode != "dry_run",
+            Message.status == MessageStatus.DONE,
+            Message.mode != Mode.DRY_RUN,
             Message.restored.is_(False),
             Message.corrected_category.is_(None),
             Message.processed_at >= cutoff - WINDOW,
@@ -77,7 +77,7 @@ def check(session: Session, gmail: Gmail, account: str, cfg: CategoriesConfig) -
 def record(session: Session, account: str, msg: Message, category: str) -> None:
     """Store a detected correction and turn it into a sender rule."""
     msg.corrected_category = category
-    rules.set_rule(session, account, msg.sender, category, source="correction")
+    rules.set_rule(session, account, msg.sender, category, source=rules.RuleSource.CORRECTION)
     log.info(
         "correction learned",
         extra={"account": account, "sender": msg.sender, "from": msg.category, "to": category},

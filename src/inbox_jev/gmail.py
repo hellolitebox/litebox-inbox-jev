@@ -51,6 +51,15 @@ def token_error_detail(exc: BaseException) -> str | None:
     return first.splitlines()[0]
 
 
+def is_not_found(exc: BaseException) -> bool:
+    """Whether `exc` is a Gmail API error saying the resource is gone (HttpError, status 404).
+
+    Duck-typed on `.resp.status`, as `googleapiclient.errors.HttpError` carries it, so test
+    fakes don't need googleapiclient.
+    """
+    return getattr(getattr(exc, "resp", None), "status", None) == 404
+
+
 def token_path(tokens_dir: Path, email: str) -> Path:
     return tokens_dir / f"{email.lower()}.json"
 
@@ -96,8 +105,7 @@ class Email:
     internal_date_ms: int
 
     def header(self, name: str) -> str:
-        values = self.headers.get(name.lower())
-        return values[0] if values else ""
+        return signals.first_header(self.headers, name.lower()) or ""
 
     @property
     def signals(self) -> signals.Signals:
@@ -201,6 +209,22 @@ def extract_body(payload: dict) -> str:
     return text
 
 
+def _to_email(msg: dict, snippet: str, body: str) -> Email:
+    """An `Email` from a messages.get response; its headers keyed by lowercased name."""
+    headers: dict[str, list[str]] = {}
+    for h in msg.get("payload", {}).get("headers", []):
+        headers.setdefault(h["name"].lower(), []).append(h["value"])
+    return Email(
+        id=msg["id"],
+        thread_id=msg["threadId"],
+        label_ids=msg.get("labelIds", []),
+        headers=headers,
+        snippet=snippet,
+        body=body,
+        internal_date_ms=int(msg.get("internalDate", 0)),
+    )
+
+
 class Gmail:
     def __init__(self, creds: Credentials):
         self._svc = build("gmail", "v1", credentials=creds, cache_discovery=False).users()
@@ -231,18 +255,10 @@ class Gmail:
 
     def get(self, message_id: str) -> Email:
         msg = self._svc.messages().get(userId="me", id=message_id, format="full").execute()
-        payload = msg.get("payload", {})
-        headers: dict[str, list[str]] = {}
-        for h in payload.get("headers", []):
-            headers.setdefault(h["name"].lower(), []).append(h["value"])
-        return Email(
-            id=msg["id"],
-            thread_id=msg["threadId"],
-            label_ids=msg.get("labelIds", []),
-            headers=headers,
+        return _to_email(
+            msg,
             snippet=html.unescape(msg.get("snippet", "")),
-            body=extract_body(payload),
-            internal_date_ms=int(msg.get("internalDate", 0)),
+            body=extract_body(msg.get("payload", {})),
         )
 
     def get_headers(self, message_id: str, names: list[str]) -> Email:
@@ -252,25 +268,14 @@ class Gmail:
             .get(userId="me", id=message_id, format="metadata", metadataHeaders=names)
             .execute()
         )
-        headers: dict[str, list[str]] = {}
-        for h in msg.get("payload", {}).get("headers", []):
-            headers.setdefault(h["name"].lower(), []).append(h["value"])
-        return Email(
-            id=msg["id"],
-            thread_id=msg["threadId"],
-            label_ids=msg.get("labelIds", []),
-            headers=headers,
-            snippet="",
-            body="",
-            internal_date_ms=int(msg.get("internalDate", 0)),
-        )
+        return _to_email(msg, snippet="", body="")
 
     def get_label_ids(self, message_id: str) -> list[str] | None:
         """Current labels of a message, or None if it no longer exists."""
         try:
             msg = self._svc.messages().get(userId="me", id=message_id, format="minimal").execute()
-        except Exception as exc:  # googleapiclient.errors.HttpError 404
-            if getattr(getattr(exc, "resp", None), "status", None) == 404:
+        except Exception as exc:
+            if is_not_found(exc):
                 return None
             raise
         return msg.get("labelIds", [])

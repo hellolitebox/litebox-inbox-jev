@@ -15,6 +15,7 @@ from inbox_jev import cli, digest, triage
 from inbox_jev import gmail as inbox_gmail
 from inbox_jev.config import Mode
 from inbox_jev.db import MAX_ERROR_ATTEMPTS, Message, Run, Unsubscribe
+from inbox_jev.unsubscribe import UnsubscribeMethod, UnsubscribeStatus
 
 
 @pytest.fixture
@@ -348,8 +349,8 @@ def test_digest_escapes_email_text_for_slack(triage_setup):
                 list_key="<!here>&list",
                 sender="x@shop.com",
                 gmail_id="2",
-                method="manual",
-                status="manual_pending",
+                method=UnsubscribeMethod.MANUAL,
+                status=UnsubscribeStatus.MANUAL_PENDING,
                 target="https://shop.com/u?a=1&b=<x>|y",
             )
         )

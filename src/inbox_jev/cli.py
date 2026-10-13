@@ -6,18 +6,16 @@ import logging
 import os
 import re
 from datetime import timedelta
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as package_version
 from typing import Annotated
 
 import typer
 from sqlalchemy import func, select
 
+from . import __version__, labels, logs, rules, triage
 from . import digest as digest_mod
 from . import gmail as gmail_mod
-from . import labels, logs, rules, triage
 from .config import Account, Mode, Settings, check_lookback, load_accounts, load_categories
-from .db import Message, SenderRule, make_session_factory, now
+from .db import Message, MessageStatus, SenderRule, make_session_factory, now
 
 app = typer.Typer(no_args_is_help=True, help="Triage Gmail with TypeSafe Jev.")
 auth_app = typer.Typer(no_args_is_help=True, help="Manage Gmail OAuth tokens.")
@@ -41,12 +39,8 @@ REVISION_ENV = "INBOX_JEV_REVISION"
 def _version(value: bool) -> None:
     if not value:
         return
-    try:
-        release = package_version("inbox-jev")
-    except PackageNotFoundError:
-        release = "unknown"
     revision = os.environ.get(REVISION_ENV)
-    typer.echo(f"inbox-jev {release}" + (f" ({revision})" if revision else ""))
+    typer.echo(f"inbox-jev {__version__}" + (f" ({revision})" if revision else ""))
     raise typer.Exit()
 
 
@@ -254,7 +248,10 @@ def stats(account: AccountOpt = None, days: int = 7) -> None:
     with sessions() as session:
         query = (
             select(Message.account, Message.category, Message.low_confidence, func.count())
-            .where(Message.status == "done", Message.processed_at >= now() - timedelta(days=days))
+            .where(
+                Message.status == MessageStatus.DONE,
+                Message.processed_at >= now() - timedelta(days=days),
+            )
             .group_by(Message.account, Message.category, Message.low_confidence)
             .order_by(Message.account, func.count().desc())
         )
@@ -291,7 +288,7 @@ def rules_set(
     if category not in cfg.by_key:
         raise typer.BadParameter(f"unknown category; one of {', '.join(cfg.by_key)}")
     with make_session_factory(s.database_url)() as session:
-        rules.set_rule(session, account, sender.lower(), category, source="manual")
+        rules.set_rule(session, account, sender.lower(), category, source=rules.RuleSource.MANUAL)
         session.commit()
     typer.echo(f"{sender} → {category}")
 

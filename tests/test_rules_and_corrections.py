@@ -4,10 +4,11 @@ import pytest
 from conftest import make_classification, make_signals
 
 from inbox_jev import corrections, rules
-from inbox_jev.config import Account
+from inbox_jev.config import Account, Mode
 from inbox_jev.corrections import detect
-from inbox_jev.db import Message, SenderRule, make_session_factory, now
-from inbox_jev.policy import Decision, decide
+from inbox_jev.db import Message, MessageStatus, SenderRule, make_session_factory, now
+from inbox_jev.policy import Decision, DecisionSource, decide
+from inbox_jev.rules import RuleSource
 
 
 @pytest.fixture
@@ -45,7 +46,7 @@ def test_detect_untouched(cfg):
 
 def test_auto_rule_activates_after_consistent_hits(cfg, session):
     c = make_classification("newsletter", 0.99)
-    d = Decision(category="newsletter", confidence=0.99, source="jev")
+    d = Decision(category="newsletter", confidence=0.99, source=DecisionSource.JEV)
     for _ in range(cfg.auto_rule.hits):
         assert rules.lookup(session, "me@acme.com", "n@sub.com") is None
         rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", c, d)
@@ -54,8 +55,8 @@ def test_auto_rule_activates_after_consistent_hits(cfg, session):
 
 
 def test_auto_rule_resets_on_disagreement(cfg, session):
-    news = Decision(category="newsletter", confidence=0.99, source="jev")
-    mkt = Decision(category="marketing", confidence=0.99, source="jev")
+    news = Decision(category="newsletter", confidence=0.99, source=DecisionSource.JEV)
+    mkt = Decision(category="marketing", confidence=0.99, source=DecisionSource.JEV)
     c = make_classification("newsletter", 0.99)
     rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", c, news)
     rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", c, news)
@@ -66,7 +67,7 @@ def test_auto_rule_resets_on_disagreement(cfg, session):
 
 def test_low_confidence_does_not_count(cfg, session):
     c = make_classification("newsletter", 0.5)
-    d = Decision(category="newsletter", confidence=0.5, source="jev")
+    d = Decision(category="newsletter", confidence=0.5, source=DecisionSource.JEV)
     for _ in range(5):
         rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", c, d)
     session.commit()
@@ -74,10 +75,10 @@ def test_low_confidence_does_not_count(cfg, session):
 
 
 def test_domain_rule_and_correction_override(cfg, session):
-    rules.set_rule(session, "me@acme.com", "@sub.com", "notification", source="manual")
+    rules.set_rule(session, "me@acme.com", "@sub.com", "notification", source=RuleSource.MANUAL)
     session.commit()
     assert rules.lookup(session, "me@acme.com", "x@sub.com").category == "notification"
-    rules.set_rule(session, "me@acme.com", "x@sub.com", "important", source="correction")
+    rules.set_rule(session, "me@acme.com", "x@sub.com", "important", source=RuleSource.CORRECTION)
     session.commit()
     assert rules.lookup(session, "me@acme.com", "x@sub.com").category == "important"
 
@@ -92,7 +93,9 @@ def auto_rule(session):
 
 def test_group_archive_does_not_count(cfg, session):
     c = make_classification("notification", 0.96)
-    d = Decision(category="notification", confidence=0.96, source="jev", archive_group=True)
+    d = Decision(
+        category="notification", confidence=0.96, source=DecisionSource.JEV, archive_group=True
+    )
     for _ in range(5):
         rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", c, d)
     session.commit()
@@ -103,7 +106,7 @@ def test_group_archive_does_not_count(cfg, session):
 def test_keep_probability_blocks_auto_rule(cfg, session, keep):
     c = make_classification("notification", 0.97)
     c.probabilities = {"notification": 0.97, keep: 0.03}
-    d = Decision(category="notification", confidence=0.97, source="jev")
+    d = Decision(category="notification", confidence=0.97, source=DecisionSource.JEV)
     for _ in range(5):
         rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", c, d)
     session.commit()
@@ -112,12 +115,12 @@ def test_keep_probability_blocks_auto_rule(cfg, session, keep):
 
 def test_keep_answer_restarts_pending_archive_rule(cfg, session):
     note = make_classification("notification", 0.97)
-    d = Decision(category="notification", confidence=0.97, source="jev")
+    d = Decision(category="notification", confidence=0.97, source=DecisionSource.JEV)
     for _ in range(cfg.auto_rule.hits - 1):
         rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", note, d)
     # "Your token expires tomorrow": a keep answer below the auto-rule confidence.
     act = make_classification("action_required", 0.8)
-    act_d = Decision(category="action_required", confidence=0.8, source="jev")
+    act_d = Decision(category="action_required", confidence=0.8, source=DecisionSource.JEV)
     rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", act, act_d)
     rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", note, d)
     session.commit()
@@ -128,25 +131,27 @@ def test_keep_answer_restarts_pending_archive_rule(cfg, session):
 
 def test_keep_signal_restarts_pending_rule_even_when_low_confidence(cfg, session):
     note = make_classification("notification", 0.97)
-    d = Decision(category="notification", confidence=0.97, source="jev")
+    d = Decision(category="notification", confidence=0.97, source=DecisionSource.JEV)
     for _ in range(cfg.auto_rule.hits - 1):
         rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", note, d)
     unsure = make_classification("notification", 0.6)
     unsure.probabilities = {"notification": 0.6, "action_required": 0.4}
-    low = Decision(category="notification", confidence=0.6, source="jev", low_confidence=True)
+    low = Decision(
+        category="notification", confidence=0.6, source=DecisionSource.JEV, low_confidence=True
+    )
     rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", unsure, low)
     session.commit()
     assert auto_rule(session).hits == 0
 
 
 def test_keep_answer_leaves_manual_and_correction_rules_alone(cfg, session):
-    rules.set_rule(session, "me@acme.com", "n@sub.com", "notification", source="manual")
+    rules.set_rule(session, "me@acme.com", "n@sub.com", "notification", source=RuleSource.MANUAL)
     session.commit()
     rule = auto_rule(session)
     rule.active = False  # even an inactive manual rule is never touched
     rule.hits = 2
     act = make_classification("action_required", 0.97)
-    act_d = Decision(category="action_required", confidence=0.97, source="jev")
+    act_d = Decision(category="action_required", confidence=0.97, source=DecisionSource.JEV)
     rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", act, act_d)
     session.commit()
     rule = auto_rule(session)
@@ -224,8 +229,8 @@ def test_check_puts_never_and_longest_unchecked_rows_first(cfg, session, monkeyp
                 gmail_id=gmail_id,
                 thread_id="t",
                 sender="promo@shop.com",
-                status="done",
-                mode="act",
+                status=MessageStatus.DONE,
+                mode=Mode.ACT,
                 processed_at=processed_at,
                 correction_checked_at=checked_at,
             )
@@ -240,8 +245,8 @@ def test_check_puts_never_and_longest_unchecked_rows_first(cfg, session, monkeyp
 
 
 def test_match_never_falls_through_a_stale_exact_rule_to_the_domain_rule(cfg, session):
-    rules.set_rule(session, "me@acme.com", "news@shop.com", "promotions", "manual")
-    rules.set_rule(session, "me@acme.com", "@shop.com", "newsletter", "manual")
+    rules.set_rule(session, "me@acme.com", "news@shop.com", "promotions", RuleSource.MANUAL)
+    rules.set_rule(session, "me@acme.com", "@shop.com", "newsletter", RuleSource.MANUAL)
     session.commit()
     assert rules.lookup(session, "me@acme.com", "news@shop.com").category == "promotions"
     rule, stale = rules.match(session, "me@acme.com", "news@shop.com", cfg.by_key)
@@ -251,7 +256,7 @@ def test_match_never_falls_through_a_stale_exact_rule_to_the_domain_rule(cfg, se
 
 
 def test_match_with_stale_domain_rule_and_no_exact_rule(cfg, session):
-    rules.set_rule(session, "me@acme.com", "@shop.com", "promotions", "manual")
+    rules.set_rule(session, "me@acme.com", "@shop.com", "promotions", RuleSource.MANUAL)
     session.commit()
     rule, stale = rules.match(session, "me@acme.com", "news@shop.com", cfg.by_key)
     assert rule is None and stale.sender_key == "@shop.com"
@@ -259,7 +264,7 @@ def test_match_with_stale_domain_rule_and_no_exact_rule(cfg, session):
 
 
 def test_active_auto_rule_to_removed_category_is_relearned(cfg, session):
-    rules.set_rule(session, "me@acme.com", "news@shop.com", "promotions", "auto")
+    rules.set_rule(session, "me@acme.com", "news@shop.com", "promotions", RuleSource.AUTO)
     session.commit()
     c = make_classification("newsletter", 0.99)
     d = decide(cfg, Account(email="me@acme.com"), make_signals(), c)

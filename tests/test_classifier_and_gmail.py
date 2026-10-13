@@ -1,8 +1,10 @@
 import base64
 import time
 
+from test_triage import _HttpError
+
 from inbox_jev.classifier import CATEGORY_Q, NEEDS_REPLY_Q, TAG_PREFIX, build_questions, build_state
-from inbox_jev.gmail import Email, extract_body
+from inbox_jev.gmail import Email, extract_body, is_not_found
 
 
 def b64(text: str) -> str:
@@ -203,3 +205,9 @@ def test_extract_body_normalize_is_linear_on_long_whitespace_runs():
     body = extract_body(_alternative("undefined", html))
     assert time.perf_counter() - start < 2
     assert body.startswith("pre") and body.endswith(NEWSLETTER.strip())
+
+
+def test_is_not_found_only_for_http_404():
+    assert is_not_found(_HttpError(404))
+    assert not is_not_found(_HttpError(403))
+    assert not is_not_found(OSError("connection reset"))

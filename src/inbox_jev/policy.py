@@ -7,19 +7,27 @@ from enum import StrEnum
 from urllib.parse import urlparse
 
 from .classifier import Classification
-from .config import Account, Action, CategoriesConfig, Mode
-from .signals import Signals
+from .config import PUBLIC_GROUP_HOSTS, Account, Action, CategoriesConfig, Mode
+from .signals import Signals, domain_of, on_domain
 
 ARCHIVE_ACTIONS = (Action.ARCHIVE, Action.ARCHIVE_UNSUBSCRIBE)
 # previous_contact values meaning I have written to the sender or their domain.
 KNOWN_CONTACT = ("wrote_to_sender", "wrote_to_their_domain")
 
 
+class DecisionSource(StrEnum):
+    """What decided an email (stored in `messages.source`; values are the stored strings)."""
+
+    JEV = "jev"
+    RULE = "rule"
+    ALLOWLIST = "allowlist"
+
+
 @dataclass
 class Decision:
     category: str
     confidence: float
-    source: str  # jev | rule | allowlist
+    source: DecisionSource
     low_confidence: bool = False
     # Historical name (kept to match the DB column): it now means "unsubscribe skipped:
     # unverified sender". Set only when the decision would otherwise unsubscribe; the email keeps
@@ -92,10 +100,14 @@ def decide(
     and tag labels: the category stays the allowlist's or the rule's.
     """
     if is_allowed(account, sig):
-        decision = _apply(cfg, Decision(category="important", confidence=1.0, source="allowlist"))
+        decision = _apply(
+            cfg, Decision(category="important", confidence=1.0, source=DecisionSource.ALLOWLIST)
+        )
         return _add_flags(cfg, classification, decision) if classification else decision
     if rule_category in cfg.by_key:
-        decision = _apply(cfg, Decision(category=rule_category, confidence=1.0, source="rule"))
+        decision = _apply(
+            cfg, Decision(category=rule_category, confidence=1.0, source=DecisionSource.RULE)
+        )
         # A rule skips Jev, not the sender checks: manual and correction rules can point at
         # senders that never proved who they are.
         _check_unsubscribe(cfg, account, sig, decision, previous_contact)
@@ -106,11 +118,15 @@ def decide(
     category = classification.category
     if category not in cfg.by_key:
         # Unknown answer (config changed under us): treat as uncertain.
-        decision = Decision(category="important", confidence=0.0, source="jev", low_confidence=True)
+        decision = Decision(
+            category="important", confidence=0.0, source=DecisionSource.JEV, low_confidence=True
+        )
         decision.add_labels.append(cfg.review_label)
         return _add_flags(cfg, classification, decision)
 
-    decision = Decision(category=category, confidence=classification.confidence, source="jev")
+    decision = Decision(
+        category=category, confidence=classification.confidence, source=DecisionSource.JEV
+    )
     threshold = account.min_confidence.get(category, cfg.by_key[category].min_confidence)
     if decision.confidence >= threshold:
         _apply(cfg, decision)
@@ -240,19 +256,12 @@ def _verified(sig: Signals) -> bool:
     return sig.dmarc_pass and sig.has_unsubscribe
 
 
-GROUP_HOSTS = ("googlegroups.com", "groups.google.com")
-
-
 def _target_host(uri: str) -> str:
     """Host of an https unsubscribe URL, or domain of a mailto address (lowercased)."""
     if uri.lower().startswith("mailto:"):
         address = uri[len("mailto:") :].split("?", 1)[0]
-        return address.rsplit("@", 1)[-1].strip().lower()
+        return domain_of(address).strip().lower()
     return (urlparse(uri).hostname or "").lower()
-
-
-def _on_domain(host: str, domain: str) -> bool:
-    return host == domain or host.endswith("." + domain)
 
 
 def _group_list(sig: Signals, account: Account) -> bool:
@@ -264,14 +273,14 @@ def _group_list(sig: Signals, account: Account) -> bool:
     """
     if sig.is_discussion_list:
         return True
-    own = account.email.lower().rsplit("@", 1)[-1]
+    own = domain_of(account.email.lower())
     hosts = [_target_host(u) for u in (*sig.unsubscribe_https, *sig.unsubscribe_mailto)]
-    if any(_on_domain(h, g) for h in hosts for g in GROUP_HOSTS):
+    if any(on_domain(h, g) for h in hosts for g in PUBLIC_GROUP_HOSTS):
         return True
     if sig.relayed_by or sig.group_author:
         return True  # Google Groups relay, trusted or not
     names = [sig.sender_domain, (sig.list_id or "").lower()]
-    return any(_on_domain(n, own) for n in names if n)
+    return any(on_domain(n, own) for n in names if n)
 
 
 def _archive_group_confident(
@@ -374,5 +383,4 @@ def plan(
 
 def rule_keys(sender: str) -> list[str]:
     """Lookup order for sender rules: exact address, then @domain."""
-    domain = sender.rsplit("@", 1)[-1]
-    return [sender, f"@{domain}"]
+    return [sender, f"@{domain_of(sender)}"]

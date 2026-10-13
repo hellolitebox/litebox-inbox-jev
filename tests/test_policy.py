@@ -532,7 +532,7 @@ def test_untrusted_group_cannot_claim_an_allowlisted_author(cfg, account, group)
             "authentication-results": [f"mx.google.com; dmarc=pass header.from={domain}"],
         }
     )
-    sig = resolve_relay(sig, account.relay_domains)
+    sig = resolve_relay(sig, account.group_domains)
     assert sig.sender == group and sig.relayed_by is None
     with pytest.raises(ValueError):
         decide(cfg, account, sig)  # not allowlisted: Jev has to classify it

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Collection
+from enum import StrEnum
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -11,6 +12,14 @@ from .classifier import Classification
 from .config import Action, CategoriesConfig
 from .db import SenderRule
 from .policy import KNOWN_CONTACT, Decision, rule_keys, spares_known_contacts
+
+
+class RuleSource(StrEnum):
+    """Where a sender rule came from (stored in `sender_rules.source`)."""
+
+    MANUAL = "manual"  # `inbox-jev rules set`
+    CORRECTION = "correction"  # learned from a label the user changed in Gmail
+    AUTO = "auto"  # learned from consistent, confident Jev answers (record_auto)
 
 
 def lookup(session: Session, account: str, sender: str) -> SenderRule | None:
@@ -51,7 +60,9 @@ def active(session: Session, account: str, sender: str) -> list[SenderRule]:
     return sorted(found, key=lambda r: keys.index(r.sender_key))
 
 
-def set_rule(session: Session, account: str, sender_key: str, category: str, source: str) -> None:
+def set_rule(
+    session: Session, account: str, sender_key: str, category: str, source: RuleSource
+) -> None:
     rule = session.scalar(
         select(SenderRule).where(SenderRule.account == account, SenderRule.sender_key == sender_key)
     )
@@ -72,7 +83,7 @@ def record_auto(
 ) -> None:
     """Count consistent high-confidence answers; activate after cfg.auto_rule.hits.
 
-    Only for Jev decisions (`decision.source == "jev"`) outside dry_run: the caller checks.
+    Only for Jev decisions (`DecisionSource.JEV`) outside dry_run: the caller checks.
     Only touches automatic rules: manual and correction rules are never changed here. An active
     auto rule whose category was removed from categories.yaml is replaced like a pending one
     (`match` sends its sender to Jev: auto rules are keyed on the exact address, so they come
@@ -89,7 +100,7 @@ def record_auto(
     if (
         (is_keep or keep_signal)
         and rule is not None
-        and rule.source == "auto"
+        and rule.source == RuleSource.AUTO
         and not rule.active
         and not _is_keep(cfg, rule.category)
     ):
@@ -118,13 +129,13 @@ def record_auto(
                 account=account,
                 sender_key=sender,
                 category=decision.category,
-                source="auto",
+                source=RuleSource.AUTO,
                 hits=1,
                 active=cfg.auto_rule.hits <= 1,
             )
         )
         return
-    if rule.source != "auto" or (rule.active and rule.category in cfg.by_key):
+    if rule.source != RuleSource.AUTO or (rule.active and rule.category in cfg.by_key):
         return
     if rule.category == decision.category:
         rule.hits += 1

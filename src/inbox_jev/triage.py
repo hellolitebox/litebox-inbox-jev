@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -16,9 +15,17 @@ from . import corrections, rules
 from . import unsubscribe as unsub
 from .classifier import Classification, Classifier, JevError, build_state
 from .config import FREE_MAIL, Account, CategoriesConfig, Mode, Settings
-from .db import MAX_ERROR_ATTEMPTS, Message, Run, SenderRule, Unsubscribe, now
-from .gmail import Email, Gmail, is_token_refresh_error, load_credentials, token_error_detail
+from .db import MAX_ERROR_ATTEMPTS, Message, MessageStatus, Run, SenderRule, Unsubscribe, now
+from .gmail import (
+    Email,
+    Gmail,
+    is_not_found,
+    is_token_refresh_error,
+    load_credentials,
+    token_error_detail,
+)
 from .policy import (
+    DecisionSource,
     Veto,
     acts_on,
     decide,
@@ -28,7 +35,8 @@ from .policy import (
     unsubscribe_gate,
     unsubscribes,
 )
-from .signals import Signals, resolve_relay
+from .signals import ADDRESS, Signals, domain_of, resolve_relay
+from .unsubscribe import UnsubscribeStatus
 
 log = logging.getLogger(__name__)
 
@@ -37,13 +45,27 @@ MAX_UNSUB_ATTEMPTS = 3
 # each failure) and left alone (status stays `error`) after db.MAX_ERROR_ATTEMPTS failed passes,
 # about 10.5 hours after the first one, so an outage of a few hours doesn't make it give up.
 ERROR_RETRY_BACKOFF = timedelta(minutes=5)
-SAFE_ADDRESS = re.compile(r"^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$")
 
 
 @dataclass
 class RunCounts:
     processed: int = 0
     errors: int = 0
+
+
+@dataclass
+class UnsubscribeBudget:
+    """Unsubscribe attempts left in one `run` or `unsubscribe-retry` call (the run cap)."""
+
+    remaining: int
+
+    @property
+    def exhausted(self) -> bool:
+        return self.remaining <= 0
+
+    def spend(self) -> None:
+        """Count one attempt."""
+        self.remaining -= 1
 
 
 @dataclass
@@ -85,7 +107,7 @@ def run_account(
     """
     mode = effective_mode(ctx.settings, account, mode_override)
     with ctx.sessions() as session:
-        run = Run(account=account.email, mode=mode.value)
+        run = Run(account=account.email, mode=mode)
         session.add(run)
         session.commit()
         # Counted outside the ORM object: a rollback after a failed email would reset it.
@@ -105,7 +127,7 @@ def run_account(
                 "run finished",
                 extra={
                     "account": account.email,
-                    "mode": mode.value,
+                    "mode": mode,
                     "processed": run.processed,
                     "errors": run.errors,
                     "failed": run.error is not None,
@@ -148,8 +170,8 @@ def _run_pass(
         or_(
             Message.restored.is_(True),
             and_(
-                Message.status == "done",
-                Message.mode.not_in([m.value for m in weaker[mode]]),
+                Message.status == MessageStatus.DONE,
+                Message.mode.not_in(weaker[mode]),
             ),
         ),
     )
@@ -157,7 +179,7 @@ def _run_pass(
     errored = select(Message.gmail_id, Message.error_attempts, Message.processed_at).where(
         Message.account == account.email,
         Message.gmail_id.in_(ids),
-        Message.status == "error",
+        Message.status == MessageStatus.ERROR,
         Message.restored.is_(False),
     )
     started = now()
@@ -166,7 +188,7 @@ def _run_pass(
         for gmail_id, attempts, last in session.execute(errored)
         if not _retry_due(attempts, last, started)
     )
-    budget = [ctx.settings.max_unsubscribes_per_run]
+    budget = UnsubscribeBudget(ctx.settings.max_unsubscribes_per_run)
     for message_id in ids:
         if message_id in done:
             continue
@@ -229,8 +251,8 @@ def mark_for_reprocess(
         raise ValueError(f"unknown category {category!r}; one of {', '.join(cfg.by_key)}")
     query = update(Message).where(
         Message.account == account,
-        Message.status == "done",
-        Message.mode == Mode.ACT.value,
+        Message.status == MessageStatus.DONE,
+        Message.mode == Mode.ACT,
         Message.category == category,
         Message.archived.is_(False),
         Message.spammed.is_(False),
@@ -238,7 +260,7 @@ def mark_for_reprocess(
     )
     if low_confidence_only:
         query = query.where(Message.low_confidence.is_(True))
-    count = _update_count(session, query.values(mode=Mode.LABEL.value))
+    count = _update_count(session, query.values(mode=Mode.LABEL))
     session.commit()
     return count
 
@@ -270,8 +292,8 @@ def restore(
     ids = gmail.labels()
     query = select(Message).where(
         Message.account == account,
-        Message.status == "done",
-        Message.mode != Mode.DRY_RUN.value,
+        Message.status == MessageStatus.DONE,
+        Message.mode != Mode.DRY_RUN,
         Message.restored.is_(False),
         Message.processed_at >= now() - since,
     )
@@ -287,8 +309,8 @@ def restore(
             remove.append("SPAM")
         try:
             gmail.modify(msg.gmail_id, add=add, remove=remove)
-        except Exception as exc:  # googleapiclient.errors.HttpError 404
-            if not _not_found(exc):
+        except Exception as exc:
+            if not is_not_found(exc):
                 raise
             log.warning("restore: email deleted", extra={"account": account, "id": msg.gmail_id})
             result.deleted += 1
@@ -311,7 +333,7 @@ def reset_error_attempts(session: Session, account: str) -> int:
     Only emails still within that run's `--lookback` window are retried. Returns how many rows
     were reset.
     """
-    query = update(Message).where(Message.account == account, Message.status == "error")
+    query = update(Message).where(Message.account == account, Message.status == MessageStatus.ERROR)
     count = _update_count(session, query.values(error_attempts=0))
     session.commit()
     return count
@@ -325,7 +347,7 @@ def process(
     mode: Mode,
     label_ids: dict[str, str],
     message_id: str,
-    unsub_budget: list[int],
+    unsub_budget: UnsubscribeBudget,
 ) -> Message:
     email = gmail.get(message_id)
     sig = signals_for(email, account)
@@ -338,7 +360,7 @@ def process(
         and _user_touched(ctx.cfg, session, account, prev, email, label_ids)
     ):
         # Leave Gmail and labels_added as they are; just don't revisit it in this mode.
-        prev.status, prev.error, prev.mode = "done", None, mode.value
+        prev.status, prev.error, prev.mode = MessageStatus.DONE, None, mode
         prev.error_attempts = 0
         session.commit()
         return prev
@@ -381,7 +403,7 @@ def process(
         remove=actions.remove_labels + stale,
     )
 
-    msg.status, msg.error, msg.error_attempts = "done", None, 0
+    msg.status, msg.error, msg.error_attempts = MessageStatus.DONE, None, 0
     msg.source = decision.source
     msg.jev_category = classification.category if classification else None
     msg.category = decision.category
@@ -391,7 +413,7 @@ def process(
     msg.tags = classification.tags if classification else None
     msg.low_confidence = decision.low_confidence
     msg.downgraded_to_spam = decision.downgraded_to_spam
-    msg.mode = mode.value
+    msg.mode = mode
     msg.labels_added = actions.add_labels
     msg.decided_labels = decision.add_labels
     msg.archived, msg.spammed = actions.archived, actions.spammed
@@ -399,16 +421,16 @@ def process(
 
     # Only Jev's own decisions count, and not in dry_run: a rule learned there would apply
     # without Jev (and act) as soon as the mode is label or act.
-    if classification and decision.source == "jev" and mode != Mode.DRY_RUN:
+    if classification and decision.source == DecisionSource.JEV and mode != Mode.DRY_RUN:
         rules.record_auto(
             session, ctx.cfg, account.email, sig.sender, classification, decision, contact
         )
     if (
         actions.unsubscribe
-        and unsub_budget[0] > 0
+        and not unsub_budget.exhausted
         and _unsubscribe(session, gmail, account, email, sig)
     ):
-        unsub_budget[0] -= 1
+        unsub_budget.spend()
 
     session.commit()
     log.info(
@@ -478,7 +500,7 @@ def signals_for(email: Email, account: Account) -> Signals:
 
     Use this, not `email.signals`, wherever the sender drives a decision, a rule or the DB.
     """
-    return resolve_relay(email.signals, account.relay_domains)
+    return resolve_relay(email.signals, account.group_domains)
 
 
 # Headers signals_for needs to recover a group's author (see signals.original_sender).
@@ -501,8 +523,8 @@ def backfill_senders(session: Session, gmail: Gmail, account: Account) -> tuple[
     for msg in rows:
         try:
             email = gmail.get_headers(msg.gmail_id, _SENDER_HEADERS)
-        except Exception as exc:  # googleapiclient.errors.HttpError 404
-            if not _not_found(exc):
+        except Exception as exc:
+            if not is_not_found(exc):
                 raise
             log.warning("backfill: email deleted", extra={"account": account.email})
             skipped += 1
@@ -522,13 +544,13 @@ def previous_contact(gmail: Gmail, account: str, sender: str) -> str | None:
     who else I wrote to) and for my own domain (colleagues are allowlisted, if at all).
     """
     sender = sender.lower()
-    if not SAFE_ADDRESS.match(sender):
+    if not ADDRESS.match(sender):
         return None  # odd characters would change the Gmail search query
-    domain = sender.rsplit("@", 1)[-1]
+    domain = domain_of(sender)
     try:
         if gmail.has_written_to(sender):
             return "wrote_to_sender"
-        own = account.lower().rsplit("@", 1)[-1]
+        own = domain_of(account.lower())
         if domain not in FREE_MAIL and domain != own and gmail.has_written_to(domain):
             return "wrote_to_their_domain"
     except Exception:
@@ -642,14 +664,14 @@ def retry_unsubscribes(
     rows = session.scalars(
         select(Unsubscribe).where(
             Unsubscribe.account == account.email,
-            Unsubscribe.status == "failed",
+            Unsubscribe.status == UnsubscribeStatus.FAILED,
             Unsubscribe.attempts < MAX_UNSUB_ATTEMPTS,
         )
     ).all()
     if mode != Mode.ACT:
-        return [(row.list_key, f"held: mode is {mode.value}") for row in rows]
+        return [(row.list_key, f"held: mode is {mode}") for row in rows]
     out: list[tuple[str, str]] = []
-    budget = ctx.settings.max_unsubscribes_per_run
+    budget = UnsubscribeBudget(ctx.settings.max_unsubscribes_per_run)
     names: dict[str, str] | None = None
     for row in rows:
         msg = _find_message(session, account.email, row.gmail_id)
@@ -664,13 +686,13 @@ def retry_unsubscribes(
         if reason:
             out.append(_skip(session, row, reason))
             continue
-        if budget <= 0:
+        if budget.exhausted:
             out.append((row.list_key, "held: run cap reached"))
             continue
         try:
             email = gmail.get(row.gmail_id)
         except Exception as exc:
-            if _not_found(exc):
+            if is_not_found(exc):
                 out.append((row.list_key, "held: email deleted in Gmail"))
                 continue
             raise
@@ -703,11 +725,11 @@ def retry_unsubscribes(
             out.append((row.list_key, f"held: category {category} doesn't unsubscribe here"))
             continue
         held = None
-        if rule_category is None and msg.source != "jev":
+        if rule_category is None and msg.source != DecisionSource.JEV:
             held = "rule since removed"  # run would ask Jev again; not worth it for a retry
         elif (
             rule_category is None
-            and msg.source == "jev"
+            and msg.source == DecisionSource.JEV
             and not _confident(ctx.cfg, account, msg, category)
         ):
             held = f"confidence {msg.confidence} below the {category} threshold"
@@ -727,7 +749,7 @@ def retry_unsubscribes(
         result = unsub.unsubscribe(sig, send_mail=gmail.send)
         record_attempt(row, result)
         session.commit()
-        budget -= 1
+        budget.spend()
         out.append((row.list_key, result.status))
     return out
 
@@ -744,7 +766,7 @@ _RETRY_SKIP_REASONS = {
 
 
 def _skip(session: Session, row: Unsubscribe, reason: str) -> tuple[str, str]:
-    row.status, row.error, row.attempted_at = "skipped", f"retry: {reason}", now()
+    row.status, row.error, row.attempted_at = UnsubscribeStatus.SKIPPED, f"retry: {reason}", now()
     session.commit()
     return row.list_key, f"skipped: {reason}"
 
@@ -763,7 +785,9 @@ def _unsub_row(session: Session, account: str, list_key: str) -> Unsubscribe | N
 
 def _unsub_settled(row: Unsubscribe | None) -> bool:
     """No further attempt will be made: done (ok, or any non-failed status) or out of retries."""
-    return row is not None and (row.status != "failed" or row.attempts >= MAX_UNSUB_ATTEMPTS)
+    return row is not None and (
+        row.status != UnsubscribeStatus.FAILED or row.attempts >= MAX_UNSUB_ATTEMPTS
+    )
 
 
 def _unsubscribe(
@@ -804,11 +828,6 @@ def record_attempt(row: Unsubscribe, result: unsub.Result) -> None:
     )
 
 
-def _not_found(exc: BaseException) -> bool:
-    """A Gmail API error saying the email no longer exists (HttpError with status 404)."""
-    return getattr(getattr(exc, "resp", None), "status", None) == 404
-
-
 def _find_message(session: Session, account: str, gmail_id: str) -> Message | None:
     return session.scalar(
         select(Message).where(Message.account == account, Message.gmail_id == gmail_id)
@@ -835,7 +854,7 @@ def _record_error(
     if msg is None:
         msg = Message(account=account, gmail_id=message_id, thread_id="", sender="")
         session.add(msg)
-    msg.status, msg.mode = "error", mode.value
+    msg.status, msg.mode = MessageStatus.ERROR, mode
     msg.error = f"{type(exc).__name__}: {exc}"[:2000]
     msg.error_attempts = (msg.error_attempts or 0) + 1
     msg.processed_at = now()

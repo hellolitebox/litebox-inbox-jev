@@ -22,6 +22,7 @@ from inbox_jev.config import Account, Mode, Settings
 from inbox_jev.db import Message, SenderRule, Unsubscribe, make_session_factory
 from inbox_jev.gmail import Email, extract_body
 from inbox_jev.policy import decide, plan
+from inbox_jev.rules import RuleSource
 from inbox_jev.signals import extract
 
 DOC = Path(__file__).resolve().parents[1] / "docs" / "how-it-decides.md"
@@ -528,9 +529,9 @@ def test_ex14_rule_to_removed_category_goes_through_jev(spec, caplog):
     gmail.emails["3"] = email("3", "Billing <billing@vendor.example>", "Invoice 88")
     ctx._classifier.answers["Invoice 88"] = answer("important", important=0.96, marketing=0.04)
     with ctx.sessions() as s:
-        rules.set_rule(s, account.email, "@deals.example", "promotions", "manual")
-        rules.set_rule(s, account.email, "@vendor.example", "marketing", "manual")
-        rules.set_rule(s, account.email, "billing@vendor.example", "promotions", "manual")
+        rules.set_rule(s, account.email, "@deals.example", "promotions", RuleSource.MANUAL)
+        rules.set_rule(s, account.email, "@vendor.example", "marketing", RuleSource.MANUAL)
+        rules.set_rule(s, account.email, "billing@vendor.example", "promotions", RuleSource.MANUAL)
         s.commit()
     run = triage.run_account(ctx, account, Mode.ACT)
 
@@ -566,8 +567,8 @@ def test_ex15_keep_rule_still_gets_needs_reply(spec):
         "cold_outreach", needs_reply=0.92, cold_outreach=0.55, important=0.45
     )
     with ctx.sessions() as s:
-        rules.set_rule(s, account.email, "ana@client.example", "important", "correction")
-        rules.set_rule(s, account.email, "news@weekly.example", "newsletter", "auto")
+        rules.set_rule(s, account.email, "ana@client.example", "important", RuleSource.CORRECTION)
+        rules.set_rule(s, account.email, "news@weekly.example", "newsletter", RuleSource.AUTO)
         s.commit()
     triage.run_account(ctx, account, Mode.ACT)
 
@@ -599,7 +600,7 @@ def test_ex19_flags_only_jev_failure_still_labels(spec, caplog):
     }
     ctx._classifier = _JevDown({})
     with ctx.sessions() as s:
-        rules.set_rule(s, account.email, "ana@client.example", "important", "correction")
+        rules.set_rule(s, account.email, "ana@client.example", "important", RuleSource.CORRECTION)
         s.commit()
     run = triage.run_account(ctx, account, Mode.ACT)
 

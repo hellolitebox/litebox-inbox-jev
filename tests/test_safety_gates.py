@@ -15,6 +15,7 @@ from inbox_jev import rules, triage
 from inbox_jev.config import Mode
 from inbox_jev.db import Message
 from inbox_jev.policy import GateResult, Veto, acts_on, unsubscribe_gate
+from inbox_jev.rules import RuleSource
 
 
 @pytest.mark.parametrize(
@@ -144,7 +145,7 @@ def _rule_path(ctx, gmail, account, sc):
     gmail.emails = {"9": _email(sc)}
     sender = triage.signals_for(gmail.emails["9"], account).sender
     with ctx.sessions() as s:
-        rules.set_rule(s, account.email, sender, sc.category, "manual")
+        rules.set_rule(s, account.email, sender, sc.category, RuleSource.MANUAL)
         s.commit()
     triage.run_account(ctx, account, sc.mode)
 

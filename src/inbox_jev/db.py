@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 
 from sqlalchemy import (
@@ -35,6 +36,17 @@ def now() -> datetime:
     return datetime.now(UTC)
 
 
+class MessageStatus(StrEnum):
+    """`messages.status`: the last pass over the email succeeded or failed."""
+
+    DONE = "done"
+    ERROR = "error"
+
+
+# String columns that hold a StrEnum's values: assign the members (a StrEnum is a str, so the
+# stored text is the value) and compare against them; rows read back are plain strings.
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -43,7 +55,7 @@ class Run(Base):
     __tablename__ = "runs"
     id: Mapped[int] = mapped_column(primary_key=True)
     account: Mapped[str] = mapped_column(String(320), index=True)
-    mode: Mapped[str] = mapped_column(String(16))
+    mode: Mapped[str] = mapped_column(String(16))  # config.Mode
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     processed: Mapped[int] = mapped_column(Integer, default=0)
@@ -63,13 +75,13 @@ class Message(Base):
     from_header: Mapped[str] = mapped_column(Text, default="")
     subject: Mapped[str] = mapped_column(Text, default="")
     received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    status: Mapped[str] = mapped_column(String(16), default="done")  # done | error
+    status: Mapped[str] = mapped_column(String(16), default=MessageStatus.DONE)
     error: Mapped[str | None] = mapped_column(Text)
     # Consecutive failed passes; reset on success. Retries stop at MAX_ERROR_ATTEMPTS.
     # server_default too, so inserts that don't know the column (older code after a rollback,
     # raw SQL) still work on databases created by this version.
     error_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
-    source: Mapped[str | None] = mapped_column(String(16))  # jev | rule | allowlist
+    source: Mapped[str | None] = mapped_column(String(16))  # policy.DecisionSource
     jev_category: Mapped[str | None] = mapped_column(String(64))  # raw model answer
     category: Mapped[str | None] = mapped_column(String(64), index=True)  # after policy
     confidence: Mapped[float | None] = mapped_column(Float)
@@ -80,7 +92,7 @@ class Message(Base):
     # Historical name, kept to avoid a migration: now means "unsubscribe skipped: unverified
     # sender" (marketing without dmarc=pass or List-Unsubscribe; archived, not spammed).
     downgraded_to_spam: Mapped[bool] = mapped_column(Boolean, default=False)
-    mode: Mapped[str] = mapped_column(String(16))
+    mode: Mapped[str] = mapped_column(String(16))  # config.Mode
     labels_added: Mapped[list | None] = mapped_column(JSON)  # applied in Gmail
     decided_labels: Mapped[list | None] = mapped_column(JSON)  # policy output, any mode
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -100,10 +112,9 @@ class Unsubscribe(Base):
     list_key: Mapped[str] = mapped_column(String(320))
     sender: Mapped[str] = mapped_column(String(320))
     gmail_id: Mapped[str] = mapped_column(String(64))
-    method: Mapped[str] = mapped_column(String(16))  # one_click | mailto | manual
+    method: Mapped[str] = mapped_column(String(16))  # unsubscribe.UnsubscribeMethod
     target: Mapped[str | None] = mapped_column(Text)
-    # ok | failed | manual_pending | skipped
-    status: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(16))  # unsubscribe.UnsubscribeStatus
     http_status: Mapped[int | None] = mapped_column(Integer)
     error: Mapped[str | None] = mapped_column(Text)
     attempts: Mapped[int] = mapped_column(Integer, default=1)
@@ -118,7 +129,7 @@ class SenderRule(Base):
     account: Mapped[str] = mapped_column(String(320), index=True)
     sender_key: Mapped[str] = mapped_column(String(320))  # address or "@domain"
     category: Mapped[str] = mapped_column(String(64))
-    source: Mapped[str] = mapped_column(String(16))  # manual | correction | auto
+    source: Mapped[str] = mapped_column(String(16))  # rules.RuleSource
     hits: Mapped[int] = mapped_column(Integer, default=0)
     active: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)

@@ -58,12 +58,12 @@ def test_reply_keep_probability_within_ceiling_is_accepted(cfg, floor, keep):
     assert c.archive_group_reply_keep_probability == keep
 
 
-def test_relay_domains_are_opt_in_group_domains_only():
+def test_group_domains_are_opt_in():
     # The account's own domain isn't trusted implicitly.
-    assert account("").relay_domains == []
-    assert account("group_domains: [Sister.org]\n").relay_domains == ["sister.org"]
+    assert account("").group_domains == []
+    assert account("group_domains: [Sister.org]\n").group_domains == ["sister.org"]
     # An unlisted public provider (not in FREE_MAIL) trusts nothing either.
-    assert Account.model_validate({"email": "me@mac.com"}).relay_domains == []
+    assert Account.model_validate({"email": "me@mac.com"}).group_domains == []
 
 
 @pytest.mark.parametrize(

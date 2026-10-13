@@ -11,6 +11,8 @@ import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .signals import domain_of, on_domain
+
 # Gmail `newer_than:` units: days, months, years.
 LOOKBACK_RE = re.compile(r"^\d+[dmy]$")
 
@@ -41,10 +43,6 @@ _PUBLIC_SLD = frozenset({"ac", "co", "com", "edu", "gob", "go", "gov", "ne", "ne
 _DOMAIN = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)+$")
 
 
-def _on_domain(domain: str, parent: str) -> bool:
-    return domain == parent or domain.endswith("." + parent)
-
-
 def normalize_group_domain(value: str) -> str:
     """Normalised group_domains entry, or ValueError if it isn't a domain someone can own."""
     domain = value.strip().lower().rstrip(".").removeprefix("@")
@@ -53,7 +51,7 @@ def normalize_group_domain(value: str) -> str:
     labels = domain.split(".")
     if len(labels) == 2 and len(labels[1]) == 2 and labels[0] in _PUBLIC_SLD:
         raise ValueError(f"group_domains entry {value!r} is a public suffix, not a domain")
-    public = next((p for p in FREE_MAIL | PUBLIC_GROUP_HOSTS if _on_domain(domain, p)), None)
+    public = next((p for p in FREE_MAIL | PUBLIC_GROUP_HOSTS if on_domain(domain, p)), None)
     if public:
         raise ValueError(f"group_domains can't include public domains: {value!r} ({public})")
     return domain
@@ -220,19 +218,12 @@ class Account(BaseModel):
     def _check_group_domains(cls, value: list[str]) -> list[str]:
         return [normalize_group_domain(d) for d in value]
 
-    @property
-    def relay_domains(self) -> list[str]:
-        """Domains whose groups' X-Original-Sender is trusted (signals.resolve_relay)."""
-        return list(self.group_domains)
-
     def is_allowed(self, sender: str) -> bool:
         sender = sender.lower()
-        domain = sender.rsplit("@", 1)[-1]
         if sender in (s.lower() for s in self.allow_senders):
             return True
-        return any(
-            domain == d.lower() or domain.endswith("." + d.lower()) for d in self.allow_domains
-        )
+        domain = domain_of(sender)
+        return any(on_domain(domain, d.lower()) for d in self.allow_domains)
 
 
 class AccountsConfig(BaseModel):

@@ -10,7 +10,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import Action, CategoriesConfig
-from .db import MAX_ERROR_ATTEMPTS, Message, Run, Unsubscribe, now
+from .db import MAX_ERROR_ATTEMPTS, Message, MessageStatus, Run, Unsubscribe, now
+from .unsubscribe import UnsubscribeStatus
 
 MAX_ITEMS = 15
 
@@ -52,8 +53,8 @@ def build(session: Session, cfg: CategoriesConfig, account: str, hours: int = 24
         .where(Message.account == account, Message.processed_at >= since)
         .order_by(Message.processed_at.desc())
     ).all()
-    done = [m for m in msgs if m.status == "done"]
-    errors = [m for m in msgs if m.status == "error"]
+    done = [m for m in msgs if m.status == MessageStatus.DONE]
+    errors = [m for m in msgs if m.status == MessageStatus.ERROR]
     unsubs = session.scalars(
         select(Unsubscribe).where(Unsubscribe.account == account, Unsubscribe.attempted_at >= since)
     ).all()
@@ -85,11 +86,11 @@ def build(session: Session, cfg: CategoriesConfig, account: str, hours: int = 24
         out.append(f"\n*⚡ Piden respuesta ({len(reply)})*")
         out += [_line(account, m) for m in reply[:MAX_ITEMS]]
 
-    ok = [u for u in unsubs if u.status == "ok"]
+    ok = [u for u in unsubs if u.status == UnsubscribeStatus.OK]
     if ok:
         out.append(f"\n*🚫 Desuscripto ({len(ok)})*")
         out += [f"• {esc(u.list_key)} ({u.method})" for u in ok[:MAX_ITEMS]]
-    pending = [u for u in unsubs if u.status == "manual_pending"]
+    pending = [u for u in unsubs if u.status == UnsubscribeStatus.MANUAL_PENDING]
     if pending:
         out.append(f"\n*🖐 Unsubscribe manual ({len(pending)})*")
         out += [
@@ -97,7 +98,7 @@ def build(session: Session, cfg: CategoriesConfig, account: str, hours: int = 24
             + (_link(u.target, "link") if u.target else "link en el cuerpo")
             for u in pending[:MAX_ITEMS]
         ]
-    failed = [u for u in unsubs if u.status == "failed"]
+    failed = [u for u in unsubs if u.status == UnsubscribeStatus.FAILED]
     if failed:
         out.append(f"\n*❗ Unsubscribe fallido ({len(failed)})*")
         out += [

@@ -8,8 +8,11 @@ from conftest import GMAIL_PASS, make_classification
 from inbox_jev import digest, rules, triage
 from inbox_jev.classifier import JevError
 from inbox_jev.config import Mode, Settings
-from inbox_jev.db import Message, SenderRule, Unsubscribe, make_session_factory, now
+from inbox_jev.db import Message, MessageStatus, SenderRule, Unsubscribe, make_session_factory, now
 from inbox_jev.gmail import Email
+from inbox_jev.policy import DecisionSource
+from inbox_jev.rules import RuleSource
+from inbox_jev.unsubscribe import UnsubscribeMethod, UnsubscribeStatus
 
 
 class FakeGmail:
@@ -598,7 +601,7 @@ def test_manual_domain_rule_on_known_domain_never_unsubscribes(setup, act_catego
     ctx, gmail, account = setup
     account.act_categories = act_categories  # an explicit list must still run the search
     with ctx.sessions() as s:
-        rules.set_rule(s, account.email, "@agency.io", "cold_outreach", "manual")
+        rules.set_rule(s, account.email, "@agency.io", "cold_outreach", RuleSource.MANUAL)
         s.commit()
     gmail.written = frozenset({"agency.io"})  # wrote_to_their_domain
     gmail.emails = {"9": _pitch("9")}
@@ -611,7 +614,7 @@ def test_manual_domain_rule_on_known_domain_never_unsubscribes(setup, act_catego
 def test_rule_path_still_unsubscribes_strangers(setup):
     ctx, gmail, account = setup
     with ctx.sessions() as s:
-        rules.set_rule(s, account.email, "@agency.io", "cold_outreach", "manual")
+        rules.set_rule(s, account.email, "@agency.io", "cold_outreach", RuleSource.MANUAL)
         s.commit()
     gmail.emails = {"9": _pitch("9")}
     triage.run_account(ctx, account, Mode.ACT)
@@ -632,7 +635,7 @@ def test_rule_path_still_unsubscribes_strangers(setup):
 def test_rule_hit_that_cannot_unsubscribe_skips_contact_check(setup, category, headers, settled):
     ctx, gmail, account = setup
     with ctx.sessions() as s:
-        rules.set_rule(s, account.email, "bob@agency.io", category, "manual")
+        rules.set_rule(s, account.email, "bob@agency.io", category, RuleSource.MANUAL)
         if settled:
             s.add(
                 Unsubscribe(
@@ -640,8 +643,8 @@ def test_rule_hit_that_cannot_unsubscribe_skips_contact_check(setup, category, h
                     list_key="agency.io",
                     sender="bob@agency.io",
                     gmail_id="0",
-                    method="mailto",
-                    status="ok",
+                    method=UnsubscribeMethod.MAILTO,
+                    status=UnsubscribeStatus.OK,
                 )
             )
         s.commit()
@@ -663,7 +666,7 @@ def test_rule_hit_that_will_not_act_skips_contact_check(setup, mode, act_categor
     ctx, gmail, account = setup
     account.act_categories = act_categories
     with ctx.sessions() as s:
-        rules.set_rule(s, account.email, "bob@agency.io", "cold_outreach", "manual")
+        rules.set_rule(s, account.email, "bob@agency.io", "cold_outreach", RuleSource.MANUAL)
         s.commit()
     gmail.emails = {"9": _pitch("9")}
     triage.run_account(ctx, account, mode)
@@ -815,7 +818,7 @@ def test_group_on_unlisted_public_provider_is_not_trusted(setup):
 
 
 def _failed_unsub(s, account, gmail_id, list_key, category, sender="bob@agency.io", **msg):
-    fields = dict(source="jev", confidence=0.95, archived=True, labels_added=[])
+    fields = dict(source=DecisionSource.JEV, confidence=0.95, archived=True, labels_added=[])
     fields.update(msg)
     s.add(
         Message(
@@ -824,8 +827,8 @@ def _failed_unsub(s, account, gmail_id, list_key, category, sender="bob@agency.i
             thread_id="t" + gmail_id,
             sender=sender,
             category=category,
-            mode="act",
-            status="done",
+            mode=Mode.ACT,
+            status=MessageStatus.DONE,
             **fields,
         )
     )
@@ -835,8 +838,8 @@ def _failed_unsub(s, account, gmail_id, list_key, category, sender="bob@agency.i
             list_key=list_key,
             sender=sender,
             gmail_id=gmail_id,
-            method="mailto",
-            status="failed",
+            method=UnsubscribeMethod.MAILTO,
+            status=UnsubscribeStatus.FAILED,
             attempts=1,
         )
     )
@@ -1003,7 +1006,7 @@ def test_retry_skips_user_decisions_before_gmail(setup, monkeypatch, fields, rea
     assert gmail.sent == []
 
 
-@pytest.mark.parametrize("source", ["manual", "correction"])
+@pytest.mark.parametrize("source", [RuleSource.MANUAL, RuleSource.CORRECTION])
 def test_retry_follows_current_sender_rule(setup, source):
     # The user (or a correction) has since said Bob's mail is important: run would keep it.
     ctx, gmail, account = setup
@@ -1025,7 +1028,7 @@ def test_retry_rule_to_unsubscribing_category_skips_confidence_check(setup):
     gmail.emails = _archived(_pitch("9"))
     with ctx.sessions() as s:
         _failed_unsub(s, account, "9", "agency.io", "cold_outreach", confidence=0.5)
-        rules.set_rule(s, account.email, "bob@agency.io", "marketing", source="manual")
+        rules.set_rule(s, account.email, "bob@agency.io", "marketing", source=RuleSource.MANUAL)
         s.commit()
     out, _ = _retry(ctx, gmail, account)
     assert out == {"agency.io": "ok"} and gmail.sent == ["u@agency.io"]
@@ -1092,7 +1095,7 @@ def test_retry_skips_edits_run_leaves_alone(setup, live, outcome):
         assert rows["agency.io"] == ("skipped", 1) and gmail.sent == []
 
 
-@pytest.mark.parametrize("source", ["rule", None])
+@pytest.mark.parametrize("source", [DecisionSource.RULE, None])
 def test_retry_holds_rule_decision_whose_rule_was_removed(setup, source):
     # `rules delete` means "Jev decides again": the deleted rule's 1.0 must not unsubscribe.
     ctx, gmail, account = setup
@@ -1157,7 +1160,7 @@ def test_rule_to_removed_category_goes_through_jev_and_warns_once(setup, caplog)
     gmail.emails["5"] = email("5", "Shop <promo@shop.com>", "Second promo")
     ctx._classifier.answers["Second promo"] = make_classification("marketing", 0.97)
     with ctx.sessions() as s:
-        rules.set_rule(s, account.email, "promo@shop.com", "promotions", "manual")
+        rules.set_rule(s, account.email, "promo@shop.com", "promotions", RuleSource.MANUAL)
         s.commit()
     run = triage.run_account(ctx, account, Mode.LABEL)
     assert (run.processed, run.errors) == (5, 0)
@@ -1178,8 +1181,8 @@ def test_stale_exact_rule_sends_sender_to_jev_not_to_the_domain_rule(setup, capl
     # Jev decides (and relearns the auto rule); the @shop.com rule doesn't apply.
     ctx, gmail, account = setup
     with ctx.sessions() as s:
-        rules.set_rule(s, account.email, "promo@shop.com", "promotions", "auto")
-        rules.set_rule(s, account.email, "@shop.com", "newsletter", "manual")
+        rules.set_rule(s, account.email, "promo@shop.com", "promotions", RuleSource.AUTO)
+        rules.set_rule(s, account.email, "@shop.com", "newsletter", RuleSource.MANUAL)
         s.commit()
     triage.run_account(ctx, account, Mode.ACT)
     with ctx.sessions() as s:
@@ -1204,9 +1207,11 @@ def test_retry_holds_rule_decision_whose_exact_rule_went_stale(setup):
     account.mode = Mode.ACT
     gmail.emails = _archived(_pitch("9"))
     with ctx.sessions() as s:
-        rules.set_rule(s, account.email, "bob@agency.io", "promotions", "manual")
-        rules.set_rule(s, account.email, "@agency.io", "cold_outreach", "manual")
-        _failed_unsub(s, account, "9", "agency.io", "cold_outreach", source="rule", confidence=1)
+        rules.set_rule(s, account.email, "bob@agency.io", "promotions", RuleSource.MANUAL)
+        rules.set_rule(s, account.email, "@agency.io", "cold_outreach", RuleSource.MANUAL)
+        _failed_unsub(
+            s, account, "9", "agency.io", "cold_outreach", source=DecisionSource.RULE, confidence=1
+        )
     out, rows = _retry(ctx, gmail, account)
     assert out == {"agency.io": "held: rule since removed"} and rows["agency.io"] == ("failed", 1)
     assert gmail.sent == []
@@ -1222,7 +1227,7 @@ def test_flags_only_jev_failure_still_labels_allowlist_and_keep_rule(setup, capl
     ctx, gmail, account = setup
     ctx._classifier = _JevDown({})
     with ctx.sessions() as s:
-        rules.set_rule(s, account.email, "promo@shop.com", "important", "correction")
+        rules.set_rule(s, account.email, "promo@shop.com", "important", RuleSource.CORRECTION)
         s.commit()
     run = triage.run_account(ctx, account, Mode.ACT)
     assert (run.processed, run.errors) == (2, 2)  # only the Jev-decided emails fail
@@ -1249,8 +1254,8 @@ def test_keep_rule_and_allowlist_ask_jev_for_flags_only(setup):
     ctx._classifier.answers["Internal"] = make_classification("notification", 0.99, 0.9, tag)
     ctx._classifier.answers["50% off"] = make_classification("marketing", 0.99, 0.9)
     with ctx.sessions() as s:
-        rules.set_rule(s, account.email, "promo@shop.com", "important", "correction")
-        rules.set_rule(s, account.email, "w@weird.biz", "newsletter", "manual")
+        rules.set_rule(s, account.email, "promo@shop.com", "important", RuleSource.CORRECTION)
+        rules.set_rule(s, account.email, "w@weird.biz", "newsletter", RuleSource.MANUAL)
         s.commit()
     triage.run_account(ctx, account, Mode.ACT)
     asked = {st["subject"]: st for st in ctx._classifier.states}
@@ -1293,3 +1298,12 @@ def test_dry_run_learns_no_auto_rules(setup):
     with ctx.sessions() as s:
         rule = s.query(SenderRule).one()
         assert (rule.sender_key, rule.hits, rule.active) == ("promo@shop.com", 1, False)
+
+
+def test_unsubscribe_budget_counts_down_to_exhausted():
+    budget = triage.UnsubscribeBudget(2)
+    assert not budget.exhausted
+    budget.spend()
+    budget.spend()
+    assert budget.exhausted and budget.remaining == 0
+    assert triage.UnsubscribeBudget(0).exhausted  # MAX_UNSUBSCRIBES_PER_RUN=0 never unsubscribes

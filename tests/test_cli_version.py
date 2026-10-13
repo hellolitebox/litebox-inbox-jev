@@ -2,10 +2,13 @@
 from."""
 
 import logging
+from importlib.metadata import version
 
 from typer.testing import CliRunner
 
+import inbox_jev
 from inbox_jev import cli
+from inbox_jev import unsubscribe as unsub
 from inbox_jev.config import Settings
 
 
@@ -15,6 +18,15 @@ def test_version_prints_release_and_revision(monkeypatch):
     assert result.exit_code == 0, result.output
     assert result.output.startswith("inbox-jev ")
     assert result.output.rstrip().endswith("(0123abc0123abc0123abc0123abc0123abc01234)")
+
+
+def test_one_version_source_for_package_cli_and_user_agent(monkeypatch):
+    """pyproject.toml's version, via the installed metadata, is the only version string."""
+    monkeypatch.delenv(cli.REVISION_ENV, raising=False)
+    release = version("inbox-jev")
+    assert inbox_jev.__version__ == release
+    assert unsub.USER_AGENT.startswith(f"inbox-jev/{release} ")
+    assert CliRunner().invoke(cli.app, ["--version"]).output == f"inbox-jev {release}\n"
 
 
 def test_version_without_revision_needs_no_configuration(monkeypatch):

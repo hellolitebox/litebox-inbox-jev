@@ -1,7 +1,14 @@
 import pytest
 from conftest import GMAIL_PASS
 
-from inbox_jev.signals import dmarc_passed, extract, parse_list_unsubscribe, resolve_relay
+from inbox_jev.signals import (
+    dmarc_passed,
+    domain_of,
+    extract,
+    on_domain,
+    parse_list_unsubscribe,
+    resolve_relay,
+)
 
 
 def test_parse_list_unsubscribe_mixed():
@@ -178,3 +185,22 @@ def test_http_only_list_unsubscribe_counts_as_none():
         }
     )
     assert sig.dmarc_pass and not sig.has_unsubscribe and not sig.one_click
+
+
+def test_domain_of_takes_the_part_after_the_last_at():
+    assert domain_of("bob@Shop.com") == "Shop.com"  # case is the caller's job
+    assert domain_of('"a@b"@shop.com') == "shop.com"
+    assert domain_of("no-at-sign") == "no-at-sign"
+
+
+@pytest.mark.parametrize(
+    "host, parent, expected",
+    [
+        ("shop.com", "shop.com", True),
+        ("mail.shop.com", "shop.com", True),
+        ("evilshop.com", "shop.com", False),
+        ("shop.com.evil.io", "shop.com", False),
+    ],
+)
+def test_on_domain_matches_the_domain_and_its_subdomains_only(host, parent, expected):
+    assert on_domain(host, parent) is expected

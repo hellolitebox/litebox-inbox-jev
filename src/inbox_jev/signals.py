@@ -8,6 +8,24 @@ from email.utils import parseaddr
 
 _ANGLE = re.compile(r"<([^>]+)>")
 _DMARC = re.compile(r"\bdmarc=(\w+)", re.IGNORECASE)
+# A plain lowercase address, safe to put in a Gmail search query or trust as a group's author.
+ADDRESS = re.compile(r"^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$")
+
+
+def domain_of(address: str) -> str:
+    """The part after the last "@" (the whole string when there is none). Case is kept."""
+    return address.rsplit("@", 1)[-1]
+
+
+def on_domain(host: str, parent: str) -> bool:
+    """Whether `host` is `parent` or one of its subdomains. Both must already be lowercase."""
+    return host == parent or host.endswith("." + parent)
+
+
+def first_header(headers: dict[str, list[str]], name: str) -> str | None:
+    """The first value of header `name` (lowercased key), or None when it is absent."""
+    values = headers.get(name)
+    return values[0] if values else None
 
 
 @dataclass(frozen=True)
@@ -76,7 +94,6 @@ def sender_address(from_header: str | None) -> str:
 
 
 _MAILING_LIST = re.compile(r"^\s*list\s+([^;\s]+)", re.IGNORECASE)
-_ADDRESS = re.compile(r"^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$")
 
 
 def original_sender(headers: dict[str, list[str]], from_addr: str, dmarc_pass: bool) -> str | None:
@@ -87,51 +104,37 @@ def original_sender(headers: dict[str, list[str]], from_addr: str, dmarc_pass: b
     naming that same address, but anyone with a DMARC-passing domain can write both headers:
     the result is only a candidate, see resolve_relay.
     """
-
-    def first(name: str) -> str:
-        values = headers.get(name)
-        return values[0] if values else ""
-
-    match = _MAILING_LIST.match(first("mailing-list"))
+    match = _MAILING_LIST.match(first_header(headers, "mailing-list") or "")
     if not (dmarc_pass and match and match.group(1).lower() == from_addr):
         return None
-    original = sender_address(first("x-original-sender"))
-    if not _ADDRESS.match(original) or original == from_addr:
+    original = sender_address(first_header(headers, "x-original-sender"))
+    if not ADDRESS.match(original) or original == from_addr:
         return None
     return original
 
 
 def extract(headers: dict[str, list[str]]) -> Signals:
     """Build Signals from headers keyed by lowercased name (multi-valued)."""
-
-    def first(name: str) -> str | None:
-        values = headers.get(name)
-        return values[0] if values else None
-
-    sender = sender_address(first("from"))
+    sender = sender_address(first_header(headers, "from"))
     dmarc_pass = dmarc_passed(headers.get("authentication-results", []))
-    https, mailto = parse_list_unsubscribe(first("list-unsubscribe"))
-    post = (first("list-unsubscribe-post") or "").replace(" ", "").lower()
-    list_id_raw = first("list-id")
+    https, mailto = parse_list_unsubscribe(first_header(headers, "list-unsubscribe"))
+    post = (first_header(headers, "list-unsubscribe-post") or "").replace(" ", "").lower()
+    list_id_raw = first_header(headers, "list-id")
     list_id = None
     if list_id_raw:
         match = _ANGLE.search(list_id_raw)
         list_id = (match.group(1) if match else list_id_raw).strip().lower() or None
     return Signals(
         sender=sender,
-        sender_domain=sender.rsplit("@", 1)[-1] if "@" in sender else sender,
+        sender_domain=domain_of(sender),
         list_id=list_id,
         unsubscribe_https=https,
         unsubscribe_mailto=mailto,
         one_click="list-unsubscribe=one-click" in post and bool(https),
         dmarc_pass=dmarc_pass,
-        is_discussion_list=bool((first("list-post") or "").strip()),
+        is_discussion_list=bool((first_header(headers, "list-post") or "").strip()),
         group_author=original_sender(headers, sender, dmarc_pass),
     )
-
-
-def _on_domain(domain: str, parent: str) -> bool:
-    return domain == parent or domain.endswith("." + parent)
 
 
 def resolve_relay(sig: Signals, own_domains: list[str]) -> Signals:
@@ -145,9 +148,7 @@ def resolve_relay(sig: Signals, own_domains: list[str]) -> Signals:
     if not sig.group_author or sig.relayed_by:
         return sig
     domains = [d.lower().strip() for d in own_domains if d.strip()]
-    if not any(_on_domain(sig.sender_domain, d) for d in domains):
+    if not any(on_domain(sig.sender_domain, d) for d in domains):
         return sig
     author = sig.group_author
-    return replace(
-        sig, sender=author, sender_domain=author.rsplit("@", 1)[-1], relayed_by=sig.sender
-    )
+    return replace(sig, sender=author, sender_domain=domain_of(author), relayed_by=sig.sender)

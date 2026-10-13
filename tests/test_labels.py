@@ -1,6 +1,7 @@
 import pytest
 
 from inbox_jev import labels
+from inbox_jev.config import Mode
 from inbox_jev.db import Message, make_session_factory
 
 SYSTEM = {"INBOX", "SPAM"}
@@ -40,7 +41,7 @@ def _msg(account, gmail_id, added, decided):
         gmail_id=gmail_id,
         thread_id="t",
         sender="a@b.com",
-        mode="label",
+        mode=Mode.LABEL,
         labels_added=added,
         decided_labels=decided,
     )

@@ -6,13 +6,15 @@ import ipaddress
 import socket
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import httpx
 
+from . import __version__
 from .signals import Signals
 
-USER_AGENT = "inbox-jev/0.1 (+List-Unsubscribe one-click)"
+USER_AGENT = f"inbox-jev/{__version__} (+List-Unsubscribe one-click)"
 TIMEOUT = httpx.Timeout(15.0)
 
 SendMail = Callable[[str, str, str], None]  # (to, subject, body)
@@ -20,10 +22,27 @@ SendMail = Callable[[str, str, str], None]  # (to, subject, body)
 UrlGuard = Callable[[str], list[str]]
 
 
+class UnsubscribeMethod(StrEnum):
+    """How an unsubscribe was attempted (stored in `unsubscribes.method`)."""
+
+    ONE_CLICK = "one_click"
+    MAILTO = "mailto"
+    MANUAL = "manual"
+
+
+class UnsubscribeStatus(StrEnum):
+    """An attempt's outcome (stored in `unsubscribes.status`)."""
+
+    OK = "ok"
+    FAILED = "failed"
+    MANUAL_PENDING = "manual_pending"  # only a web page or a link in the body: needs a human
+    SKIPPED = "skipped"  # not attempted: unverified sender, or ruled out by unsubscribe-retry
+
+
 @dataclass
 class Result:
-    method: str  # one_click | mailto | manual
-    status: str  # ok | failed | manual_pending | skipped
+    method: UnsubscribeMethod
+    status: UnsubscribeStatus
     target: str | None = None
     http_status: int | None = None
     error: str | None = None
@@ -63,6 +82,10 @@ def parse_mailto(uri: str) -> tuple[str, str, str]:
     return to, query.get("subject", "unsubscribe"), query.get("body", "unsubscribe")
 
 
+def _one_click_failed(url: str, error: str) -> Result:
+    return Result(UnsubscribeMethod.ONE_CLICK, UnsubscribeStatus.FAILED, url, error=error)
+
+
 def one_click(url: str, addresses: Sequence[str], client: httpx.Client) -> Result:
     """RFC 8058 POST to `url`, connecting to the IPs the guard validated, in order.
 
@@ -72,7 +95,7 @@ def one_click(url: str, addresses: Sequence[str], client: httpx.Client) -> Resul
     TLS failure) the next one is tried, as `socket.create_connection` does; once a request has
     been sent, its answer (or error) is the result.
     """
-    result = Result("one_click", "failed", url, error="no address to connect to")
+    result = _one_click_failed(url, "no address to connect to")
     for address in addresses:
         try:
             target = httpx.URL(url)
@@ -83,15 +106,15 @@ def one_click(url: str, addresses: Sequence[str], client: httpx.Client) -> Resul
                 extensions={"sni_hostname": target.raw_host.decode("ascii")},
             )
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:  # not sent: try the next IP
-            result = Result("one_click", "failed", url, error=f"{type(exc).__name__}: {exc}")
+            result = _one_click_failed(url, f"{type(exc).__name__}: {exc}")
             continue
         except (httpx.HTTPError, httpx.InvalidURL) as exc:
-            return Result("one_click", "failed", url, error=f"{type(exc).__name__}: {exc}")
+            return _one_click_failed(url, f"{type(exc).__name__}: {exc}")
         # RFC 8058 servers answer 2xx; some ESPs reply with a redirect to a confirmation page.
         ok = 200 <= resp.status_code < 400
         return Result(
-            "one_click",
-            "ok" if ok else "failed",
+            UnsubscribeMethod.ONE_CLICK,
+            UnsubscribeStatus.OK if ok else UnsubscribeStatus.FAILED,
             url,
             http_status=resp.status_code,
             error=None if ok else resp.text[:500],
@@ -116,7 +139,11 @@ def unsubscribe(
     url_guard: UrlGuard = resolve_public_https,
 ) -> Result:
     if not sig.dmarc_pass:
-        return Result("manual", "skipped", error="sender not authenticated (dmarc != pass)")
+        return Result(
+            UnsubscribeMethod.MANUAL,
+            UnsubscribeStatus.SKIPPED,
+            error="sender not authenticated (dmarc != pass)",
+        )
 
     if sig.one_click:
         for url in sig.unsubscribe_https:
@@ -130,7 +157,7 @@ def unsubscribe(
             finally:
                 if own_client:
                     client.close()
-            if result.status == "ok" or not sig.unsubscribe_mailto:
+            if result.status == UnsubscribeStatus.OK or not sig.unsubscribe_mailto:
                 return result
             break  # one-click failed: fall through to mailto
 
@@ -141,9 +168,14 @@ def unsubscribe(
         try:
             send_mail(to, subject, body)
         except Exception as exc:
-            return Result("mailto", "failed", uri, error=f"{type(exc).__name__}: {exc}")
-        return Result("mailto", "ok", uri)
+            return Result(
+                UnsubscribeMethod.MAILTO,
+                UnsubscribeStatus.FAILED,
+                uri,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        return Result(UnsubscribeMethod.MAILTO, UnsubscribeStatus.OK, uri)
 
     # Only a web page (no one-click) or a link in the body: needs a human (or a browser agent).
     target = sig.unsubscribe_https[0] if sig.unsubscribe_https else None
-    return Result("manual", "manual_pending", target)
+    return Result(UnsubscribeMethod.MANUAL, UnsubscribeStatus.MANUAL_PENDING, target)
