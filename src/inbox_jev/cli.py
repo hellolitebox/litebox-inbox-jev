@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections.abc import Callable
 from datetime import timedelta
 from typing import Annotated
 
@@ -81,6 +82,22 @@ def _accounts(settings: Settings, only: str | None) -> list[Account]:
     return accounts
 
 
+def _each_account(accounts: list[Account], what: str, work: Callable[[Account], None]) -> None:
+    """Do `work` for each account: one failing (token, Gmail, Slack, Jev, DB) doesn't stop the
+    others. Each failure is logged and printed; the command exits 1 if any account failed."""
+    failed = False
+    for acc in accounts:
+        try:
+            work(acc)
+        except Exception as exc:
+            failed = True
+            log.exception(f"{what} failed", extra={"account": acc.email})
+            reason = triage.describe_run_error(exc, acc.email)
+            typer.echo(f"{acc.email}: {what} failed: {reason}", err=True)
+    if failed:
+        raise typer.Exit(1)
+
+
 def _lookback_option(value: str | None) -> str | None:
     if value is None:
         return None
@@ -119,23 +136,23 @@ def run(
         ),
     ] = None,
 ) -> None:
-    """Classify new inbox emails and apply labels/actions."""
+    """Classify new inbox emails and apply labels/actions.
+
+    Exits 1 when any account's pass failed (stored in `runs.error`, shown in the digest),
+    including a missing TYPESAFE_API_KEY, which fails every pass before Gmail is touched.
+    """
     s = _settings(announce=True)
     ctx = triage.Context(
         s, load_categories(s.categories_file), make_session_factory(s.database_url)
     )
-    failed = False
+
+    def run_one(acc: Account) -> None:
+        triage.run_account(ctx, acc, mode, limit, lookback)
+
     try:
-        for acc in _accounts(s, account):
-            try:
-                triage.run_account(ctx, acc, mode, limit, lookback)
-            except Exception:
-                failed = True
-                log.exception("account run failed", extra={"account": acc.email})
+        _each_account(_accounts(s, account), "account run", run_one)
     finally:
         ctx.close()
-    if failed:
-        raise typer.Exit(1)
 
 
 @app.command()
@@ -144,18 +161,21 @@ def digest(
     hours: int = 24,
     dry_print: Annotated[bool, typer.Option(help="Print instead of sending to Slack.")] = False,
 ) -> None:
-    """Send the daily digest to each account's Slack user."""
+    """Send the daily digest to each account's Slack user (exits 1 if any account failed)."""
     s = _settings(announce=not dry_print)  # the timer case announces; a preview doesn't
     cfg = load_categories(s.categories_file)
     sessions = make_session_factory(s.database_url)
-    for acc in _accounts(s, account):
+
+    def send(acc: Account) -> None:
         with sessions() as session:
             text = digest_mod.build(session, cfg, acc.email, hours, language=acc.digest_language)
         if dry_print or not (s.slack_bot_token and acc.slack_user_id):
             typer.echo(text + "\n")
-            continue
+            return
         digest_mod.send_slack(s.slack_bot_token, acc.slack_user_id, text)
         log.info("digest sent", extra={"account": acc.email})
+
+    _each_account(_accounts(s, account), "digest", send)
 
 
 @app.command()
@@ -210,15 +230,24 @@ def retry_errors(account: Annotated[str, typer.Option("--account", "-a")]) -> No
 
 @app.command("unsubscribe-retry")
 def unsubscribe_retry(account: AccountOpt = None) -> None:
-    """Retry failed unsubscribes (up to 3 attempts each) that still pass run's checks."""
+    """Retry failed unsubscribes (up to 3 attempts each) that still pass run's checks.
+
+    One account failing doesn't stop the others; exits 1 if any failed.
+    """
     s = _settings()
     cfg = load_categories(s.categories_file)
     ctx = triage.Context(s, cfg, make_session_factory(s.database_url))
-    for acc in _accounts(s, account):
+
+    def retry(acc: Account) -> None:
         gmail = gmail_mod.Gmail(gmail_mod.load_credentials(s.google_tokens_dir, acc.email))
         with ctx.sessions() as session:
             for list_key, outcome in triage.retry_unsubscribes(ctx, session, gmail, acc):
                 typer.echo(f"{acc.email} {list_key}: {outcome}")
+
+    try:
+        _each_account(_accounts(s, account), "unsubscribe retry", retry)
+    finally:
+        ctx.close()
 
 
 @senders_app.command("backfill")
@@ -226,11 +255,13 @@ def senders_backfill(account: AccountOpt = None) -> None:
     """Store the author, not the group, as sender of group mail saved before that was done.
 
     Re-reads the headers of stored emails whose From has " via ". Safe to run again. Emails
-    deleted in Gmail are skipped; any other Gmail error stops the command.
+    deleted in Gmail are skipped; any other Gmail error stops that account (the others go on)
+    and the command exits 1.
     """
     s = _settings()
     sessions = make_session_factory(s.database_url)
-    for acc in _accounts(s, account):
+
+    def backfill(acc: Account) -> None:
         gmail = gmail_mod.Gmail(gmail_mod.load_credentials(s.google_tokens_dir, acc.email))
         with sessions() as session:
             checked, updated, skipped = triage.backfill_senders(session, gmail, acc)
@@ -238,6 +269,8 @@ def senders_backfill(account: AccountOpt = None) -> None:
             f"{acc.email}: {checked} group emails checked, {updated} senders updated, "
             f"{skipped} skipped (deleted in Gmail)"
         )
+
+    _each_account(_accounts(s, account), "senders backfill", backfill)
 
 
 @app.command()

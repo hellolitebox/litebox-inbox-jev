@@ -13,7 +13,16 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from . import corrections, rules
 from . import unsubscribe as unsub
-from .classifier import Classification, Classifier, JevError, build_state
+from .classifier import (
+    Classification,
+    Classifier,
+    JevError,
+    JevFailure,
+    JevNotConfigured,
+    build_state,
+    describe_jev_error,
+    failure_kind,
+)
 from .config import FREE_MAIL, Account, CategoriesConfig, Mode, Settings
 from .db import MAX_ERROR_ATTEMPTS, Message, MessageStatus, Run, SenderRule, Unsubscribe, now
 from .gmail import (
@@ -48,12 +57,17 @@ MAX_UNSUB_ATTEMPTS = 3
 # each failure) and left alone (status stays `error`) after db.MAX_ERROR_ATTEMPTS failed passes,
 # about 10.5 hours after the first one, so an outage of a few hours doesn't make it give up.
 ERROR_RETRY_BACKOFF = timedelta(minutes=5)
+# A pass stops asking Jev after this many failed calls in a row (each one already retried by the
+# SDK): Jev is down, and the rest of the emails that need it wait for the next pass instead of
+# each spending a call, its retries and one of its own error attempts.
+MAX_CONSECUTIVE_JEV_FAILURES = 3
 
 
 @dataclass
 class RunCounts:
     processed: int = 0
     errors: int = 0
+    jev_skipped: int = 0  # emails left for the next pass because it stopped asking Jev (logged)
 
 
 @dataclass
@@ -71,18 +85,85 @@ class UnsubscribeBudget:
         self.remaining -= 1
 
 
-class JevClient(Protocol):
-    """What triage needs from Jev: a `classifier.Classifier`, or a fake one in tests."""
+class Classifies(Protocol):
+    """Anything that answers for one email's Jev state."""
 
     def classify(self, state: dict) -> Classification: ...
+
+
+class JevClient(Classifies, Protocol):
+    """What triage needs from Jev: a `classifier.Classifier`, or a fake one in tests."""
+
     def close(self) -> None: ...
+
+
+class JevUnavailable(Exception):
+    """A pass stopped asking Jev (`JevGuard`); the message is the run's `runs.error`."""
+
+
+class _JevStopped(Exception):
+    """Raised instead of asking Jev once the pass stopped doing so: the email isn't to blame and
+    is left as it is for the next pass."""
+
+
+class JevGuard:
+    """The Jev client of one account's pass: stops calling Jev once it is clearly unusable.
+
+    A failure Jev will repeat for every email (`JevFailure.CONFIG`: key revoked, no access,
+    unknown model) stops it at once, and the email that hit it is not blamed (`_JevStopped`).
+    Otherwise MAX_CONSECUTIVE_JEV_FAILURES failed calls in a row stop it; those failures are the
+    emails' own (stored as `error`). A successful call resets the count. Once stopped, every
+    call raises `_JevStopped` without reaching Jev; `stopped` says why.
+    """
+
+    def __init__(
+        self, client: Classifies, account: str, limit: int = MAX_CONSECUTIVE_JEV_FAILURES
+    ) -> None:
+        self._client, self._account, self._limit = client, account, limit
+        self.consecutive_failures = 0
+        self.stopped: str | None = None
+
+    def check(self) -> None:
+        """Raise `_JevStopped` if the pass no longer asks Jev (before work only Jev needs)."""
+        if self.stopped is not None:
+            raise _JevStopped
+
+    def classify(self, state: dict) -> Classification:
+        self.check()
+        try:
+            result = self._client.classify(state)
+        except JevError as exc:
+            failure = exc
+        else:
+            self.consecutive_failures = 0
+            return result
+        # Outside the `except`, so nothing raised here chains the Jev error's text (see _run_pass).
+        self.consecutive_failures += 1
+        what = describe_jev_error(failure, request_id=False)
+        if failure_kind(failure) is JevFailure.CONFIG:
+            self._stop(
+                f"Jev rejected the API key or model ({what}): check TYPESAFE_API_KEY and "
+                "TYPESAFE_MODEL; emails that need Jev wait for the next run"
+            )
+            raise _JevStopped
+        if self.consecutive_failures >= self._limit:
+            self._stop(
+                f"Jev unavailable: {self.consecutive_failures} calls in a row failed (last: "
+                f"{what}); emails that need Jev wait for the next run"
+            )
+        raise failure
+
+    def _stop(self, reason: str) -> None:
+        self.stopped = reason
+        log.error("stopped asking Jev", extra={"account": self._account, "reason": reason})
 
 
 class Context:
     """What one CLI invocation shares across its accounts: settings, categories, DB, Jev.
 
     `classifier` injects the Jev client (tests pass a fake). Without one, a `Classifier` is
-    created from the settings the first time Jev is asked.
+    created from the settings when a `run` pass starts, which fails it (`JevNotConfigured`)
+    when TYPESAFE_API_KEY is missing; commands that never ask Jev don't need the key.
     """
 
     def __init__(
@@ -152,6 +233,7 @@ def run_account(
                     "mode": mode,
                     "processed": run.processed,
                     "errors": run.errors,
+                    "jev_skipped": counts.jev_skipped,
                     "failed": run.error is not None,
                 },
             )
@@ -170,6 +252,7 @@ def _run_pass(
     unknown = set(account.act_categories or []) - set(ctx.cfg.by_key)
     if unknown:
         raise ValueError(f"{account.email}: unknown act_categories {sorted(unknown)}")
+    jev = JevGuard(ctx.classifier, account.email)  # no API key: fails before touching Gmail
     gmail = Gmail(load_credentials(ctx.settings.google_tokens_dir, account.email))
     label_ids = gmail.ensure_labels(ctx.cfg.all_labels()) if mode != Mode.DRY_RUN else {}
     if mode != Mode.DRY_RUN:
@@ -183,16 +266,41 @@ def _run_pass(
     for message_id in ids:
         if message_id in skip:
             continue
+        # The failure is handled after the `try`, not in its `except`: an error raised while
+        # handling it (the rollback, `_record_error`'s commit) would otherwise chain a Jev error,
+        # whose text can echo the email, into the traceback the caller logs.
         try:
-            process(ctx, session, gmail, account, mode, label_ids, message_id, budget)
-            counts.processed += 1
+            process(ctx, session, gmail, account, mode, label_ids, message_id, budget, jev)
         except Exception as exc:
-            session.rollback()
-            if is_token_refresh_error(exc):
-                raise  # token refresh failed: fail the run, don't count it against the email
-            counts.errors += 1
-            _record_error(session, account.email, mode, message_id, exc)
-            log.exception("message failed", extra={"account": account.email, "id": message_id})
+            failure = exc
+        else:
+            counts.processed += 1
+            continue
+        session.rollback()
+        if isinstance(failure, _JevStopped):  # needed Jev after the pass stopped asking it
+            counts.jev_skipped += 1  # untouched
+            continue
+        if is_token_refresh_error(failure):
+            raise failure  # token refresh failed: fail the run, don't count it against the email
+        counts.errors += 1
+        _record_error(session, account.email, mode, message_id, failure)
+        if isinstance(failure, JevError):  # its text can echo the email: type and status only
+            log.warning(
+                "message failed",
+                extra={
+                    "account": account.email,
+                    "id": message_id,
+                    "error": describe_jev_error(failure),
+                },
+            )
+        else:
+            log.error(
+                "message failed",
+                extra={"account": account.email, "id": message_id},
+                exc_info=failure,
+            )
+    if jev.stopped is not None:
+        raise JevUnavailable(jev.stopped)
 
 
 # The modes a pass in each mode redoes: an email still in the inbox that was seen in a weaker mode
@@ -250,8 +358,15 @@ def describe_run_error(exc: BaseException, account: str) -> str:
     """The `runs.error` text: the exception, or what to do when the Gmail token can't refresh.
 
     Never includes a token refresh failure's own text unless it is the `invalid_grant` summary:
-    a transient one can carry the token endpoint's raw response body.
+    a transient one can carry the token endpoint's raw response body. Nor a Jev error's text,
+    which can echo the email (`describe_jev_error`).
     """
+    if isinstance(exc, JevUnavailable):
+        return str(exc)
+    if isinstance(exc, JevNotConfigured):
+        return f"{exc}; nothing was processed"
+    if isinstance(exc, JevError):
+        return describe_jev_error(exc, request_id=False)
     detail = token_error_detail(exc)
     if detail is not None:
         return (
@@ -381,13 +496,15 @@ def process(
     label_ids: dict[str, str],
     message_id: str,
     unsub_budget: UnsubscribeBudget,
+    jev: JevGuard,
 ) -> Message:
     """Decide one inbox email, apply the decision in Gmail and store it (committed).
 
     The steps: hand off an email the user edited since an earlier pass (`_user_touched`);
     gather the sender rule, Jev's answer and the sent-mail search (`_gather_inputs`); decide
     and plan (`policy`, pure); apply the labels in Gmail and store the outcome; learn an auto
-    rule; unsubscribe within the run cap.
+    rule; unsubscribe within the run cap. Raises `_JevStopped`, before changing anything, when
+    the email needs Jev's decision and `jev` has stopped.
     """
     email = gmail.get(message_id)
     sig = signals_for(email, account)
@@ -400,7 +517,7 @@ def process(
             return _leave_alone(session, prev, mode)
 
     list_row = _ListRow(session, account.email, sig.list_key)
-    inputs = _gather_inputs(ctx, session, gmail, account, mode, email, sig, list_row)
+    inputs = _gather_inputs(ctx, session, gmail, account, mode, email, sig, list_row, jev)
     decision = decide(
         ctx.cfg,
         account,
@@ -479,23 +596,25 @@ def _gather_inputs(
     email: Email,
     sig: Signals,
     list_row: _ListRow,
+    jev: JevGuard,
 ) -> _Inputs:
     """The sender rule, Jev's answer and the sent-mail search, each only where it can matter.
 
-    No allowlist entry and no rule: Jev decides, told whether I wrote to the sender. The
-    allowlist or a rule to a keep category (`policy.flags_only`): Jev only for the flags, no
-    search. Any other rule: the search only if it could stop an unsubscribe
-    (`_rule_needs_contact`).
+    No allowlist entry and no rule: Jev decides, told whether I wrote to the sender (neither is
+    asked once `jev` has stopped: `_JevStopped`). The allowlist or a rule to a keep category
+    (`policy.flags_only`): Jev only for the flags, no search. Any other rule: the search only if
+    it could stop an unsubscribe (`_rule_needs_contact`).
     """
     rule = rule_for(ctx, session, account, sig.sender)
     if not is_allowed(account, sig) and rule is None:
+        jev.check()
         contact = previous_contact(gmail, account.email, sig.sender)
-        classification = ctx.classifier.classify(
+        classification = jev.classify(
             build_state(email, account.email, ctx.settings.body_chars, contact, sig)
         )
         return _Inputs(rule, classification, contact)
     if flags_only(ctx.cfg, account, sig, rule.category if rule else None):
-        flags = flags_classification(ctx.classifier, email, account, ctx.settings.body_chars, sig)
+        flags = flags_classification(jev, email, account, ctx.settings.body_chars, sig)
         return _Inputs(rule, flags, None)
     if rule is not None and _rule_needs_contact(
         ctx.cfg, account, sig, rule.category, mode, list_row
@@ -601,22 +720,32 @@ def _log_processed(
 
 
 def flags_classification(
-    classifier: JevClient, email: Email, account: Account, body_chars: int, sig: Signals
+    classifier: Classifies, email: Email, account: Account, body_chars: int, sig: Signals
 ) -> Classification | None:
     """Jev's answer for an email kept by the allowlist or a keep rule, or None if the call fails.
 
     Jev only adds Needs Reply and the tags there, so no sent-mail search: its answer can't
     change a keep decision. A failed call doesn't fail the email: it is decided without Jev's
     answer (labeled by the allowlist or the rule, without the flags) and a warning is logged.
+    Once the pass has stopped asking Jev (`JevGuard`), it is decided that way without a call.
     """
     try:
         return classifier.classify(build_state(email, account.email, body_chars, None, sig))
+    except _JevStopped:
+        return None  # the run's error and the "stopped asking Jev" log line say why
     except JevError as exc:
-        log.warning(
-            "flags-only Jev call failed",
-            extra={"account": account.email, "id": email.id, "error_type": type(exc).__name__},
-        )
-        return None
+        failure = exc
+    # Outside the `except`, so nothing raised here chains the Jev error's text (see _run_pass).
+    log.warning(
+        "flags-only Jev call failed",
+        extra={
+            "account": account.email,
+            "id": email.id,
+            "error_type": type(failure).__name__,
+            "error": describe_jev_error(failure),
+        },
+    )
+    return None
 
 
 def rule_for(ctx: Context, session: Session, account: Account, sender: str) -> SenderRule | None:
@@ -1055,8 +1184,13 @@ def _record_error(
         msg = Message(account=account, gmail_id=message_id, thread_id="", sender="")
         session.add(msg)
     msg.status, msg.mode = MessageStatus.ERROR, mode
-    msg.error = f"{type(exc).__name__}: {exc}"[:2000]
     msg.error_attempts = (msg.error_attempts or 0) + 1
+    if isinstance(exc, JevError):
+        msg.error = describe_jev_error(exc)  # never the SDK's text: it can echo the email
+        if failure_kind(exc) is JevFailure.REJECTED:
+            msg.error_attempts = MAX_ERROR_ATTEMPTS  # Jev refuses this email: retrying won't help
+    else:
+        msg.error = f"{type(exc).__name__}: {exc}"[:2000]
     msg.processed_at = now()
     session.commit()
     if msg.error_attempts >= MAX_ERROR_ATTEMPTS:

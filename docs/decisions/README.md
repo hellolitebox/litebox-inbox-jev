@@ -40,3 +40,5 @@ record when the decision changes: add a new one and mark the old one `Superseded
 | [0027](0027-restore-skips-deleted-emails.md) | `restore` skips emails deleted in Gmail | Accepted | #22 |
 | [0028](0028-qa-verdict-required-check.md) | QA's verdict is a required check tied to the head commit | Accepted | #23 |
 | [0029](0029-deploy-the-image-ci-built.md) | Deploy the image CI built | Accepted | #24 |
+| [0030](0030-stop-asking-jev-when-it-is-down.md) | Stop asking Jev in a pass when it rejects the key or keeps failing | Accepted | #32 |
+| [0031](0031-run-needs-the-jev-key-accounts-isolated.md) | `run` needs the Jev key; one account's failure never stops the others | Accepted | #32 |

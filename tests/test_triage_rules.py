@@ -1,5 +1,6 @@
 """Sender rules in a pass: corrections, auto rules, stale rules and flags-only Jev calls."""
 
+import pytest
 from conftest import make_classification
 from fakes import (
     JevDown,
@@ -8,7 +9,7 @@ from fakes import (
 
 from inbox_jev import digest, rules, triage
 from inbox_jev.config import DigestLanguage, Mode
-from inbox_jev.db import Message, SenderRule
+from inbox_jev.db import Message, Run, SenderRule
 from inbox_jev.rules import RuleSource
 
 
@@ -78,8 +79,11 @@ def test_flags_only_jev_failure_still_labels_allowlist_and_keep_rule(setup, capl
     with ctx.sessions() as s:
         rules.set_rule(s, account.email, "promo@shop.com", "important", RuleSource.CORRECTION)
         s.commit()
-    run = triage.run_account(ctx, account, Mode.ACT)
-    assert (run.processed, run.errors) == (2, 2)  # only the Jev-decided emails fail
+    with pytest.raises(triage.JevUnavailable):  # 3 failed calls in a row (1, 2, 3) stop Jev
+        triage.run_account(ctx, account, Mode.ACT)
+    with ctx.sessions() as s:
+        run = s.query(Run).one()
+    assert (run.processed, run.errors) == (2, 1)  # only the Jev-decided email 1 fails
     important = "Label_" + ctx.cfg.by_key["important"].label
     mods = {m[0]: m for m in gmail.modified}
     with ctx.sessions() as s:
@@ -90,7 +94,7 @@ def test_flags_only_jev_failure_still_labels_allowlist_and_keep_rule(setup, capl
             assert (row.jev_category, row.needs_reply, row.error_attempts) == (None, None, 0)
             assert important in mods[gmail_id][1] and mods[gmail_id][2] == []
             assert "Label_Jev/Needs Reply" not in mods[gmail_id][1]
-        assert (rows["1"].status, rows["4"].status) == ("error", "error")
+        assert rows["1"].status == "error" and "4" not in rows  # 4 waits for the next run
     warned = [r for r in caplog.records if r.getMessage() == "flags-only Jev call failed"]
     assert sorted(r.id for r in warned) == ["2", "3"]
     assert {r.error_type for r in warned} == {"TypeSafeError"}

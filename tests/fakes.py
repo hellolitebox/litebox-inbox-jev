@@ -163,3 +163,25 @@ def as_archived(*emails):
     for e in emails:
         e.label_ids = [i for i in e.label_ids if i != "INBOX"]
     return {e.id: e for e in emails}
+
+
+class JevFails(FakeClassifier):
+    """Jev raising `error` on every call (counted), answering from `answers` once it is None."""
+
+    def __init__(self, error, answers=None):
+        super().__init__(answers or {})
+        self.error = error
+
+    def classify(self, state):
+        if self.error is None:
+            return super().classify(state)
+        self.calls += 1
+        raise self.error
+
+
+def jev_http_error(error_type, status, body=None, request_id="req-1"):
+    """An SDK HTTP error as `typesafe_sdk` raises it (type, status, body, response headers)."""
+    import httpx2
+
+    headers = httpx2.Headers({"x-typesafe-request-id": request_id} if request_id else {})
+    return error_type(status, body, headers, endpoint="POST https://api.typesafe.ai/v1/systemone")

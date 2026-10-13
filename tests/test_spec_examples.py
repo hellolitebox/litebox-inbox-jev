@@ -13,13 +13,34 @@ from pathlib import Path
 import httpx
 import pytest
 from conftest import make_signals
-from fakes import GMAIL_PASS, FakeClassifier, FakeGmail, HttpError, JevDown, email
+from fakes import (
+    GMAIL_PASS,
+    FakeClassifier,
+    FakeGmail,
+    HttpError,
+    JevDown,
+    JevFails,
+    email,
+    jev_http_error,
+)
+from typesafe_sdk import (
+    TypeSafeAPITimeoutError,
+    TypeSafeAuthenticationError,
+    TypeSafeUnprocessableEntityError,
+)
 
 from inbox_jev import digest, rules, triage
 from inbox_jev import unsubscribe as unsub
 from inbox_jev.classifier import Classification, build_state
 from inbox_jev.config import Account, DigestLanguage, Mode, Settings
-from inbox_jev.db import Message, SenderRule, Unsubscribe, make_session_factory
+from inbox_jev.db import (
+    MAX_ERROR_ATTEMPTS,
+    Message,
+    Run,
+    SenderRule,
+    Unsubscribe,
+    make_session_factory,
+)
 from inbox_jev.gmail import Email, extract_body
 from inbox_jev.policy import decide, plan
 from inbox_jev.rules import RuleSource
@@ -718,6 +739,123 @@ def test_ex20_restore_skips_emails_deleted_in_gmail(spec, monkeypatch):
     assert "INBOX" in sale and not [i for i in sale if i.startswith("Label_")]
     assert _row(ctx, "2").restored
     assert not _row(ctx, "1").restored and _row(ctx, "1").archived
+
+
+# --- EX-21 -----------------------------------------------------------------------------------
+
+
+def test_ex21_revoked_jev_key_stops_jev_but_not_rules(spec):
+    """EX-21 (docs/how-it-decides.md §5, §1 the pass over an inbox)."""
+    ctx, gmail, account = spec
+    account.allow_domains = ["acme.example"]
+    gmail.emails = {
+        "1": email("1", "Sam <sam@growthagency.example>", "Quick question"),
+        "2": email("2", "Lea <lea@acme.example>", "Budget review"),
+        "3": email("3", "Weekly <news@weekly.example>", "Issue 41"),
+        "4": email("4", "Ana <ana@client.example>", "Signed contract by Friday?"),
+    }
+    jev = JevFails(jev_http_error(TypeSafeAuthenticationError, 401, {"error": "invalid key"}))
+    ctx = triage.Context(ctx.settings, ctx.cfg, ctx.sessions, classifier=jev)
+    with ctx.sessions() as s:
+        rules.set_rule(s, account.email, "news@weekly.example", "newsletter", RuleSource.MANUAL)
+        s.commit()
+    with pytest.raises(triage.JevUnavailable):
+        triage.run_account(ctx, account, Mode.ACT)
+
+    assert jev.calls == 1  # Sam's email; nothing more is sent to Jev in this pass
+    with ctx.sessions() as s:
+        assert {m.gmail_id for m in s.query(Message)} == {"2", "3"}  # 1 and 4 wait
+        run = s.query(Run).one()
+    assert (run.processed, run.errors) == (2, 0)
+    assert run.error.startswith("Jev rejected the API key or model (TypeSafeAuthenticationError")
+    lea, issue = _row(ctx, "2"), _row(ctx, "3")
+    assert (lea.source, lea.category, lea.needs_reply) == ("allowlist", "important", None)
+    assert (issue.source, issue.archived) == ("rule", True)
+    with ctx.sessions() as s:
+        text = digest.build(s, ctx.cfg, account.email, language=DigestLanguage.ES)
+    assert "1 corrida fallida" in text and "TYPESAFE_API_KEY" in text
+
+    jev.error = None  # the key is fixed: the next run decides the emails that waited
+    jev.answers.update(
+        {
+            "Quick question": answer("cold_outreach", cold_outreach=0.97),
+            "Signed contract by Friday?": answer("important", needs_reply=0.9),
+        }
+    )
+    run = triage.run_account(ctx, account, Mode.ACT)
+    assert (run.processed, run.errors, run.error) == (2, 0, None)
+    assert _row(ctx, "1").category == "cold_outreach" and _row(ctx, "1").error_attempts == 0
+
+
+# --- EX-22 -----------------------------------------------------------------------------------
+
+
+def test_ex22_jev_down_stops_after_three_failures(spec):
+    """EX-22 (docs/how-it-decides.md §5, §1 the pass over an inbox)."""
+    ctx, gmail, account = spec
+    gmail.emails = {
+        str(i): email(str(i), f"Sender {i} <s{i}@vendor{i}.example>", f"Update {i}")
+        for i in range(1, 6)
+    }
+    jev = JevFails(TypeSafeAPITimeoutError(30.0))
+    ctx = triage.Context(ctx.settings, ctx.cfg, ctx.sessions, classifier=jev)
+    with pytest.raises(triage.JevUnavailable):
+        triage.run_account(ctx, account, Mode.ACT)
+
+    assert jev.calls == 3
+    with ctx.sessions() as s:
+        rows = {m.gmail_id: m.error_attempts for m in s.query(Message)}
+        run = s.query(Run).one()
+    assert rows == {"1": 1, "2": 1, "3": 1}  # 4 and 5: never sent, not stored
+    assert (run.processed, run.errors) == (0, 3)
+    assert run.error == (
+        "Jev unavailable: 3 calls in a row failed (last: TypeSafeAPITimeoutError: Request timed "
+        "out (timeout=30.0).); emails that need Jev wait for the next run"
+    )
+
+    jev.error = None  # Jev is back on the next pass
+    jev.answers.update({f"Update {i}": answer("notification") for i in range(1, 6)})
+    run = triage.run_account(ctx, account, Mode.ACT)
+    assert (run.processed, run.error) == (2, None)  # 4 and 5; 1-3 wait for their backoff
+
+
+# --- EX-23 -----------------------------------------------------------------------------------
+
+
+def test_ex23_jev_refuses_one_email(spec):
+    """EX-23 (docs/how-it-decides.md §5, §1 the pass over an inbox)."""
+    ctx, gmail, account = spec
+    gmail.emails = {
+        "1": email("1", "Vendor <billing@vendor.example>", "Invoice 7"),
+        "2": email("2", "Weekly <news@weekly.example>", "Issue 41"),
+    }
+    refused = jev_http_error(
+        TypeSafeUnprocessableEntityError, 422, {"detail": "state.body: 'Invoice 7 ...'"}
+    )
+
+    class RefusesInvoice(FakeClassifier):
+        def classify(self, state):
+            if state["subject"] == "Invoice 7":
+                self.calls += 1
+                raise refused
+            return super().classify(state)
+
+    jev = RefusesInvoice({"Issue 41": answer("newsletter", newsletter=0.97)})
+    ctx = triage.Context(ctx.settings, ctx.cfg, ctx.sessions, classifier=jev)
+    run = triage.run_account(ctx, account, Mode.ACT)
+
+    assert (run.processed, run.errors, run.error) == (1, 1, None)
+    row = _row(ctx, "1")
+    assert row.error == "TypeSafeUnprocessableEntityError (HTTP 422, request_id=req-1)"
+    assert (row.status, row.error_attempts) == ("error", MAX_ERROR_ATTEMPTS)
+    calls = jev.calls
+    triage.run_account(ctx, account, Mode.ACT)
+    assert jev.calls == calls  # never retried by itself
+    with ctx.sessions() as s:
+        text = digest.build(s, ctx.cfg, account.email, language=DigestLanguage.ES)
+    gave_up = text.split("Sin más reintentos")[1]
+    assert "#all/1|" in gave_up and "TypeSafeUnprocessableEntityError (HTTP 422" in gave_up
+    assert "state.body" not in text
 
 
 # --- docs <-> tests ----------------------------------------------------------------------------

@@ -50,5 +50,8 @@ def setup(level: str = "INFO") -> None:
     for noisy in ("googleapiclient", "httpx", "httpx2", "httpcore", "urllib3"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     sdk = logging.getLogger("typesafe_sdk")
+    # Its DEBUG lines carry the request body (the email) and TYPESAFE_LOG_LEVEL can turn them on:
+    # never below INFO, whatever LOG_LEVEL says.
+    sdk.setLevel(max(logging.INFO, root.level))
     if not any(isinstance(f, DropSdkSuccess) for f in sdk.filters):
         sdk.addFilter(DropSdkSuccess())

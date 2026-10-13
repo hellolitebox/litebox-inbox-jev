@@ -40,7 +40,12 @@ Contents:
      run `inbox-jev auth add EMAIL` if it persists.
 
    In all three the run fails and the next one tries again, and the token endpoint's response
-   is never stored (only the `invalid_grant` summary line is).
+   is never stored (only the `invalid_grant` summary line is). A missing (or malformed)
+   `TYPESAFE_API_KEY` also fails the run before Gmail is touched, with `runs.error`
+   "TYPESAFE_API_KEY is not set: add it to .env; nothing was processed", even when every email
+   would be decided by a rule ([ADR 0031](decisions/0031-run-needs-the-jev-key-accounts-isolated.md)).
+   Commands that never ask Jev (`digest`, `rules`, `stats`, `restore`, `reprocess`,
+   `retry-errors`, `unsubscribe-retry`, `labels`, `senders backfill`, `--version`) don't need it.
 2. In `label` and `act`, the Jev labels are created in Gmail if missing.
 3. In `label` and `act`, **corrections** are checked first (`corrections.check`, see
    [3.7](#37-corrections-user-edits-and-restore)).
@@ -59,6 +64,38 @@ Contents:
    rolls back that email, stores it as `status = error` (counting one failure) and the run
    continues. A Gmail token refresh that fails mid-run (permanent or transient) is the
    exception: it fails the whole run instead and isn't counted against the email.
+   A failed Jev call (after the SDK's own retries of timeouts, connection errors, 408, 429 and
+   5xx) is sorted by `classifier.failure_kind`
+   ([ADR 0030](decisions/0030-stop-asking-jev-when-it-is-down.md)):
+   - **config** (401, 403, 404: key revoked, no access, unknown model): every call would fail
+     the same way. The pass stops asking Jev at once, and the email that hit it is left as it
+     was (not stored, no failure counted).
+   - **rejected** (any other 4xx but 408 and 429, e.g. 400, 422): Jev refuses this email's
+     request. The email is stored as `error` and gives up at once (`error_attempts` = 8), since
+     retrying sends the same request; `retry-errors` makes the next run try it again
+     ([EX-23](#ex-23--jev-refuses-one-email)).
+   - **transient** (anything else): the email is stored as `error` with the usual backoff.
+
+   After **3** failed Jev calls in a row (`triage.MAX_CONSECUTIVE_JEV_FAILURES`; flags-only calls
+   count, a successful call resets the count) the pass also stops asking Jev. Once stopped, for
+   the rest of the pass: an email that needs Jev's decision is left as it is (no sent-mail
+   search, not stored, no failure counted) for the next run; an allowlisted email or one with a
+   keep rule is decided without the flags, as when its flags-only call fails; other rule
+   decisions go on as usual. The run then fails, logs `stopped asking Jev` and stores one of two
+   `runs.error` texts: "Jev rejected the API key or model (…): check TYPESAFE_API_KEY and
+   TYPESAFE_MODEL; …" or "Jev unavailable: 3 calls in a row failed (last: …); emails that need
+   Jev wait for the next run" ([EX-21](#ex-21--jevs-api-key-is-revoked),
+   [EX-22](#ex-22--jev-is-down-for-a-whole-pass)). `inbox-jev run` exits 1 when any account's
+   run failed; the other accounts still run.
+
+   A Jev error is stored (`messages.error`, `runs.error`) and logged as its type, HTTP status
+   and request id only (`classifier.describe_jev_error`): the SDK's own message comes from the
+   response body, which on a 400/422 can quote the request, i.e. the email. The only SDK texts
+   kept are a connection error's (redacted, no response exists) and the SDK's own client-side
+   messages from an allowlist (e.g. `Choice question "category" has no criteria…`), which name a
+   question at most. A failed call is handled outside the `except` that caught it, so an error
+   raised while handling it (e.g. a locked database) never carries it in its traceback. The
+   `typesafe_sdk` logger is never set below INFO, since its DEBUG lines are the raw requests.
 7. One unsubscribe budget is shared by the whole run: `MAX_UNSUBSCRIBES_PER_RUN` (default 20)
    attempts.
 
@@ -80,7 +117,7 @@ flowchart TD
     F --> G{"Allowlisted?<br/>author in allow_senders/allow_domains,<br/>or group address in allow_senders"}
     G -- yes --> FL["Ask Jev for the flags only<br/>(Needs Reply, tags; no previous_contact);<br/>if the call fails, decide without them (warning)"]
     G -- no --> H{"Active sender rule?"}
-    H -- no --> I["previous_contact (sent-mail search)<br/>then ask Jev (build_state)"]
+    H -- no --> I["previous_contact (sent-mail search)<br/>then ask Jev (build_state);<br/>once the pass stopped asking Jev: left for the next run"]
     H -- yes --> HK{"Rule to a keep category?"}
     HK -- yes --> FL
     HK -- no --> J{"Rule would unsubscribe<br/>a category that spares known contacts?"}
@@ -301,8 +338,10 @@ Held rows stay `failed`.
   it (`previous_contact` is left out of the Jev state). If that call fails (a Jev outage, an
   error on that email), the email is decided without Jev's answer, as if it hadn't been asked:
   labeled by the rule or the allowlist, without Needs Reply or tags, with a warning in the log
-  (`flags-only Jev call failed`, account, id and error type, no content). It isn't stored as
-  `error`. See [EX-19](#ex-19--jev-is-down-when-an-allowlisted-email-arrives).
+  (`flags-only Jev call failed`, account, id, error type, status and request id; no content).
+  It isn't stored as `error`. Once the pass has stopped asking Jev ([§1](#1-the-pass-over-an-inbox)),
+  such an email is decided the same way without a call. See
+  [EX-19](#ex-19--jev-is-down-when-an-allowlisted-email-arrives).
   **Rules to an archive or spam category**
   skip Jev: their email leaves the inbox, where Needs Reply is never added. See
   [EX-15](#ex-15--a-client-with-a-keep-rule-asks-a-question) and
@@ -800,6 +839,53 @@ the probabilities that matter are shown; the rest are ~0.
   the window could be undone. Skipping only 404s keeps any other Gmail failure visible
   ([ADR 0027](decisions/0027-restore-skips-deleted-emails.md)).
 
+### EX-21 — Jev's API key is revoked
+
+- **Test**: `test_ex21_revoked_jev_key_stops_jev_but_not_rules`
+- **Input**: in act mode, Jev answers 401 to every call. The inbox has, in this order: a pitch
+  from `sam@growthagency.example` (no rule), Lea's "Budget review" from the allowlisted
+  `acme.example`, `news@weekly.example`'s issue (manual rule → newsletter) and Ana's "Signed
+  contract by Friday?" (no rule).
+- **Outcome**: Jev is called once, for Sam's pitch. The 401 stops the pass from asking Jev: Sam's
+  and Ana's emails are left untouched in the inbox, not stored and not counted as failures. Lea's
+  email still gets `Jev/Important` (no flags, no Jev call) and the newsletter is archived by its
+  rule. The run fails with "Jev rejected the API key or model (TypeSafeAuthenticationError
+  (HTTP 401)): check TYPESAFE_API_KEY and TYPESAFE_MODEL; …", `inbox-jev run` exits 1 and the
+  digest lists the failed run. Once the key is fixed, the next run decides Sam's and Ana's
+  emails as if nothing happened.
+- **Why**: before, every email in the window was sent to Jev, failed and spent one of its 8
+  attempts on a problem that wasn't the email's, and the run exited 0, every 10 minutes. Rules
+  and the allowlist don't need Jev, so they keep working
+  ([ADR 0030](decisions/0030-stop-asking-jev-when-it-is-down.md)).
+
+### EX-22 — Jev is down for a whole pass
+
+- **Test**: `test_ex22_jev_down_stops_after_three_failures`
+- **Input**: in act mode, five emails with no rule arrive while every Jev call times out (after
+  the SDK's own retries).
+- **Outcome**: the first three are stored as `error` with one failure each (the usual backoff).
+  After the third failure in a row the pass stops asking Jev: the other two aren't sent, stored
+  or counted. The run fails with "Jev unavailable: 3 calls in a row failed (last:
+  TypeSafeAPITimeoutError: …); emails that need Jev wait for the next run". When Jev is back,
+  the next run decides the two that waited; the first three follow their backoff.
+- **Why**: with Jev down, each email costs a call plus its retries (up to 30 s) and a failure;
+  `MAX_MESSAGES_PER_RUN` of them per pass made each pass slow and burned attempts on emails
+  that had nothing wrong with them. Three in a row tells an outage from one bad email
+  ([ADR 0030](decisions/0030-stop-asking-jev-when-it-is-down.md)).
+
+### EX-23 — Jev refuses one email
+
+- **Test**: `test_ex23_jev_refuses_one_email`
+- **Input**: in act mode, Jev answers 422 to `billing@vendor.example`'s "Invoice 7" (its error
+  message quotes part of the email), and normally to the other email.
+- **Outcome**: "Invoice 7" is stored as `error` with `TypeSafeUnprocessableEntityError (HTTP 422,
+  request_id=…)`, never Jev's message, and gives up at once (8 failures): later runs don't send
+  it again, and the digest lists it under "Sin más reintentos". The other email is processed and
+  the run doesn't fail. `inbox-jev retry-errors` makes the next run try it again.
+- **Why**: Jev would refuse the same request on every retry, so the backoff only adds calls; and
+  its message can echo the email, which must never be stored or logged
+  ([ADR 0030](decisions/0030-stop-asking-jev-when-it-is-down.md)).
+
 ## 6. Glossary
 
 - **Action**: what a category does: `keep`, `archive`, `archive_unsubscribe`, `spam`.
@@ -817,6 +903,9 @@ the probabilities that matter are shown; the rest are ~0.
   them.
 - **Error retry / gave up**: an email whose processing failed (`status = error`) is retried
   with a backoff, and not after 8 failures ("gave up"; `inbox-jev retry-errors` resets that).
+  An email Jev refuses (a 4xx other than 401/403/404/408/429) gives up at once.
+- **Jev stopped**: a pass that got a 401/403/404 from Jev, or 3 failed Jev calls in a row,
+  asks Jev nothing more; emails that need it wait for the next run, and the run fails.
 - **Group / discussion list**: mail whose `List-Unsubscribe` would remove you from a list you
   belong to (see `_group_list`).
 - **Group author / relayed_by**: the person who wrote to a Google Group, and the group address,
@@ -844,6 +933,11 @@ the probabilities that matter are shown; the rest are ~0.
 
 Behaviour found while writing this spec, documented as it is today:
 
+- An email that fails before its row is written (a Jev error, a Gmail read error) is stored
+  without From or Subject, so the digest lists it as "(no subject)" with its Gmail link.
+- If Jev refuses every request the same way (e.g. a change on its side rejects our state with
+  400/422), each run gives up on the 3 emails that hit it before the pass stops asking Jev.
+  After the fix, `inbox-jev retry-errors` plus `run --lookback` recovers them.
 - An email processed again in a stronger mode (`label`, then `act`, or after `reprocess`) is
   sent to Jev again, and that answer counts toward an auto rule a second time: one email can
   give a sender two of the three hits.

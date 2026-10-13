@@ -183,7 +183,8 @@ label, not its sublabels, so rename the children first (or use the Gmail web UI)
 ## Setup
 
 ### 1. Credentials
-- **TypeSafe**: API key from the TypeSafe dashboard → `TYPESAFE_API_KEY`.
+- **TypeSafe**: API key from the TypeSafe dashboard → `TYPESAFE_API_KEY`. `inbox-jev run` fails
+  each account's run without it (nothing is touched); the other commands don't need it.
 - **Google**:
   1. In Google Cloud Console, enable the Gmail API.
   2. Configure the OAuth consent screen. Use *Internal* if all accounts are in your Workspace;
@@ -254,8 +255,12 @@ sudo systemctl enable --now inbox-jev-triage.timer inbox-jev-digest.timer
   it is handled; the digest runs daily at 08:00 America/Argentina/Buenos_Aires (edit
   `OnCalendar`/timezone in the `.timer` files).
 - Run logs (JSON lines): `journalctl -u inbox-jev-triage -f`. A run that fails for one account
-  (for example an expired Gmail token) is recorded in `runs.error`, the other accounts still
-  run, and the service exits non-zero so systemd shows the failure.
+  (for example an expired Gmail token, a missing `TYPESAFE_API_KEY`, or Jev rejecting the key
+  or failing 3 calls in a row) is recorded in `runs.error`, the other accounts still run, and
+  the service exits non-zero so systemd shows the failure. `digest`, `unsubscribe-retry` and
+  `senders backfill` also go on with the other accounts when one fails, and exit non-zero.
+  Jev errors are stored and logged as type, HTTP status and request id only, never Jev's
+  message (it can quote the email).
 - Browse the DB: `docker compose --profile viewer up -d viewer`, then
   `ssh -L 8001:localhost:8001 <host>` and open http://localhost:8001. It is bound to localhost
   on the server, never public.
@@ -266,9 +271,10 @@ One Slack DM per account (`slack_user_id`), by default at 08:00. It lists: total
 and how many are in Review; one section per keep category other than `important` (e.g.
 `Jev/Action`); emails that need a reply; unsubscribes done, pending a manual click, or failed;
 low-confidence emails; corrections learned; and errors. Errors are failed runs (identical ones
-grouped, e.g. an expired Gmail token, with the fix: `run inbox-jev auth add EMAIL`) and emails
-that stopped being retried. An email that fails is retried with a backoff (5, 10, 20 … minutes)
-and given up after 8 failures, about 10.5 hours; `inbox-jev retry-errors` retries them again
+grouped, e.g. an expired Gmail token, with the fix: `run inbox-jev auth add EMAIL`, or "Jev
+unavailable") and emails that stopped being retried. An email that fails is retried with a
+backoff (5, 10, 20 … minutes) and given up after 8 failures, about 10.5 hours (at once when Jev
+refuses that email with a 4xx); `inbox-jev retry-errors` retries them again
 (details: [docs/how-it-decides.md §1](docs/how-it-decides.md#1-the-pass-over-an-inbox)).
 Everything taken from an email is escaped for Slack, so a subject can't mention `@channel` or
 fake a link. Preview it with `inbox-jev digest --dry-print`.
