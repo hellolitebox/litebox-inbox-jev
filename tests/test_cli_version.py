@@ -1,8 +1,12 @@
-"""`inbox-jev --version` names the release and the commit the image was built from."""
+"""`--version` and the `starting` announce name the release and the commit the image was built
+from."""
+
+import logging
 
 from typer.testing import CliRunner
 
 from inbox_jev import cli
+from inbox_jev.config import Settings
 
 
 def test_version_prints_release_and_revision(monkeypatch):
@@ -31,3 +35,24 @@ def test_version_does_not_shadow_subcommands():
     assert "invalid lookback" in result.output
     before = CliRunner().invoke(cli.app, ["--version", "run", "--lookback", "30"])
     assert before.exit_code == 0 and before.output.startswith("inbox-jev "), before.output
+
+
+def _stub_digest(monkeypatch):
+    """`digest` with no accounts: settings, categories and DB never touched."""
+    settings = Settings(_env_file=None, typesafe_api_key="x", database_url="sqlite:///:memory:")
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr(cli, "load_categories", lambda path: None)
+    monkeypatch.setattr(cli, "make_session_factory", lambda url: None)
+    monkeypatch.setattr(cli, "_accounts", lambda s, only: [])
+
+
+def test_digest_announces_the_revision_unless_previewing(monkeypatch, caplog):
+    _stub_digest(monkeypatch)
+    monkeypatch.setattr(cli.logs, "setup", lambda level: None)  # keep the test's logging as is
+    monkeypatch.setenv(cli.REVISION_ENV, "0123abc")
+    with caplog.at_level(logging.INFO, logger="inbox_jev"):
+        assert CliRunner().invoke(cli.app, ["digest"]).exit_code == 0
+        assert [r.revision for r in caplog.records if r.msg == "starting"] == ["0123abc"]
+        caplog.clear()
+        assert CliRunner().invoke(cli.app, ["digest", "--dry-print"]).exit_code == 0
+        assert not [r for r in caplog.records if r.msg == "starting"]

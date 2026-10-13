@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<10", "ruff==0.17.0", "pre-commit>=3"]
+dev = ["pytest>=8,<10", "ruff==0.17.0", "mypy>=2.4", "pre-commit>=3"]
 
 [project.scripts]
 inbox-jev = "inbox_jev.cli:app"
@@ -41,3 +41,19 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.mypy]
+files = ["src", "scripts"]
+python_version = "3.11"
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unreachable = true
+strict_equality = true
+
+# The only untyped imports: PyYAML ships no stubs and the two Google client modules carry no
+# types, so their objects are Any. Everything else (typesafe_sdk, google.auth, sqlalchemy, httpx,
+# pydantic) is typed; a new import without types fails here instead of silently becoming Any.
+[[tool.mypy.overrides]]
+module = ["yaml", "googleapiclient.*", "google_auth_oauthlib.*"]
+ignore_missing_imports = true

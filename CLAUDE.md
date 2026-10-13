@@ -19,8 +19,8 @@ small, follows this loop; `/ship <n>` (`.claude/skills/ship`) runs steps 4 and 5
    `Skills applied:` line naming the skills (or `none: docs-only`) and any concrete change they
    drove; if a skill isn't available, say so on that line and continue. Whoever implements (this
    session or a spawned agent) does this; a spawned agent needs the Skill tool. Before pushing,
-   run `ruff format`, `ruff check` and `pytest` and make them green (`pre-commit install` once
-   per clone runs ruff and gitleaks on every commit). A change to decision logic also updates
+   run `ruff format`, `ruff check`, `mypy` and `pytest` and make them green (`pre-commit install`
+   once per clone runs ruff and gitleaks on every commit). A change to decision logic also updates
    the spec, its examples and their tests in the same PR (see
    [Decision logic docs](#decision-logic-docs-mandatory)).
 3. **Open a PR** (`gh pr create`) with the template (`.github/pull_request_template.md`): what
@@ -123,8 +123,9 @@ section (QA checks for it, see the reviewer's "Real-mail check"); never log or p
   `scripts/deploy.sh` deploys (ADR 0029). Base images are pinned by tag **and** digest, and
   GitHub Actions by commit SHA with the version as a comment; Dependabot bumps both halves, so
   keep that shape when editing them by hand.
-- Python ≥ 3.11, ruff (line length 100), pytest. No network calls in tests: use fakes like
-  `tests/test_triage.py`.
+- Python ≥ 3.11, ruff (line length 100), mypy (`[tool.mypy]` in `pyproject.toml`: `src` and
+  `scripts`; only `yaml`, `googleapiclient` and `google_auth_oauthlib` are untyped, their objects
+  are `Any`), pytest. No network calls in tests: use fakes like `tests/test_triage.py`.
 - `policy.py` stays pure (no I/O). Gmail access goes in `gmail.py` and orchestration in `triage.py`.
 - New categories or labels go in `categories.yaml`, not in code.
 - Anything keyed on the sender (rules, corrections, `previous_contact`, allowlist) uses

@@ -151,7 +151,7 @@ def digest(
     dry_print: Annotated[bool, typer.Option(help="Print instead of sending to Slack.")] = False,
 ) -> None:
     """Send the daily digest to each account's Slack user."""
-    s = _settings(announce=True)
+    s = _settings(announce=not dry_print)  # the timer case announces; a preview doesn't
     cfg = load_categories(s.categories_file)
     sessions = make_session_factory(s.database_url)
     for acc in _accounts(s, account):

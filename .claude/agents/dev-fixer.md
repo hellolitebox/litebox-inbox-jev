@@ -57,7 +57,7 @@ review threads (CodeRabbit or human) on the PR.
    ```
    cd "$WT" && UV=$(command -v uv || echo "$ROOT/.venv/bin/uv") && "$UV" sync --frozen --extra dev \
      && "$UV" run --frozen ruff format src tests scripts && "$UV" run --frozen ruff check src tests scripts \
-     && "$UV" run --frozen pytest -q
+     && "$UV" run --frozen mypy && "$UV" run --frozen pytest -q
    ```
    If you change `pyproject.toml`, run `"$UV" lock` first and commit `uv.lock` with it.
 6. Stage files by explicit path (`git add <file> …`), commit with a message describing what was
@@ -75,7 +75,7 @@ Skills: <skills loaded> (unavailable: <none | list>; n/a: <none | list>)
 2. ↩️ disputed — <reasoning>
 3. ⏭ nit skipped — <reason>
 Review threads: <n resolved / replied, or "none open">
-Checks: ruff ✅ · pytest ✅ (N passed)
+Checks: ruff ✅ · mypy ✅ · pytest ✅ (N passed)
 ```
 
 Return the same text as your final answer.

@@ -8,6 +8,7 @@ from pathlib import Path
 from sqlalchemy import (
     JSON,
     Boolean,
+    ColumnDefault,
     DateTime,
     Float,
     Integer,
@@ -175,12 +176,13 @@ def _add_missing_columns(engine: Engine) -> None:
                 f"ADD COLUMN {preparer.format_column(col)} {col_type}"
             )
             if not col.nullable:
-                if col.default is None or not col.default.is_scalar:
+                default_gen = col.default
+                if not isinstance(default_gen, ColumnDefault) or not default_gen.is_scalar:
                     raise RuntimeError(
                         f"{table.name}.{col.name} is NOT NULL without a scalar default and is "
                         "missing from the database; migrate it manually"
                     )
-                default = literal(col.default.arg, col.type).compile(
+                default = literal(default_gen.arg, col.type).compile(
                     dialect=engine.dialect, compile_kwargs={"literal_binds": True}
                 )
                 ddl += f" NOT NULL DEFAULT {default}"

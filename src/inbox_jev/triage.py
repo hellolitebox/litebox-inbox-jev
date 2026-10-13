@@ -6,8 +6,10 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import Update, and_, or_, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session, sessionmaker
 
 from . import corrections, rules
@@ -236,7 +238,7 @@ def mark_for_reprocess(
     )
     if low_confidence_only:
         query = query.where(Message.low_confidence.is_(True))
-    count = session.execute(query.values(mode=Mode.LABEL.value)).rowcount
+    count = _update_count(session, query.values(mode=Mode.LABEL.value))
     session.commit()
     return count
 
@@ -297,6 +299,12 @@ def restore(
     return result
 
 
+def _update_count(session: Session, statement: Update) -> int:
+    """Rows an UPDATE touched. `Session.execute` types any statement as `Result`; the
+    cursor of a DML statement is a `CursorResult`, which has `rowcount`."""
+    return cast(CursorResult[Any], session.execute(statement)).rowcount
+
+
 def reset_error_attempts(session: Session, account: str) -> int:
     """Have the next run retry every email stored as `error`, including those that gave up.
 
@@ -304,7 +312,7 @@ def reset_error_attempts(session: Session, account: str) -> int:
     were reset.
     """
     query = update(Message).where(Message.account == account, Message.status == "error")
-    count = session.execute(query.values(error_attempts=0)).rowcount
+    count = _update_count(session, query.values(error_attempts=0))
     session.commit()
     return count
 
@@ -324,7 +332,11 @@ def process(
     prev = _find_message(session, account.email, message_id)
     if prev is not None:
         prev.sender = sig.sender  # rows stored before group authors were recovered
-    if mode != Mode.DRY_RUN and _user_touched(ctx.cfg, session, account, prev, email, label_ids):
+    if (
+        prev is not None
+        and mode != Mode.DRY_RUN
+        and _user_touched(ctx.cfg, session, account, prev, email, label_ids)
+    ):
         # Leave Gmail and labels_added as they are; just don't revisit it in this mode.
         prev.status, prev.error, prev.mode = "done", None, mode.value
         prev.error_attempts = 0
@@ -529,7 +541,7 @@ def _user_touched(
     cfg: CategoriesConfig,
     session: Session,
     account: Account,
-    msg: Message | None,
+    msg: Message,
     email: Email,
     label_ids: dict[str, str],
 ) -> bool:
@@ -538,8 +550,8 @@ def _user_touched(
     A changed category label is recorded as a correction (the sender rule then decides the
     category). Otherwise, hands off (returns True) if `_user_edit` finds an edit.
     """
-    if msg is None or not msg.labels_added:
-        return False  # new, or nothing of ours in Gmail yet (dry_run)
+    if not msg.labels_added:
+        return False  # nothing of ours in Gmail yet (dry_run)
     names = {v: k for k, v in label_ids.items()}
     current = {names.get(i, i) for i in email.label_ids}
     if msg.corrected_category is None:
@@ -683,15 +695,20 @@ def retry_unsubscribes(
         if reason:
             out.append(_skip(session, row, reason))
             continue
-        held = None
-        if not unsubscribes(ctx.cfg, category) or not acts_on(
-            mode, account.act_categories, category
+        if (
+            category is None
+            or not unsubscribes(ctx.cfg, category)
+            or not acts_on(mode, account.act_categories, category)
         ):
-            held = f"category {category} doesn't unsubscribe here"
-        elif rule_category is None and msg.source != "jev":
+            out.append((row.list_key, f"held: category {category} doesn't unsubscribe here"))
+            continue
+        held = None
+        if rule_category is None and msg.source != "jev":
             held = "rule since removed"  # run would ask Jev again; not worth it for a retry
         elif (
-            rule_category is None and msg.source == "jev" and not _confident(ctx.cfg, account, msg)
+            rule_category is None
+            and msg.source == "jev"
+            and not _confident(ctx.cfg, account, msg, category)
         ):
             held = f"confidence {msg.confidence} below the {category} threshold"
         if held:
@@ -704,7 +721,7 @@ def retry_unsubscribes(
                 out.append((row.list_key, "held: sent-mail search failed"))
                 continue
             gate = unsubscribe_gate(ctx.cfg, account, sig, category, contact)
-        if not gate.allowed:
+        if gate.veto is not None:
             out.append(_skip(session, row, _RETRY_SKIP_REASONS[gate.veto]))
             continue
         result = unsub.unsubscribe(sig, send_mail=gmail.send)
@@ -732,9 +749,9 @@ def _skip(session: Session, row: Unsubscribe, reason: str) -> tuple[str, str]:
     return row.list_key, f"skipped: {reason}"
 
 
-def _confident(cfg: CategoriesConfig, account: Account, msg: Message) -> bool:
+def _confident(cfg: CategoriesConfig, account: Account, msg: Message, category: str) -> bool:
     """Jev's stored answer still clears the category's current threshold, as `decide` requires."""
-    threshold = account.min_confidence.get(msg.category, cfg.by_key[msg.category].min_confidence)
+    threshold = account.min_confidence.get(category, cfg.by_key[category].min_confidence)
     return not msg.low_confidence and msg.confidence is not None and msg.confidence >= threshold
 
 

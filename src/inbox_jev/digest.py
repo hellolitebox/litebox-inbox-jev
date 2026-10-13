@@ -64,7 +64,7 @@ def build(session: Session, cfg: CategoriesConfig, account: str, hours: int = 24
 
     counts = Counter(m.category for m in done if not m.low_confidence)
     labels = {c.key: c.label for c in cfg.categories}
-    summary = " · ".join(f"{labels.get(k, k)}: {n}" for k, n in counts.most_common())
+    summary = " · ".join(f"{labels.get(k or '', k)}: {n}" for k, n in counts.most_common())
     low = [m for m in done if m.low_confidence]
     out.append(f"{len(done)} procesados — {summary or 'nada'} · a revisar: {len(low)}")
 

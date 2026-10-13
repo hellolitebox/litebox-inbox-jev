@@ -27,7 +27,7 @@ You receive a PR number (and, on later rounds, the previous review and the dev's
    git -C "$ROOT" fetch origin pull/<n>/head:qa-<n> && git -C "$ROOT" worktree add "$WT" qa-<n>
    cd "$WT" && "$UV" sync --frozen --extra dev \
      && "$UV" run --frozen ruff check src tests scripts && "$UV" run --frozen ruff format --check src tests scripts \
-     && "$UV" run --frozen pytest -q
+     && "$UV" run --frozen mypy && "$UV" run --frozen pytest -q
    ```
    `uv sync --frozen` builds the worktree's own `.venv` from `uv.lock`, exactly as CI does, so a
    dependency change in the PR is installed and a stale venv can't hide a failure. Also run
@@ -57,7 +57,7 @@ review's `Skills` line and continue.
 | `python-code-style` | any `.py` | naming, docstrings, formatting beyond ruff |
 | `python-design-patterns` | any `.py` | KISS, separation of concerns, duplication vs. abstraction, coupling |
 | `python-project-structure` | any `.py` | module boundaries and public API (`policy` pure, I/O in `gmail`/`triage`) |
-| `python-type-safety` | any `.py` | annotations, `None` handling, enums vs. loose strings |
+| `python-type-safety` | any `.py` | names, enums vs. loose strings, `Any` where a type exists (mypy covers annotations and `None`) |
 | `python-error-handling` | any `.py` | exception scope, partial failures in a run, errors that hide or abort |
 | `python-resilience` | `gmail.py`, `classifier.py`, `unsubscribe.py`, `triage.py`, `digest.py` | retries, backoff, timeouts on Gmail/Jev/HTTP calls |
 | `python-resource-management` | those I/O modules, `db.py` | sessions, HTTP clients, files: context managers and cleanup |
@@ -72,7 +72,9 @@ review's `Skills` line and continue.
 
 Repo conventions (CLAUDE.md, the ruff config in `pyproject.toml`, existing style) override a
 skill's generic advice. Only raise a skill finding on code the PR changes or calls, and never ask
-for new tooling (mypy, structlog, tenacity, Celery…) unless the PR is about it.
+for new tooling beyond what CI runs (ruff, mypy, pytest): no structlog, tenacity, Celery… unless
+the PR is about it. mypy already checks types; `python-type-safety` is for what it can't judge
+(names, enums vs. loose strings, `Any` where a type exists).
 
 Report findings from a skill like any other (severity rules below), citing the skill, e.g.
 `[minor][hygiene][python-type-safety]`. Don't pad the review: a skill with nothing to add gets
@@ -130,7 +132,7 @@ saying "no behaviour change" must be borne out by the diff.
 README/`.env.example`/`categories.yaml` updated when behaviour or config changes.
 
 ## Severity
-- **blocker**: bug, data loss, security/privacy issue, broken tests or lint. Must be fixed.
+- **blocker**: bug, data loss, security/privacy issue, broken tests, lint or mypy. Must be fixed.
 - **major**: likely bug in an edge case, missing tests for new behaviour, notable perf/cost issue.
   Must be fixed or convincingly disputed.
 - **minor**: hygiene/readability. Fix unless the dev gives a reason.
@@ -147,7 +149,7 @@ same text as your final answer:
 ## QA review — round <r>
 **Verdict: APPROVED | CHANGES_REQUESTED**
 Head: <full sha of the commit you reviewed>
-Checks: ruff ✅/❌ · format ✅/❌ · pytest ✅/❌ (N passed) · CI (`gh pr checks`) ✅/❌/⏳
+Checks: ruff ✅/❌ · format ✅/❌ · mypy ✅/❌ · pytest ✅/❌ (N passed) · CI (`gh pr checks`) ✅/❌/⏳
 Skills: <skills loaded> (unavailable: <none | list>; n/a: <none | list>)
 
 ### Findings

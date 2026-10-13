@@ -49,7 +49,7 @@ def resolve_public_https(url: str) -> list[str]:
     except (socket.gaierror, UnicodeError):
         return []
     # Drop an IPv6 zone ("fe80::1%eth0"): ip_address rejects it, and such addresses aren't global.
-    addresses = [ipaddress.ip_address(info[4][0].split("%", 1)[0]) for info in infos]
+    addresses = [ipaddress.ip_address(str(info[4][0]).split("%", 1)[0]) for info in infos]
     if not all(a.is_global for a in addresses):
         return []
     return list(dict.fromkeys(str(a) for a in addresses))  # one entry per address, DNS order

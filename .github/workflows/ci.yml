@@ -48,6 +48,7 @@ jobs:
       - run: uv sync --frozen --extra dev
       - run: uv run --frozen ruff format --check src tests scripts
       - run: uv run --frozen ruff check src tests scripts
+      - run: uv run --frozen mypy
       - run: uv run --frozen pytest -q
 
   # Builds the image once, smoke-tests it, and on main pushes that same image to GHCR as

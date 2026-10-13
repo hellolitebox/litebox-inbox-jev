@@ -6,7 +6,7 @@
 
 ## Verification
 
-<!-- ruff format / ruff check / pytest counts. A change to classification (categories.yaml
+<!-- ruff format / ruff check / mypy / pytest counts. A change to classification (categories.yaml
 criteria, classifier state, body extraction) or to a destructive path (archive, spam,
 unsubscribe, unsubscribe-retry) also needs the read-only real-mail check: paste the output of
 `scripts/check_branch.sh` (From/Subject truncated, never bodies), or say why it isn't needed. -->
