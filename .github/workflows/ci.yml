@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # Python the tests run on. The docker job checks the image's base Python against it, so a
+  # Dependabot python:3.x-slim bump fails until this is bumped too.
+  PYTHON_VERSION: "3.12"
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -20,12 +25,55 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
-          cache: pip
-      - run: pip install -e '.[dev]'
-      - run: ruff format --check src tests
-      - run: ruff check src tests
-      - run: pytest -q
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          version: "0.13.0"   # bump together with the ghcr.io/astral-sh/uv tag in the Dockerfile
+          enable-cache: true
+      - name: Dockerfile uv stage matches CI uv
+        run: |
+          docker_uv=$(sed -n 's#^FROM ghcr.io/astral-sh/uv:\([^ @]*\).* AS uv$#\1#p' Dockerfile)
+          ci_uv=$(uv --version | cut -d' ' -f2)
+          if [ -z "$docker_uv" ] || [ "$docker_uv" != "$ci_uv" ]; then
+            echo "::error file=Dockerfile::Dockerfile uv stage is '${docker_uv:-<not found>}' but CI uses uv $ci_uv. Bump the setup-uv 'version' in .github/workflows/ci.yml and the ghcr.io/astral-sh/uv tag in the Dockerfile together."
+            exit 1
+          fi
+          echo "uv $ci_uv in both CI and Dockerfile"
+      - run: uv lock --check            # uv.lock matches pyproject.toml
+      - run: uv sync --frozen --extra dev
+      - run: uv run --frozen ruff format --check src tests scripts
+      - run: uv run --frozen ruff check src tests scripts
+      - run: uv run --frozen pytest -q
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4.4.1
+      - uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          tags: inbox-jev:ci
+          load: true
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      # Run as an arbitrary non-root uid, like production (APP_UID in docker-compose.yml).
+      - name: Smoke test (CLI)
+        run: docker run --rm --user 10100:10100 inbox-jev:ci --help
+      - name: Smoke test (package installed non-editable)
+        run: >-
+          docker run --rm --user 10100:10100 --entrypoint python inbox-jev:ci -c
+          "import inbox_jev; assert 'site-packages' in inbox_jev.__file__, inbox_jev.__file__; print(inbox_jev.__file__)"
+      - name: Image Python matches CI Python
+        run: |
+          image_py=$(docker run --rm --user 10100:10100 --entrypoint python inbox-jev:ci -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+          if [ "$image_py" != "$PYTHON_VERSION" ]; then
+            echo "::error file=Dockerfile::The image runs Python $image_py but CI tests on $PYTHON_VERSION. Bump PYTHON_VERSION in .github/workflows/ci.yml in the same PR as the Dockerfile base image."
+            exit 1
+          fi
+          echo "Python $image_py in both CI and the image"
 
   secrets:
     runs-on: ubuntu-latest

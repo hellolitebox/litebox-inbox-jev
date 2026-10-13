@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<10", "ruff==0.17.0"]
+dev = ["pytest>=8,<10", "ruff==0.17.0", "pre-commit>=3"]
 
 [project.scripts]
 inbox-jev = "inbox_jev.cli:app"

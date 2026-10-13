@@ -281,7 +281,8 @@ label, not its sublabels, so rename the children first (or use the Gmail web UI)
 ```bash
 cp .env.example .env                       # fill it in
 cp accounts.example.yaml accounts.yaml     # your accounts + allowlists
-uv sync --extra dev                        # or: python -m venv .venv && pip install -e '.[dev]'
+uv sync --extra dev                        # exact versions from uv.lock
+uv run pre-commit install                  # gitleaks + ruff before every commit
 uv run inbox-jev auth add you@example.com  # opens the browser; token → secrets/tokens/
 ```
 
@@ -378,7 +379,8 @@ deployed (see [Rolling out a category change](#rolling-out-a-category-change)).
 | `runs` | Each triage pass: processed, errors |
 
 To use a hosted DB, install its driver and change the URL. For example, Postgres on Neon:
-`pip install psycopg[binary]` and `DATABASE_URL=postgresql+psycopg://…`.
+`uv add 'psycopg[binary]'` (commit `pyproject.toml` and `uv.lock`, then rebuild the image with
+`docker compose build`) and `DATABASE_URL=postgresql+psycopg://…`.
 
 ## Privacy
 

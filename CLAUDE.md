@@ -81,6 +81,20 @@ The compose service still mounts `data/` read-write; the script must never write
 email bodies.
 
 ## Conventions
+- Dependencies are locked in `uv.lock`: after changing `pyproject.toml`, run `uv lock` and commit
+  both (CI runs `uv lock --check`; the Docker image installs with `uv sync --frozen`).
+  Dependabot opens weekly update PRs, which go through the same QA loop.
+- `ruff` is pinned twice: in the `dev` extra of `pyproject.toml` and as `rev` in
+  `.pre-commit-config.yaml`. Bump both together (Dependabot only updates `pyproject.toml`).
+- `uv` is pinned twice: the `ghcr.io/astral-sh/uv` stage tag in the `Dockerfile` and the
+  `setup-uv` `version` in `.github/workflows/ci.yml`. Bump both together: Dependabot only updates
+  the Dockerfile tag, and CI's `test` job fails when the two differ. Don't add
+  `[tool.uv] required-version`: Dependabot's bundled uv would refuse to lock and no dependency
+  PRs would be opened.
+- The base image's Python (`python:3.x-slim` in the `Dockerfile`) must equal `PYTHON_VERSION`
+  in `ci.yml`. The `docker` job checks it, so a Dependabot base-image bump needs `PYTHON_VERSION`
+  bumped in the same PR. The `docker` job also builds the image and smoke-tests it as a non-root
+  uid, as production runs it.
 - Python ≥ 3.11, ruff (line length 100), pytest. No network calls in tests: use fakes like
   `tests/test_triage.py`.
 - `policy.py` stays pure (no I/O). Gmail access goes in `gmail.py` and orchestration in `triage.py`.
