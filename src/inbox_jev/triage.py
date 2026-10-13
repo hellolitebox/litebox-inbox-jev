@@ -13,10 +13,17 @@ from sqlalchemy.orm import Session, sessionmaker
 from . import corrections, rules
 from . import unsubscribe as unsub
 from .classifier import Classifier, build_state
-from .config import FREE_MAIL, Account, CategoriesConfig, Mode, Settings
+from .config import FREE_MAIL, Account, Action, CategoriesConfig, Mode, Settings
 from .db import Message, Run, Unsubscribe, now
 from .gmail import Email, Gmail, load_credentials
-from .policy import can_unsubscribe, decide, is_allowed, plan, spares_known_contacts
+from .policy import (
+    KNOWN_CONTACT,
+    can_unsubscribe,
+    decide,
+    is_allowed,
+    plan,
+    spares_known_contacts,
+)
 from .signals import Signals, resolve_relay
 
 log = logging.getLogger(__name__)
@@ -336,8 +343,7 @@ def _user_touched(
     """Check an email labeled by an earlier pass against its current Gmail labels.
 
     A changed category label is recorded as a correction (the sender rule then decides the
-    category). Otherwise, hands off (returns True) if the user starred the email, removed a label
-    of ours, or added one of our labels that the last pass didn't set.
+    category). Otherwise, hands off (returns True) if `_user_edit` finds an edit.
     """
     if msg is None or not msg.labels_added:
         return False  # new, or nothing of ours in Gmail yet (dry_run)
@@ -347,24 +353,37 @@ def _user_touched(
         category = corrections.detect(msg, current, cfg)
         if category:
             corrections.record(session, account.email, msg, category)
-    reason, labels = None, []
-    if "STARRED" in current:
-        reason = "starred"  # a strong "keep" signal, even after a correction
-    elif msg.corrected_category is not None:
+    edit = _user_edit(cfg, msg, current)
+    if edit is None:
         return False
-    elif removed := [n for n in msg.labels_added if n != cfg.processed_label and n not in current]:
-        reason, labels = "removed", removed
-    else:
-        managed = set(cfg.all_labels()) - {cfg.processed_label}
-        if added := sorted((current & managed) - set(msg.labels_added)):
-            reason, labels = "added", added
-    if reason is None:
-        return False
+    reason, labels = edit
     log.info(
         "left alone: user edited the email",
         extra={"account": account.email, "id": msg.gmail_id, "reason": reason, "labels": labels},
     )
     return True
+
+
+def _user_edit(
+    cfg: CategoriesConfig, msg: Message, current: set[str]
+) -> tuple[str, list[str]] | None:
+    """How the user edited an email we labeled, from its current label names, or None. Pure.
+
+    `starred` (a strong "keep" signal, even after a correction), else nothing once the email
+    has a correction, else `removed` (a label of ours is gone) or `added` (one of our labels that
+    the last pass didn't set). Returns (reason, labels involved).
+    """
+    if "STARRED" in current:
+        return "starred", []
+    if msg.corrected_category is not None:
+        return None
+    labels_added = msg.labels_added or []
+    if removed := [n for n in labels_added if n != cfg.processed_label and n not in current]:
+        return "removed", removed
+    managed = set(cfg.all_labels()) - {cfg.processed_label}
+    if added := sorted((current & managed) - set(labels_added)):
+        return "added", added
+    return None
 
 
 def _rule_needs_contact(
@@ -387,6 +406,141 @@ def _rule_needs_contact(
     if not (acts and spares_known_contacts(cfg, category) and can_unsubscribe(sig, account)):
         return False
     return not _unsub_settled(_unsub_row(session, account.email, sig.list_key))
+
+
+def retry_unsubscribes(
+    ctx: Context, session: Session, gmail: Gmail, account: Account
+) -> list[tuple[str, str]]:
+    """Retry `failed` unsubscribes with the checks `run` applies. Returns (list, outcome) pairs.
+
+    Before any Gmail call: the stored email must exist and not be restored or corrected by the
+    user, the mode must be act and the run cap (MAX_UNSUBSCRIBES_PER_RUN per call) not reached.
+    After fetching the email: it must not be reported as spam or in the trash, show a correction
+    in its live labels (Jev label changed, pulled back to the inbox) or any edit `run` leaves
+    alone (`_user_edit`: starred, a label of ours removed, another of our labels added). Its
+    category is the current sender rule's, else the stored one, which must be an unsubscribing
+    category in `act_categories`. A stored category that a rule decided needs that rule to still
+    exist (`run` would ask Jev again otherwise); a stored Jev category needs its current
+    confidence threshold (account override included) and must not be low-confidence. The sender
+    (resolved, group author) must not be allowlisted, must pass `can_unsubscribe` (DMARC +
+    List-Unsubscribe, not a group or own list) and, for categories that spare known contacts,
+    the sent-mail search must say I never wrote to them.
+
+    Rows that the user or the sender ruled out (restored, corrected, reported as spam, trashed,
+    starred or relabeled, a rule to a keep category, allowlisted, group, unverified, known
+    contact) become `skipped`, so `run` won't retry them either. Rows held back by settings or
+    transient state (mode, act_categories, a removed rule, confidence, the cap, a failed sent-mail
+    search, a deleted email, no stored message) are left as they are.
+    """
+    mode = effective_mode(ctx.settings, account, None)
+    rows = session.scalars(
+        select(Unsubscribe).where(
+            Unsubscribe.account == account.email,
+            Unsubscribe.status == "failed",
+            Unsubscribe.attempts < MAX_UNSUB_ATTEMPTS,
+        )
+    ).all()
+    if mode != Mode.ACT:
+        return [(row.list_key, f"held: mode is {mode.value}") for row in rows]
+    out: list[tuple[str, str]] = []
+    budget = ctx.settings.max_unsubscribes_per_run
+    names: dict[str, str] | None = None
+    for row in rows:
+        msg = _find_message(session, account.email, row.gmail_id)
+        if msg is None:
+            out.append((row.list_key, "held: no stored message"))
+            continue
+        reason = None
+        if msg.restored:
+            reason = "restored by the user"
+        elif msg.corrected_category is not None:
+            reason = f"corrected to {msg.corrected_category}"
+        if reason:
+            out.append(_skip(session, row, reason))
+            continue
+        if budget <= 0:
+            out.append((row.list_key, "held: run cap reached"))
+            continue
+        try:
+            email = gmail.get(row.gmail_id)
+        except Exception as exc:
+            if getattr(getattr(exc, "resp", None), "status", None) == 404:
+                out.append((row.list_key, "held: email deleted in Gmail"))
+                continue
+            raise
+        if names is None:
+            names = {v: k for k, v in gmail.labels().items()}
+        current = {names.get(i, i) for i in email.label_ids}
+        sig = signals_for(email, account)
+        rule = rules.lookup(session, account.email, sig.sender)
+        rule_category = rule.category if rule and rule.category in ctx.cfg.by_key else None
+        category = rule_category or msg.category
+        unsubscribes = category in ctx.cfg.by_key and ctx.cfg.by_key[category].action == (
+            Action.ARCHIVE_UNSUBSCRIBE
+        )
+        if "SPAM" in current:
+            reason = "reported as spam"  # unsubscribing would confirm the address
+        elif "TRASH" in current:
+            reason = "in the trash"
+        elif corrected := corrections.detect(msg, current, ctx.cfg):
+            reason = f"corrected in Gmail to {corrected}"
+        elif edit := _user_edit(ctx.cfg, msg, current):
+            what, labels = edit
+            reason = f"label {what} in Gmail: {', '.join(labels)}" if labels else what
+        elif rule_category and not unsubscribes:
+            reason = f"sender rule says {rule_category}"
+        if reason:
+            out.append(_skip(session, row, reason))
+            continue
+        held = None
+        if not unsubscribes or not (
+            account.act_categories is None or category in account.act_categories
+        ):
+            held = f"category {category} doesn't unsubscribe here"
+        elif rule_category is None and msg.source != "jev":
+            held = "rule since removed"  # run would ask Jev again; not worth it for a retry
+        elif (
+            rule_category is None and msg.source == "jev" and not _confident(ctx.cfg, account, msg)
+        ):
+            held = f"confidence {msg.confidence} below the {category} threshold"
+        if held:
+            out.append((row.list_key, f"held: {held}"))
+            continue
+        if is_allowed(account, sig):
+            reason = "allowlisted sender"
+        elif not can_unsubscribe(sig, account):
+            reason = "unverified sender, group or own list"
+        elif spares_known_contacts(ctx.cfg, category):
+            contact = previous_contact(gmail, account.email, sig.sender)
+            if contact is None:
+                out.append((row.list_key, "held: sent-mail search failed"))
+                continue
+            if contact in KNOWN_CONTACT:
+                reason = "known contact"
+        if reason:
+            out.append(_skip(session, row, reason))
+            continue
+        result = unsub.unsubscribe(sig, send_mail=gmail.send)
+        row.method, row.status, row.target = result.method, result.status, result.target
+        row.http_status, row.error = result.http_status, result.error
+        row.attempts += 1
+        row.attempted_at = now()
+        session.commit()
+        budget -= 1
+        out.append((row.list_key, result.status))
+    return out
+
+
+def _skip(session: Session, row: Unsubscribe, reason: str) -> tuple[str, str]:
+    row.status, row.error, row.attempted_at = "skipped", f"retry: {reason}", now()
+    session.commit()
+    return row.list_key, f"skipped: {reason}"
+
+
+def _confident(cfg: CategoriesConfig, account: Account, msg: Message) -> bool:
+    """Jev's stored answer still clears the category's current threshold, as `decide` requires."""
+    threshold = account.min_confidence.get(msg.category, cfg.by_key[msg.category].min_confidence)
+    return not msg.low_confidence and msg.confidence is not None and msg.confidence >= threshold
 
 
 def _unsub_row(session: Session, account: str, list_key: str) -> Unsubscribe | None:

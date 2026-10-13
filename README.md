@@ -128,11 +128,27 @@ All of this also applies when a sender rule (auto, manual or correction) decided
 before unsubscribing, the rule path re-runs the same checks, including the sent-mail search, so a
 relationship that starts after the rule exists is covered too.
 
-> **Exception: don't run `inbox-jev unsubscribe-retry` for now.** It retries `failed` rows but
-> re-checks only DMARC and the one-click URL guard. It skips the group / `List-Post` / own-domain
-> checks, the known-contact check, the run cap, `MODE` and `act_categories`, so it can unsubscribe
-> you from a group or from a contact's mail that `run` would now spare. A fix that makes it apply
-> the same checks is tracked separately.
+`inbox-jev unsubscribe-retry` re-checks each `failed` row against the email's current state
+before trying again:
+
+- act mode and the run cap, as above;
+- the email wasn't restored (`restore`) or corrected (`corrected_category`). In Gmail it isn't
+  reported as spam, in the trash, back in the inbox, under another Jev label, starred, missing a
+  Jev label we set, or carrying one we didn't (the edits `run` leaves alone);
+- the category is the current sender rule's (manual, correction or auto), else the stored one. It
+  must be `archive_unsubscribe` and in `act_categories`. If a rule decided the stored category
+  and has since been removed (`rules delete`), the row is held: `run` would ask Jev again. A
+  category Jev decided must still be at or above its current `min_confidence` (account override
+  included) and not low-confidence;
+- not allowlisted, `can_unsubscribe` (DMARC, `List-Unsubscribe`, not a group or own list) and,
+  for *cold_outreach*, the sent-mail search finds no contact. Unlike `run`, a failed search holds
+  the row: nothing in a manual retry is urgent.
+
+Rows the user or the sender ruled out (restored, corrected, reported as spam, trashed, starred
+or relabeled, a rule to a keep category, allowlisted, group, unverified sender, known contact)
+become `skipped`, so `run` won't retry them either. Rows held back by settings or a transient
+state (mode, `act_categories`, a removed rule, confidence, the cap, a failed search, a deleted
+email or no stored message) stay `failed`.
 
 ### Groups and mailing lists
 
@@ -286,7 +302,7 @@ uv run inbox-jev digest --dry-print
 | `inbox-jev restore -a EMAIL --since 1d [--category marketing]` | Undo: back to inbox, remove labels |
 | `inbox-jev reprocess -a EMAIL --category KEY [--low-confidence-only]` | Have the next `act` run redo that category's emails still in the inbox (pair with `run --lookback`) |
 | `inbox-jev rules list [-a EMAIL] [--all]` / `rules set -a EMAIL @domain.com newsletter` / `rules delete -a EMAIL SENDER` | Sender rules |
-| `inbox-jev unsubscribe-retry [-a EMAIL]` | Retry failed unsubscribes. **Don't use for now**: it re-checks only DMARC and the URL guard, not the other [unsubscribe checks](#unsubscribe-safety) |
+| `inbox-jev unsubscribe-retry [-a EMAIL]` | Retry failed unsubscribes after re-checking them against the current rules, corrections and [unsubscribe checks](#unsubscribe-safety) |
 | `inbox-jev senders backfill [-a EMAIL]` | Store the author, not the group, for group emails saved before authors were recovered |
 | `inbox-jev stats [-a EMAIL] [--days 7]` | Counts per category |
 | `inbox-jev labels rename OLD NEW [-a EMAIL]` | Rename a label in Gmail and the DB (see [Renaming a label](#renaming-a-label)) |

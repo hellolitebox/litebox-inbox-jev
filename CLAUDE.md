@@ -90,9 +90,9 @@ email bodies.
   groups (`group_domains`) key on the author; untrusted groups stay keyed on the group address,
   never on the author they claim.
 - Every new path that can unsubscribe must go through the same checks (`policy.can_unsubscribe`,
-  known contacts, once-per-list, mode and `act_categories`, the run cap). Unsubscribes are
-  irreversible. Known gap: `unsubscribe-retry` re-checks only DMARC and the URL guard (README →
-  "Unsubscribe safety"); don't run it until that is fixed.
+  known contacts, once-per-list, mode and `act_categories`, confidence, the run cap) and
+  respect what the user decided since (sender rules, corrections, restore, star). Unsubscribes
+  are irreversible. `run` and `unsubscribe-retry` (`triage.retry_unsubscribes`) both do.
 - Keep README.md, `categories.yaml` comments and `accounts.example.yaml` in sync with behaviour
   in the same PR.
 - Secrets live only in `.env`, `secrets/` and `accounts.yaml`, which are gitignored. Never log

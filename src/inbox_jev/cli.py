@@ -13,9 +13,8 @@ from sqlalchemy import func, select
 from . import digest as digest_mod
 from . import gmail as gmail_mod
 from . import labels, logs, rules, triage
-from . import unsubscribe as unsub
 from .config import Account, Mode, Settings, check_lookback, load_accounts, load_categories
-from .db import Message, SenderRule, Unsubscribe, make_session_factory, now
+from .db import Message, SenderRule, make_session_factory, now
 
 app = typer.Typer(no_args_is_help=True, help="Triage Gmail with TypeSafe Jev.")
 auth_app = typer.Typer(no_args_is_help=True, help="Manage Gmail OAuth tokens.")
@@ -184,31 +183,15 @@ def reprocess(
 
 @app.command("unsubscribe-retry")
 def unsubscribe_retry(account: AccountOpt = None) -> None:
-    """Retry failed unsubscribes (up to 3 attempts each).
-
-    Doesn't re-check previous_contact: each row passed it when created; `run` re-checks.
-    """
+    """Retry failed unsubscribes (up to 3 attempts each) that still pass run's checks."""
     s = _settings()
-    sessions = make_session_factory(s.database_url)
+    cfg = load_categories(s.categories_file)
+    ctx = triage.Context(s, cfg, make_session_factory(s.database_url))
     for acc in _accounts(s, account):
         gmail = gmail_mod.Gmail(gmail_mod.load_credentials(s.google_tokens_dir, acc.email))
-        with sessions() as session:
-            rows = session.scalars(
-                select(Unsubscribe).where(
-                    Unsubscribe.account == acc.email,
-                    Unsubscribe.status == "failed",
-                    Unsubscribe.attempts < triage.MAX_UNSUB_ATTEMPTS,
-                )
-            ).all()
-            for row in rows:
-                sig = triage.signals_for(gmail.get(row.gmail_id), acc)
-                result = unsub.unsubscribe(sig, send_mail=gmail.send)
-                row.method, row.status, row.target = result.method, result.status, result.target
-                row.http_status, row.error = result.http_status, result.error
-                row.attempts += 1
-                row.attempted_at = now()
-                session.commit()
-                typer.echo(f"{row.list_key}: {result.status}")
+        with ctx.sessions() as session:
+            for list_key, outcome in triage.retry_unsubscribes(ctx, session, gmail, acc):
+                typer.echo(f"{acc.email} {list_key}: {outcome}")
 
 
 @senders_app.command("backfill")
