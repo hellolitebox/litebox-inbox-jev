@@ -16,6 +16,19 @@ Everything is recorded in a database (SQLite by default) so it can be audited an
 ## How it decides
 
 1. **Allowlist** (`accounts.yaml`): matching senders/domains are always *important*, never touched.
+   For email relayed by a Google Group ("'Jane' via Hello <hello@yourco.com>"), the sender is
+   the author from `X-Original-Sender`, trusted only when the group is on a domain listed in the
+   account's `group_domains` (opt-in: none by default, not even the account's own domain), its
+   domain passes DMARC (Gmail's topmost `Authentication-Results`) and `Mailing-list` names the
+   same group. Anyone can write those headers from a domain they own or from a public provider
+   address, and anyone can create an `@googlegroups.com` group, so other groups stay keyed on
+   the group address. `group_domains` rejects public providers, `googlegroups.com` and bare
+   suffixes such as `co.uk`; list only domains whose Google Workspace you control. Rules,
+   corrections, the allowlist and `previous_contact` all use the author. A group only counts as
+   allowlisted when its exact address is in `allow_senders`; `allow_domains: [yourco.com]`
+   doesn't trust strangers who write to it. `inbox-jev senders backfill` re-reads stored group
+   emails saved before this and stores their author as sender (safe to run again; it skips
+   emails deleted in Gmail and stops on any other Gmail error).
 2. **Sender rules**: learned from your corrections, set manually (`inbox-jev rules set`), or
    created automatically after 3 consistent high-confidence answers. They skip Jev. An answer
    doesn't count toward an automatic rule when it was a group archive (see below) or when the
@@ -197,6 +210,7 @@ uv run inbox-jev digest --dry-print
 | `inbox-jev reprocess -a EMAIL --category KEY [--low-confidence-only]` | Have the next `act` run redo that category's emails still in the inbox (pair with `run --lookback`) |
 | `inbox-jev rules list [--all]` / `rules set -a EMAIL @domain.com newsletter` / `rules delete` | Sender rules |
 | `inbox-jev unsubscribe-retry` | Retry failed unsubscribes |
+| `inbox-jev senders backfill [-a EMAIL]` | Store the author, not the group, for group emails saved before authors were recovered |
 | `inbox-jev stats [--days 7]` | Counts per category |
 | `inbox-jev labels rename OLD NEW [-a EMAIL]` | Rename a label in Gmail and the DB (see below) |
 

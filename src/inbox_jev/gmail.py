@@ -221,6 +221,26 @@ class Gmail:
             internal_date_ms=int(msg.get("internalDate", 0)),
         )
 
+    def get_headers(self, message_id: str, names: list[str]) -> Email:
+        """Only the named headers of a message (no body): format=metadata."""
+        msg = (
+            self._svc.messages()
+            .get(userId="me", id=message_id, format="metadata", metadataHeaders=names)
+            .execute()
+        )
+        headers: dict[str, list[str]] = {}
+        for h in msg.get("payload", {}).get("headers", []):
+            headers.setdefault(h["name"].lower(), []).append(h["value"])
+        return Email(
+            id=msg["id"],
+            thread_id=msg["threadId"],
+            label_ids=msg.get("labelIds", []),
+            headers=headers,
+            snippet="",
+            body="",
+            internal_date_ms=int(msg.get("internalDate", 0)),
+        )
+
     def get_label_ids(self, message_id: str) -> list[str] | None:
         """Current labels of a message, or None if it no longer exists."""
         try:

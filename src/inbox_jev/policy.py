@@ -55,7 +55,7 @@ def decide(
     previous_contact: str | None = None,
 ) -> Decision:
     """`previous_contact` is triage.previous_contact's answer (None = unknown / not checked)."""
-    if account.is_allowed(sig.sender):
+    if is_allowed(account, sig):
         return _apply(cfg, Decision(category="important", confidence=1.0, source="allowlist"))
     if rule_category and rule_category in cfg.by_key:
         decision = _apply(cfg, Decision(category=rule_category, confidence=1.0, source="rule"))
@@ -122,6 +122,18 @@ def can_unsubscribe(sig: Signals, account: Account) -> bool:
     return _verified(sig) and not _group_list(sig, account)
 
 
+def is_allowed(account: Account, sig: Signals) -> bool:
+    """Allowlisted author, or a group listed by exact address in allow_senders.
+
+    A group only counts through allow_senders: allowlisting your own domain (to trust
+    colleagues) must not also trust every stranger who writes to hello@yourdomain.
+    """
+    relay = (sig.relayed_by or "").lower()
+    return account.is_allowed(sig.sender) or bool(
+        relay and relay in (s.lower() for s in account.allow_senders)
+    )
+
+
 def _verified(sig: Signals) -> bool:
     """Safe to unsubscribe: the sender passed DMARC and offers List-Unsubscribe."""
     return sig.dmarc_pass and sig.has_unsubscribe
@@ -155,6 +167,8 @@ def _group_list(sig: Signals, account: Account) -> bool:
     hosts = [_target_host(u) for u in (*sig.unsubscribe_https, *sig.unsubscribe_mailto)]
     if any(_on_domain(h, g) for h in hosts for g in GROUP_HOSTS):
         return True
+    if sig.relayed_by or sig.group_author:
+        return True  # Google Groups relay, trusted or not
     names = [sig.sender_domain, (sig.list_id or "").lower()]
     return any(_on_domain(n, own) for n in names if n)
 

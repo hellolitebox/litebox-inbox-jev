@@ -21,7 +21,10 @@ def cfg():
 @pytest.fixture
 def account():
     return Account(
-        email="me@acme.com", allow_domains=["acme.com"], allow_senders=["vip@partner.com"]
+        email="me@acme.com",
+        allow_domains=["acme.com"],
+        allow_senders=["vip@partner.com"],
+        group_domains=["acme.com"],
     )
 
 

@@ -56,3 +56,52 @@ def test_reply_keep_probability_within_ceiling_is_accepted(cfg, floor, keep):
         cfg, archive_group_min_confidence=floor, archive_group_reply_keep_probability=keep
     )
     assert c.archive_group_reply_keep_probability == keep
+
+
+def test_relay_domains_are_opt_in_group_domains_only():
+    # The account's own domain isn't trusted implicitly.
+    assert account("").relay_domains == []
+    assert account("group_domains: [Sister.org]\n").relay_domains == ["sister.org"]
+    # An unlisted public provider (not in FREE_MAIL) trusts nothing either.
+    assert Account.model_validate({"email": "me@mac.com"}).relay_domains == []
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("@example.org", "example.org"),
+        (" Example.ORG. ", "example.org"),
+        ("eu.example.org", "eu.example.org"),
+        ("acme.co.uk", "acme.co.uk"),
+    ],
+)
+def test_group_domains_are_normalised(value, expected):
+    assert account(f"group_domains: ['{value}']\n").group_domains == [expected]
+
+
+@pytest.mark.parametrize(
+    "domain",
+    [
+        "googlegroups.com",
+        "googlegroups.com.",
+        "GMail.com",
+        "groups.google.com",
+        "eu.googlegroups.com",  # ends in a public host
+        "mail.yahoo.com",
+    ],
+)
+def test_group_domains_rejects_public_domains(domain):
+    with pytest.raises(ValidationError, match="public domains"):
+        account(f"group_domains: ['{domain}']\n")
+
+
+@pytest.mark.parametrize("domain", ["com", "co.uk", "com.ar", "ac.jp"])
+def test_group_domains_rejects_public_suffixes(domain):
+    with pytest.raises(ValidationError, match="group_domains entry"):
+        account(f"group_domains: ['{domain}']\n")
+
+
+@pytest.mark.parametrize("domain", ["hello@example.org", "example .org", "", "@"])
+def test_group_domains_rejects_non_domains(domain):
+    with pytest.raises(ValidationError, match="isn't a domain"):
+        account(f"group_domains: ['{domain}']\n")

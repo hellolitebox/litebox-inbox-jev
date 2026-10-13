@@ -14,6 +14,50 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Gmail `newer_than:` units: days, months, years.
 LOOKBACK_RE = re.compile(r"^\d+[dmy]$")
 
+# Public mail providers: anyone can get an address there, so they say nothing about who a sender
+# is (previous_contact) and can never be an account's trusted group domain.
+FREE_MAIL = frozenset(
+    {
+        "gmail.com",
+        "googlemail.com",
+        "outlook.com",
+        "hotmail.com",
+        "live.com",
+        "msn.com",
+        "yahoo.com",
+        "icloud.com",
+        "me.com",
+        "aol.com",
+        "proton.me",
+        "protonmail.com",
+        "gmx.com",
+    }
+)
+# Public group hosts: anyone can create a group there.
+PUBLIC_GROUP_HOSTS = frozenset({"googlegroups.com", "groups.google.com"})
+# Second-level labels that ccTLDs sell names under (co.uk, com.ar, ac.jp…): "co.uk" alone is a
+# public suffix, not a domain anyone controls. Best effort; group_domains is opt-in anyway.
+_PUBLIC_SLD = frozenset({"ac", "co", "com", "edu", "gob", "go", "gov", "ne", "net", "or", "org"})
+_DOMAIN = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)+$")
+
+
+def _on_domain(domain: str, parent: str) -> bool:
+    return domain == parent or domain.endswith("." + parent)
+
+
+def normalize_group_domain(value: str) -> str:
+    """Normalised group_domains entry, or ValueError if it isn't a domain someone can own."""
+    domain = value.strip().lower().rstrip(".").removeprefix("@")
+    if not _DOMAIN.match(domain):
+        raise ValueError(f"group_domains entry {value!r} isn't a domain like example.org")
+    labels = domain.split(".")
+    if len(labels) == 2 and len(labels[1]) == 2 and labels[0] in _PUBLIC_SLD:
+        raise ValueError(f"group_domains entry {value!r} is a public suffix, not a domain")
+    public = next((p for p in FREE_MAIL | PUBLIC_GROUP_HOSTS if _on_domain(domain, p)), None)
+    if public:
+        raise ValueError(f"group_domains can't include public domains: {value!r} ({public})")
+    return domain
+
 
 def check_lookback(value: str) -> str:
     if not LOOKBACK_RE.match(value):
@@ -152,6 +196,10 @@ class Account(BaseModel):
     mode: Mode | None = None
     allow_domains: list[str] = Field(default_factory=list)
     allow_senders: list[str] = Field(default_factory=list)
+    # Domains whose Google Groups are trusted to name the original author (X-Original-Sender).
+    # Opt-in: empty means no group is trusted, not even the account's own domain. Only list
+    # domains whose Google Workspace you control.
+    group_domains: list[str] = Field(default_factory=list)
     min_confidence: dict[str, float] = Field(default_factory=dict)
     # In act mode, only these category keys get their action; the rest are labeled only.
     # Absent = all categories act; [] = none do. An explicit empty key is rejected (fail closed).
@@ -166,6 +214,16 @@ class Account(BaseModel):
                 "on every category"
             )
         return value
+
+    @field_validator("group_domains")
+    @classmethod
+    def _check_group_domains(cls, value: list[str]) -> list[str]:
+        return [normalize_group_domain(d) for d in value]
+
+    @property
+    def relay_domains(self) -> list[str]:
+        """Domains whose groups' X-Original-Sender is trusted (signals.resolve_relay)."""
+        return list(self.group_domains)
 
     def is_allowed(self, sender: str) -> bool:
         sender = sender.lower()

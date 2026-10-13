@@ -3,7 +3,7 @@ from conftest import GMAIL_PASS, make_classification, make_signals
 
 from inbox_jev.config import Mode
 from inbox_jev.policy import decide, plan, rule_keys
-from inbox_jev.signals import extract
+from inbox_jev.signals import extract, resolve_relay
 
 
 def test_allowlist_skips_everything(cfg, account):
@@ -476,3 +476,64 @@ def test_rule_path_still_unsubscribes_strangers(cfg, account, contact):
         cfg, account, make_signals(), rule_category="cold_outreach", previous_contact=contact
     )
     assert d.unsubscribe and not d.known_contact_kept
+
+
+def _relayed(**kw):
+    base = dict(
+        sender="david.cohen@techstars.com",
+        sender_domain="techstars.com",
+        list_id="hello.acme.com",
+        relayed_by="hello@acme.com",
+        unsubscribe_https=[],
+        unsubscribe_mailto=GROUP_UNSUB,
+        one_click=False,
+    )
+    base.update(kw)
+    return make_signals(**base)
+
+
+def test_group_relayed_mail_is_judged_by_its_author(cfg, account):
+    # acme.com (the account's own domain) is allowlisted, but the author is external: Jev decides.
+    with pytest.raises(ValueError):
+        decide(cfg, account, _relayed())  # not allowlisted, so a classification is required
+    d = decide(cfg, account, _relayed(), make_classification("cold_outreach", 0.99))
+    assert d.category == "cold_outreach" and d.archive and not d.unsubscribe
+
+
+def test_group_relayed_mail_allowlisted_by_author_or_group(cfg, account):
+    account.allow_domains = []
+    account.allow_senders = ["david.cohen@techstars.com"]
+    assert decide(cfg, account, _relayed()).source == "allowlist"
+    account.allow_senders = ["hello@acme.com"]  # allowlisting the group keeps working
+    assert decide(cfg, account, _relayed()).source == "allowlist"
+
+
+def test_group_relayed_mail_never_unsubscribes_even_with_esp_headers(cfg, account):
+    sig = _relayed(
+        unsubscribe_https=["https://esp.example.com/u"],
+        unsubscribe_mailto=[],
+        one_click=True,
+        list_id=None,
+    )
+    assert not decide(cfg, account, sig, make_classification("marketing", 0.99)).unsubscribe
+    assert not decide(cfg, account, sig, rule_category="cold_outreach").unsubscribe
+
+
+@pytest.mark.parametrize("group", ["news@evil.com", "founders@googlegroups.com"])
+def test_untrusted_group_cannot_claim_an_allowlisted_author(cfg, account, group):
+    # Valid DMARC for the attacker's own domain, plus the headers Google Groups would write.
+    domain = group.rsplit("@", 1)[1]
+    sig = extract(
+        {
+            "from": [f"\"'CEO' via News\" <{group}>"],
+            "x-original-sender": ["ceo@acme.com"],  # acme.com is allowlisted
+            "mailing-list": [f"list {group}; contact owners@{domain}"],
+            "authentication-results": [f"mx.google.com; dmarc=pass header.from={domain}"],
+        }
+    )
+    sig = resolve_relay(sig, account.relay_domains)
+    assert sig.sender == group and sig.relayed_by is None
+    with pytest.raises(ValueError):
+        decide(cfg, account, sig)  # not allowlisted: Jev has to classify it
+    # No unsubscribe through something shaped like a group, trusted or not.
+    assert not decide(cfg, account, sig, rule_category="cold_outreach").unsubscribe

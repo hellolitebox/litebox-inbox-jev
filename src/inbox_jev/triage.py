@@ -13,33 +13,16 @@ from sqlalchemy.orm import Session, sessionmaker
 from . import corrections, rules
 from . import unsubscribe as unsub
 from .classifier import Classifier, build_state
-from .config import Account, CategoriesConfig, Mode, Settings
+from .config import FREE_MAIL, Account, CategoriesConfig, Mode, Settings
 from .db import Message, Run, Unsubscribe, now
 from .gmail import Email, Gmail, load_credentials
-from .policy import can_unsubscribe, decide, plan, spares_known_contacts
-from .signals import Signals
+from .policy import can_unsubscribe, decide, is_allowed, plan, spares_known_contacts
+from .signals import Signals, resolve_relay
 
 log = logging.getLogger(__name__)
 
 MAX_UNSUB_ATTEMPTS = 3
 SAFE_ADDRESS = re.compile(r"^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$")
-FREE_MAIL = frozenset(
-    {
-        "gmail.com",
-        "googlemail.com",
-        "outlook.com",
-        "hotmail.com",
-        "live.com",
-        "msn.com",
-        "yahoo.com",
-        "icloud.com",
-        "me.com",
-        "aol.com",
-        "proton.me",
-        "protonmail.com",
-        "gmx.com",
-    }
-)
 
 
 @dataclass
@@ -185,8 +168,10 @@ def process(
     unsub_budget: list[int],
 ) -> Message:
     email = gmail.get(message_id)
-    sig = email.signals
+    sig = signals_for(email, account)
     prev = _find_message(session, account.email, message_id)
+    if prev is not None:
+        prev.sender = sig.sender  # rows stored before group authors were recovered
     if mode != Mode.DRY_RUN and _user_touched(ctx.cfg, session, account, prev, email, label_ids):
         # Leave Gmail and labels_added as they are; just don't revisit it in this mode.
         prev.status, prev.error, prev.mode = "done", None, mode.value
@@ -195,12 +180,12 @@ def process(
     rule = rules.lookup(session, account.email, sig.sender)
 
     classification, contact = None, None
-    if account.is_allowed(sig.sender):
+    if is_allowed(account, sig):
         pass
     elif rule is None:
         contact = previous_contact(gmail, account.email, sig.sender)
         classification = ctx.classifier.classify(
-            build_state(email, account.email, ctx.settings.body_chars, contact)
+            build_state(email, account.email, ctx.settings.body_chars, contact, sig)
         )
     elif _rule_needs_contact(ctx.cfg, session, account, sig, rule.category, mode):
         contact = previous_contact(gmail, account.email, sig.sender)
@@ -214,7 +199,7 @@ def process(
     )
     actions = plan(ctx.cfg, decision, mode, account.act_categories)
 
-    msg = _upsert_message(session, account.email, email)
+    msg = _upsert_message(session, account.email, email, sig)
     # Reprocessing (e.g. label -> act): drop labels from the previous pass that no longer apply.
     stale = [
         label_ids[name]
@@ -247,7 +232,11 @@ def process(
 
     if classification:
         rules.record_auto(session, ctx.cfg, account.email, sig.sender, classification, decision)
-    if actions.unsubscribe and unsub_budget[0] > 0 and _unsubscribe(session, gmail, account, email):
+    if (
+        actions.unsubscribe
+        and unsub_budget[0] > 0
+        and _unsubscribe(session, gmail, account, email, sig)
+    ):
         unsub_budget[0] -= 1
 
     session.commit()
@@ -270,6 +259,48 @@ def process(
         },
     )
     return msg
+
+
+def signals_for(email: Email, account: Account) -> Signals:
+    """The email's signals with the group author as sender when the group is trusted.
+
+    Use this, not `email.signals`, wherever the sender drives a decision, a rule or the DB.
+    """
+    return resolve_relay(email.signals, account.relay_domains)
+
+
+# Headers signals_for needs to recover a group's author (see signals.original_sender).
+_SENDER_HEADERS = ["From", "Authentication-Results", "Mailing-list", "X-Original-Sender"]
+
+
+def backfill_senders(session: Session, gmail: Gmail, account: Account) -> tuple[int, int, int]:
+    """Re-read headers of stored group mail ("… via …" in From) and store its author as sender.
+
+    For rows saved before group authors were recovered, so corrections on them create rules on
+    the author, not the group. Idempotent. Skips only emails Gmail no longer has (HTTP 404); any
+    other error (auth, quota, 5xx) is raised. Returns (rows checked, updated, skipped).
+    """
+    rows = session.scalars(
+        select(Message).where(
+            Message.account == account.email, Message.from_header.contains(" via ")
+        )
+    ).all()
+    updated = skipped = 0
+    for msg in rows:
+        try:
+            email = gmail.get_headers(msg.gmail_id, _SENDER_HEADERS)
+        except Exception as exc:  # googleapiclient.errors.HttpError 404
+            if getattr(getattr(exc, "resp", None), "status", None) != 404:
+                raise
+            log.warning("backfill: email deleted", extra={"account": account.email})
+            skipped += 1
+            continue
+        sender = signals_for(email, account).sender
+        if sender and sender != msg.sender:
+            msg.sender = sender
+            updated += 1
+    session.commit()
+    return len(rows), updated, skipped
 
 
 def previous_contact(gmail: Gmail, account: str, sender: str) -> str | None:
@@ -369,9 +400,10 @@ def _unsub_settled(row: Unsubscribe | None) -> bool:
     return row is not None and (row.status != "failed" or row.attempts >= MAX_UNSUB_ATTEMPTS)
 
 
-def _unsubscribe(session: Session, gmail: Gmail, account: Account, email: Email) -> bool:
+def _unsubscribe(
+    session: Session, gmail: Gmail, account: Account, email: Email, sig: Signals
+) -> bool:
     """Unsubscribe once per (account, list). Returns True if an attempt was made."""
-    sig = email.signals
     row = _unsub_row(session, account.email, sig.list_key)
     if _unsub_settled(row):
         return False
@@ -403,13 +435,13 @@ def _find_message(session: Session, account: str, gmail_id: str) -> Message | No
     )
 
 
-def _upsert_message(session: Session, account: str, email: Email) -> Message:
+def _upsert_message(session: Session, account: str, email: Email, sig: Signals) -> Message:
     msg = _find_message(session, account, email.id)
     if msg is None:
         msg = Message(account=account, gmail_id=email.id)
         session.add(msg)
     msg.thread_id = email.thread_id
-    msg.sender = email.signals.sender
+    msg.sender = sig.sender
     msg.from_header = email.header("From")
     msg.subject = email.header("Subject")
     msg.received_at = datetime.fromtimestamp(email.internal_date_ms / 1000, UTC)

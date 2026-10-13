@@ -9,6 +9,7 @@ from typesafe_sdk import Choice, Noul, TypeSafeClient, TypeSafeError
 
 from .config import CategoriesConfig
 from .gmail import Email
+from .signals import Signals
 
 CATEGORY_Q = "category"
 NEEDS_REPLY_Q = "needs_reply"
@@ -35,9 +36,14 @@ class Classification:
 
 
 def build_state(
-    email: Email, account_email: str, body_chars: int, previous_contact: str | None = None
+    email: Email,
+    account_email: str,
+    body_chars: int,
+    previous_contact: str | None = None,
+    sig: Signals | None = None,
 ) -> dict:
-    sig = email.signals
+    """`sig` is triage.signals_for's answer; defaults to the raw (unresolved) signals."""
+    sig = sig or email.signals
     state = {
         "recipient": account_email,
         "from": email.header("From"),
@@ -49,6 +55,10 @@ def build_state(
         "precedence": email.header("Precedence") or None,
         "body": (email.body or email.snippet)[:body_chars],
     }
+    if sig.relayed_by:
+        # Sent to a group I'm in; "from" shows the group, this is who actually wrote it.
+        state["original_sender"] = sig.sender
+        state["sent_via_group"] = sig.relayed_by
     if previous_contact is not None:
         state["previous_contact"] = previous_contact
     return state

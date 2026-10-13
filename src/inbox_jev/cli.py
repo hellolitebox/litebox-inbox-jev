@@ -21,9 +21,11 @@ app = typer.Typer(no_args_is_help=True, help="Triage Gmail with TypeSafe Jev.")
 auth_app = typer.Typer(no_args_is_help=True, help="Manage Gmail OAuth tokens.")
 rules_app = typer.Typer(no_args_is_help=True, help="Per-sender rules (skip Jev).")
 labels_app = typer.Typer(no_args_is_help=True, help="Manage Jev labels in Gmail.")
+senders_app = typer.Typer(no_args_is_help=True, help="Maintain stored senders.")
 app.add_typer(auth_app, name="auth")
 app.add_typer(rules_app, name="rules")
 app.add_typer(labels_app, name="labels")
+app.add_typer(senders_app, name="senders")
 
 log = logging.getLogger("inbox_jev")
 
@@ -199,7 +201,7 @@ def unsubscribe_retry(account: AccountOpt = None) -> None:
                 )
             ).all()
             for row in rows:
-                sig = gmail.get(row.gmail_id).signals
+                sig = triage.signals_for(gmail.get(row.gmail_id), acc)
                 result = unsub.unsubscribe(sig, send_mail=gmail.send)
                 row.method, row.status, row.target = result.method, result.status, result.target
                 row.http_status, row.error = result.http_status, result.error
@@ -207,6 +209,25 @@ def unsubscribe_retry(account: AccountOpt = None) -> None:
                 row.attempted_at = now()
                 session.commit()
                 typer.echo(f"{row.list_key}: {result.status}")
+
+
+@senders_app.command("backfill")
+def senders_backfill(account: AccountOpt = None) -> None:
+    """Store the author, not the group, as sender of group mail saved before that was done.
+
+    Re-reads the headers of stored emails whose From has " via ". Safe to run again. Emails
+    deleted in Gmail are skipped; any other Gmail error stops the command.
+    """
+    s = _settings()
+    sessions = make_session_factory(s.database_url)
+    for acc in _accounts(s, account):
+        gmail = gmail_mod.Gmail(gmail_mod.load_credentials(s.google_tokens_dir, acc.email))
+        with sessions() as session:
+            checked, updated, skipped = triage.backfill_senders(session, gmail, acc)
+        typer.echo(
+            f"{acc.email}: {checked} group emails checked, {updated} senders updated, "
+            f"{skipped} skipped (deleted in Gmail)"
+        )
 
 
 @app.command()
