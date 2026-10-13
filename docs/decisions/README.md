@@ -36,3 +36,5 @@ record when the decision changes: add a new one and mark the old one `Superseded
 | [0023](0023-one-order-for-unsubscribe-checks.md) | One order for the unsubscribe checks | Accepted | #21 |
 | [0024](0024-no-auto-rules-in-dry-run.md) | No automatic rules are learned in `dry_run` | Accepted | #21 |
 | [0025](0025-http-only-list-unsubscribe-is-none.md) | An `http://`-only `List-Unsubscribe` counts as no header | Accepted | #21 |
+| [0026](0026-one-unsubscribe-gate-for-every-path.md) | One unsubscribe gate and one act gate for every path | Accepted | #22 |
+| [0027](0027-restore-skips-deleted-emails.md) | `restore` skips emails deleted in Gmail | Accepted | #22 |

@@ -33,3 +33,5 @@ on the Jev path but the flag said nothing true about it.
 ## Consequences
 - No change in what is archived, spammed, unsubscribed or learned. Rows stored from now on have
   `downgraded_to_spam = false` on unverified archive-group and Review decisions.
+- Since [0026](0026-one-unsubscribe-gate-for-every-path.md), `_check_unsubscribe` applies
+  `policy.unsubscribe_gate`, which holds this order for every path, `unsubscribe-retry` included.

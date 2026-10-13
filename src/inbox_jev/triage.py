@@ -13,17 +13,18 @@ from sqlalchemy.orm import Session, sessionmaker
 from . import corrections, rules
 from . import unsubscribe as unsub
 from .classifier import Classification, Classifier, JevError, build_state
-from .config import FREE_MAIL, Account, Action, CategoriesConfig, Mode, Settings
+from .config import FREE_MAIL, Account, CategoriesConfig, Mode, Settings
 from .db import MAX_ERROR_ATTEMPTS, Message, Run, SenderRule, Unsubscribe, now
 from .gmail import Email, Gmail, is_token_refresh_error, load_credentials, token_error_detail
 from .policy import (
-    KNOWN_CONTACT,
-    can_unsubscribe,
+    Veto,
+    acts_on,
     decide,
     flags_only,
     is_allowed,
     plan,
-    spares_known_contacts,
+    unsubscribe_gate,
+    unsubscribes,
 )
 from .signals import Signals, resolve_relay
 
@@ -240,6 +241,62 @@ def mark_for_reprocess(
     return count
 
 
+@dataclass
+class RestoreResult:
+    restored: int = 0
+    deleted: int = 0  # gone from Gmail (HTTP 404): left as they are
+
+
+def restore(
+    session: Session,
+    gmail: Gmail,
+    account: str,
+    since: timedelta,
+    category: str | None = None,
+) -> RestoreResult:
+    """Undo label/act passes processed in the last `since`: `inbox-jev restore`.
+
+    For each `done` row not processed in `dry_run` (which changed nothing in Gmail) and not
+    already restored, optionally only in `category`: archived or spammed emails go back to
+    INBOX, the labels we added and SPAM are removed, and the row is marked `restored`, so `run`
+    never processes it again, it is never learned as a correction and `unsubscribe-retry` skips
+    its failed unsubscribe. Each email is committed on its own. Unsubscribes can't be undone.
+
+    An email Gmail no longer has (HTTP 404) is skipped and its row left unchanged, so one
+    deleted email doesn't stop the rest from being restored; any other Gmail error is raised.
+    """
+    ids = gmail.labels()
+    query = select(Message).where(
+        Message.account == account,
+        Message.status == "done",
+        Message.mode != Mode.DRY_RUN.value,
+        Message.restored.is_(False),
+        Message.processed_at >= now() - since,
+    )
+    if category:
+        query = query.where(Message.category == category)
+    result = RestoreResult()
+    for msg in session.scalars(query).all():
+        remove = [ids[n] for n in (msg.labels_added or []) if n in ids and n != "SPAM"]
+        add = []
+        if msg.archived or msg.spammed:
+            add.append("INBOX")
+        if msg.spammed:
+            remove.append("SPAM")
+        try:
+            gmail.modify(msg.gmail_id, add=add, remove=remove)
+        except Exception as exc:  # googleapiclient.errors.HttpError 404
+            if not _not_found(exc):
+                raise
+            log.warning("restore: email deleted", extra={"account": account, "id": msg.gmail_id})
+            result.deleted += 1
+            continue
+        msg.restored = True
+        session.commit()
+        result.restored += 1
+    return result
+
+
 def reset_error_attempts(session: Session, account: str) -> int:
     """Have the next run retry every email stored as `error`, including those that gave up.
 
@@ -433,7 +490,7 @@ def backfill_senders(session: Session, gmail: Gmail, account: Account) -> tuple[
         try:
             email = gmail.get_headers(msg.gmail_id, _SENDER_HEADERS)
         except Exception as exc:  # googleapiclient.errors.HttpError 404
-            if getattr(getattr(exc, "resp", None), "status", None) != 404:
+            if not _not_found(exc):
                 raise
             log.warning("backfill: email deleted", extra={"account": account.email})
             skipped += 1
@@ -532,14 +589,15 @@ def rule_needs_contact(
 ) -> bool:
     """A rule hit that would unsubscribe unless I wrote to the sender: worth the Gmail searches.
 
-    Only in act mode for categories in act_categories (as `plan` decides), for categories that
-    spare known contacts, senders that pass the other unsubscribe checks, and lists not already
-    settled in the Unsubscribe table.
+    Only when the category is acted on (`policy.acts_on`), `policy.unsubscribe_gate` lets it
+    through with only the sent-mail search left to decide (a category that spares known
+    contacts, a verified non-group sender), and the list isn't already settled in the
+    Unsubscribe table.
     """
-    acts = mode == Mode.ACT and (
-        account.act_categories is None or category in account.act_categories
-    )
-    if not (acts and spares_known_contacts(cfg, category) and can_unsubscribe(sig, account)):
+    if not acts_on(mode, account.act_categories, category):
+        return False
+    gate = unsubscribe_gate(cfg, account, sig, category, previous_contact=None)
+    if not (gate.allowed and gate.contact_unknown):
         return False
     return not _unsub_settled(_unsub_row(session, account.email, sig.list_key))
 
@@ -558,7 +616,7 @@ def retry_unsubscribes(
     category in `act_categories`. A stored category that a rule decided needs that rule to still
     exist (`run` would ask Jev again otherwise); a stored Jev category needs its current
     confidence threshold (account override included) and must not be low-confidence. The sender
-    (resolved, group author) must not be allowlisted, must pass `can_unsubscribe` (DMARC +
+    (resolved, group author) must pass `policy.unsubscribe_gate` (not allowlisted, DMARC +
     List-Unsubscribe, not a group or own list) and, for categories that spare known contacts,
     the sent-mail search must say I never wrote to them.
 
@@ -600,7 +658,7 @@ def retry_unsubscribes(
         try:
             email = gmail.get(row.gmail_id)
         except Exception as exc:
-            if getattr(getattr(exc, "resp", None), "status", None) == 404:
+            if _not_found(exc):
                 out.append((row.list_key, "held: email deleted in Gmail"))
                 continue
             raise
@@ -611,9 +669,6 @@ def retry_unsubscribes(
         rule = rule_for(ctx, session, account, sig.sender)
         rule_category = rule.category if rule else None
         category = rule_category or msg.category
-        unsubscribes = category in ctx.cfg.by_key and ctx.cfg.by_key[category].action == (
-            Action.ARCHIVE_UNSUBSCRIBE
-        )
         if "SPAM" in current:
             reason = "reported as spam"  # unsubscribing would confirm the address
         elif "TRASH" in current:
@@ -623,14 +678,14 @@ def retry_unsubscribes(
         elif edit := _user_edit(ctx.cfg, msg, current):
             what, labels = edit
             reason = f"label {what} in Gmail: {', '.join(labels)}" if labels else what
-        elif rule_category and not unsubscribes:
+        elif rule_category and not unsubscribes(ctx.cfg, rule_category):
             reason = f"sender rule says {rule_category}"
         if reason:
             out.append(_skip(session, row, reason))
             continue
         held = None
-        if not unsubscribes or not (
-            account.act_categories is None or category in account.act_categories
+        if not unsubscribes(ctx.cfg, category) or not acts_on(
+            mode, account.act_categories, category
         ):
             held = f"category {category} doesn't unsubscribe here"
         elif rule_category is None and msg.source != "jev":
@@ -642,29 +697,33 @@ def retry_unsubscribes(
         if held:
             out.append((row.list_key, f"held: {held}"))
             continue
-        if is_allowed(account, sig):
-            reason = "allowlisted sender"
-        elif not can_unsubscribe(sig, account):
-            reason = "unverified sender, group or own list"
-        elif spares_known_contacts(ctx.cfg, category):
+        gate = unsubscribe_gate(ctx.cfg, account, sig, category, previous_contact=None)
+        if gate.allowed and gate.contact_unknown:
             contact = previous_contact(gmail, account.email, sig.sender)
-            if contact is None:
+            if contact is None:  # stricter than run: nothing in a manual retry is urgent
                 out.append((row.list_key, "held: sent-mail search failed"))
                 continue
-            if contact in KNOWN_CONTACT:
-                reason = "known contact"
-        if reason:
-            out.append(_skip(session, row, reason))
+            gate = unsubscribe_gate(ctx.cfg, account, sig, category, contact)
+        if not gate.allowed:
+            out.append(_skip(session, row, _RETRY_SKIP_REASONS[gate.veto]))
             continue
         result = unsub.unsubscribe(sig, send_mail=gmail.send)
-        row.method, row.status, row.target = result.method, result.status, result.target
-        row.http_status, row.error = result.http_status, result.error
-        row.attempts += 1
-        row.attempted_at = now()
+        record_attempt(row, result)
         session.commit()
         budget -= 1
         out.append((row.list_key, result.status))
     return out
+
+
+# The `skipped: …` reasons unsubscribe-retry stores for each gate veto. NOT_UNSUBSCRIBING never
+# gets here: the category is checked (and held) first.
+_RETRY_SKIP_REASONS = {
+    Veto.NOT_UNSUBSCRIBING: "category doesn't unsubscribe",
+    Veto.ALLOWLISTED: "allowlisted sender",
+    Veto.UNVERIFIED: "unverified sender, group or own list",
+    Veto.GROUP: "unverified sender, group or own list",
+    Veto.KNOWN_CONTACT: "known contact",
+}
 
 
 def _skip(session: Session, row: Unsubscribe, reason: str) -> tuple[str, str]:
@@ -703,20 +762,34 @@ def _unsubscribe(
         row = Unsubscribe(account=account.email, list_key=sig.list_key, attempts=0)
         session.add(row)
     row.sender, row.gmail_id = sig.sender, email.id
+    record_attempt(row, result)
+    return True
+
+
+def record_attempt(row: Unsubscribe, result: unsub.Result) -> None:
+    """Store an unsubscribe attempt's result on its row (not committed) and log it.
+
+    The one place `run` and `unsubscribe-retry` update a row after an attempt, so the attempt
+    count that settles a list (MAX_UNSUB_ATTEMPTS) moves the same way on both.
+    """
     row.method, row.status, row.target = result.method, result.status, result.target
     row.http_status, row.error = result.http_status, result.error
-    row.attempts += 1
+    row.attempts = (row.attempts or 0) + 1
     row.attempted_at = now()
     log.info(
         "unsubscribe",
         extra={
-            "account": account.email,
-            "list": sig.list_key,
+            "account": row.account,
+            "list": row.list_key,
             "method": result.method,
             "status": result.status,
         },
     )
-    return True
+
+
+def _not_found(exc: BaseException) -> bool:
+    """A Gmail API error saying the email no longer exists (HttpError with status 404)."""
+    return getattr(getattr(exc, "resp", None), "status", None) == 404
 
 
 def _find_message(session: Session, account: str, gmail_id: str) -> Message | None:

@@ -13,7 +13,7 @@ from pathlib import Path
 import httpx
 import pytest
 from conftest import GMAIL_PASS, make_signals
-from test_triage import FakeClassifier, FakeGmail, _JevDown, email
+from test_triage import FakeClassifier, FakeGmail, _HttpError, _JevDown, email
 
 from inbox_jev import digest, rules, triage
 from inbox_jev import unsubscribe as unsub
@@ -685,6 +685,38 @@ def test_ex18_dry_run_learns_no_rules(spec):
     with ctx.sessions() as s:
         rule = s.query(SenderRule).one()
         assert (rule.category, rule.hits, rule.active) == ("newsletter", 3, True)
+
+
+# --- EX-20 -----------------------------------------------------------------------------------
+
+
+def test_ex20_restore_skips_emails_deleted_in_gmail(spec, monkeypatch):
+    """EX-20 (docs/how-it-decides.md §5, §3.7 restore)."""
+    ctx, gmail, account = spec
+    gmail.emails = {
+        "1": email("1", "Weekly <news@weekly.example>", "Issue 42"),
+        "2": email("2", "Shop <promo@shop.example>", "Sale"),
+    }
+    ctx._classifier.answers.update({"Issue 42": answer("newsletter"), "Sale": answer("marketing")})
+    triage.run_account(ctx, account, Mode.ACT)
+    assert _row(ctx, "1").archived and _row(ctx, "2").archived
+
+    real = gmail.modify
+
+    def modify(message_id, add, remove):
+        if message_id == "1":
+            raise _HttpError(404)  # deleted in Gmail
+        real(message_id, add, remove)
+
+    monkeypatch.setattr(gmail, "modify", modify)
+    for again in (False, True):
+        with ctx.sessions() as s:
+            result = triage.restore(s, gmail, account.email, timedelta(days=1))
+        assert result == triage.RestoreResult(restored=0 if again else 1, deleted=1)
+    sale = gmail.emails["2"].label_ids
+    assert "INBOX" in sale and not [i for i in sale if i.startswith("Label_")]
+    assert _row(ctx, "2").restored
+    assert not _row(ctx, "1").restored and _row(ctx, "1").archived
 
 
 # --- docs <-> tests ----------------------------------------------------------------------------

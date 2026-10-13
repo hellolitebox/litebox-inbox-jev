@@ -25,3 +25,6 @@ state stay `failed`. A failed sent-mail search holds the row, which is stricter 
 ## Consequences
 - Every path that can unsubscribe goes through the same checks (a CLAUDE.md convention).
 - A row whose rule was deleted is held, never acted on with the deleted rule's verdict.
+- Since [0026](0026-one-unsubscribe-gate-for-every-path.md), the allowlist, `can_unsubscribe`
+  and known-contact checks named above are one call to `policy.unsubscribe_gate`, and the mode /
+  `act_categories` check is `policy.acts_on`, shared with `run`.

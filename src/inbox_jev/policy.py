@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from urllib.parse import urlparse
 
 from .classifier import Classification
@@ -32,8 +33,35 @@ class Decision:
     archive_group: bool = False
     # Unsubscribe skipped because I wrote to the sender or their domain (the category's
     # unsubscribe_known_contacts is false), on a verified, non-group sender that would otherwise
-    # have been unsubscribed. Same order on the Jev and rule paths (_check_unsubscribe).
+    # have been unsubscribed. Same order on every path (unsubscribe_gate).
     known_contact_kept: bool = False
+
+
+class Veto(StrEnum):
+    """Why `unsubscribe_gate` refused an unsubscribe, in the order it checks."""
+
+    NOT_UNSUBSCRIBING = "category doesn't unsubscribe"
+    ALLOWLISTED = "allowlisted sender"
+    UNVERIFIED = "unverified sender"
+    GROUP = "group or own list"
+    KNOWN_CONTACT = "known contact"
+
+
+@dataclass(frozen=True)
+class GateResult:
+    """`unsubscribe_gate`'s answer.
+
+    `veto` is the first check that refused the unsubscribe, or None when it may go ahead.
+    `contact_unknown`: it may go ahead only because `previous_contact` is unknown (None) for a
+    category that spares known contacts, so a sent-mail search could still veto it.
+    """
+
+    veto: Veto | None
+    contact_unknown: bool = False
+
+    @property
+    def allowed(self) -> bool:
+        return self.veto is None
 
 
 @dataclass
@@ -108,23 +136,65 @@ def _check_unsubscribe(
     decision: Decision,
     previous_contact: str | None,
 ) -> None:
-    """The sender checks on a decision that would unsubscribe, in the same order on both paths.
+    """Apply `unsubscribe_gate` to a decision that would unsubscribe (Jev and rule paths).
 
-    Unverified (no DMARC pass or no usable List-Unsubscribe) sets `downgraded_to_spam`: never
-    unsubscribe from something that can't prove who it is, it only confirms the address; the
-    email keeps its category (unverified isn't fraud) and is only archived. Then groups and
-    discussion lists, whose List-Unsubscribe would remove *me*. Then known contacts, for a
-    category that spares them (`known_contact_kept`). Each flag is set only when that check is
-    what stopped the unsubscribe.
+    Each flag is set only when its check is what stopped the unsubscribe: `downgraded_to_spam`
+    for an unverified sender (the email keeps its category and is only archived),
+    `known_contact_kept` for a known contact. Unknown `previous_contact` doesn't stop it.
     """
     if not decision.unsubscribe:
         return
-    if not _verified(sig):
-        decision.unsubscribe, decision.downgraded_to_spam = False, True
-    elif _group_list(sig, account):
+    veto = unsubscribe_gate(cfg, account, sig, decision.category, previous_contact).veto
+    if veto is not None:
         decision.unsubscribe = False
-    elif previous_contact in KNOWN_CONTACT and spares_known_contacts(cfg, decision.category):
-        decision.unsubscribe, decision.known_contact_kept = False, True
+        decision.downgraded_to_spam = veto == Veto.UNVERIFIED
+        decision.known_contact_kept = veto == Veto.KNOWN_CONTACT
+
+
+def unsubscribe_gate(
+    cfg: CategoriesConfig,
+    account: Account,
+    sig: Signals,
+    category: str,
+    previous_contact: str | None,
+) -> GateResult:
+    """The sender checks every unsubscribe passes, in one order, on every path. Pure.
+
+    1. The category's action is `archive_unsubscribe`.
+    2. The sender isn't allowlisted (on `run` the allowlist decides `important` before this).
+    3. Verified: DMARC pass and a usable List-Unsubscribe. Unsubscribing from a sender that
+       can't prove who it is only confirms the address.
+    4. Not a group, discussion list or own-domain list, whose List-Unsubscribe removes *me*.
+    5. Not a known contact (`previous_contact` in KNOWN_CONTACT) for a category that spares
+       them. Unknown (None) passes, with `contact_unknown` set: `run` goes ahead,
+       `unsubscribe-retry` holds the row, and the rule path runs the sent-mail search first.
+
+    Confidence, mode/`act_categories` (`acts_on`), once-per-list and the run cap are the
+    callers': they depend on the path or on stored state.
+    """
+    if not unsubscribes(cfg, category):
+        return GateResult(Veto.NOT_UNSUBSCRIBING)
+    if is_allowed(account, sig):
+        return GateResult(Veto.ALLOWLISTED)
+    if not _verified(sig):
+        return GateResult(Veto.UNVERIFIED)
+    if _group_list(sig, account):
+        return GateResult(Veto.GROUP)
+    if spares_known_contacts(cfg, category):
+        if previous_contact in KNOWN_CONTACT:
+            return GateResult(Veto.KNOWN_CONTACT)
+        return GateResult(None, contact_unknown=previous_contact is None)
+    return GateResult(None)
+
+
+def acts_on(mode: Mode, act_categories: list[str] | None, category: str) -> bool:
+    """Whether a decision in `category` is acted on (archive, spam, unsubscribe) in `mode`.
+
+    Only in `act`, and only for the account's `act_categories` when it sets them (pass
+    `account.act_categories`). In `dry_run` and `label`, and for other categories, nothing
+    destructive happens.
+    """
+    return mode == Mode.ACT and (act_categories is None or category in act_categories)
 
 
 def flags_only(
@@ -144,17 +214,13 @@ def flags_only(
 
 def spares_known_contacts(cfg: CategoriesConfig, category: str) -> bool:
     """The category unsubscribes, but not from senders I wrote to (unsubscribe_known_contacts)."""
+    return unsubscribes(cfg, category) and not cfg.by_key[category].unsubscribe_known_contacts
+
+
+def unsubscribes(cfg: CategoriesConfig, category: str) -> bool:
+    """The category's action is archive + unsubscribe (an unknown category doesn't)."""
     c = cfg.by_key.get(category)
-    return (
-        c is not None
-        and c.action == Action.ARCHIVE_UNSUBSCRIBE
-        and not c.unsubscribe_known_contacts
-    )
-
-
-def can_unsubscribe(sig: Signals, account: Account) -> bool:
-    """The sender checks every unsubscribe needs: verified and not a group or own list."""
-    return _verified(sig) and not _group_list(sig, account)
+    return c is not None and c.action == Action.ARCHIVE_UNSUBSCRIBE
 
 
 def is_allowed(account: Account, sig: Signals) -> bool:
@@ -287,7 +353,7 @@ def plan(
     mode: Mode,
     act_categories: list[str] | None = None,
 ) -> Plan:
-    if mode == Mode.ACT and act_categories is not None and decision.category not in act_categories:
+    if mode == Mode.ACT and not acts_on(mode, act_categories, decision.category):
         mode = Mode.LABEL
     if mode == Mode.DRY_RUN:
         return Plan([], [], archived=False, spammed=False, unsubscribe=False)

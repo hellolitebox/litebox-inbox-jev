@@ -113,10 +113,14 @@ email bodies.
   `triage.signals_for()` (resolved signals), never `Email.signals` directly. Rules for trusted
   groups (`group_domains`) key on the author; untrusted groups stay keyed on the group address,
   never on the author they claim.
-- Every new path that can unsubscribe must go through the same checks (`policy.can_unsubscribe`,
-  known contacts, once-per-list, mode and `act_categories`, confidence, the run cap) and
-  respect what the user decided since (sender rules, corrections, restore, star). Unsubscribes
-  are irreversible. `run` and `unsubscribe-retry` (`triage.retry_unsubscribes`) both do.
+- Every new path that can unsubscribe must go through the same checks and respect what the user
+  decided since (sender rules, corrections, restore, star). Unsubscribes are irreversible. The
+  sender checks (category, allowlist, verified, group, known contact) are
+  `policy.unsubscribe_gate` and the mode / `act_categories` check is `policy.acts_on`: call them,
+  never re-implement them. Once-per-list, confidence and the run cap stay with the caller, and
+  an attempt is stored with `triage.record_attempt`. `run` and `unsubscribe-retry`
+  (`triage.retry_unsubscribes`) both do; `tests/test_safety_gates.py` runs the same scenarios
+  through every path, so add a new path there.
 - Keep README.md, `categories.yaml` comments and `accounts.example.yaml` in sync with behaviour
   in the same PR.
 - Secrets live only in `.env`, `secrets/` and `accounts.yaml`, which are gitignored. Never log

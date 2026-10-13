@@ -101,8 +101,8 @@ flowchart TD
     U2 --> LOG["Commit and log 'message processed'<br/>(incl. previous_contact, archive_group)"]
 ```
 
-The unsubscribe decision, across `policy.decide`, `policy.plan`, `triage._unsubscribe` and
-`unsubscribe.unsubscribe`:
+The unsubscribe decision, across `policy.decide`, `policy.unsubscribe_gate`, `policy.plan`
+(`policy.acts_on`), `triage._unsubscribe` and `unsubscribe.unsubscribe`:
 
 ```mermaid
 flowchart TD
@@ -132,11 +132,20 @@ flowchart TD
     M -- "no, or none has an @" --> MP["manual_pending (listed in the digest)"]
 ```
 
-The Jev path and the rule path run C, D and E in this order (`policy._check_unsubscribe`), and
-only on a decision that would otherwise unsubscribe. So `downgraded_to_spam` means "an
-unsubscribe was skipped because the sender is unverified" and `known_contact_kept` means "an
-unsubscribe was skipped because of a known contact": an unverified or group sender never gets
-`known_contact_kept`, and an archive-group or Review decision never gets `downgraded_to_spam`
+C, D and E are one pure function, `policy.unsubscribe_gate`, which every path that can unsubscribe
+calls: the Jev path and the rule path of `run` (through `policy._check_unsubscribe`, only on a
+decision that would otherwise unsubscribe), the rule path's sent-mail search
+(`triage.rule_needs_contact`) and `unsubscribe-retry`. It also refuses a category that doesn't
+unsubscribe and an allowlisted sender (on `run` the allowlist has already decided `important`).
+F is `policy.acts_on`, the one mode / `act_categories` check, used by `policy.plan`,
+`triage.rule_needs_contact` and `unsubscribe-retry`. The list's state (G) is I/O and stays in
+`triage` ([ADR 0026](decisions/0026-one-unsubscribe-gate-for-every-path.md)).
+
+The gate reports the first check that refused (`Veto`), and `_check_unsubscribe` sets a flag only
+for that one. So `downgraded_to_spam` means "an unsubscribe was skipped because the sender is
+unverified" and `known_contact_kept` means "an unsubscribe was skipped because of a known
+contact": an unverified or group sender never gets `known_contact_kept`, and an archive-group or
+Review decision never gets `downgraded_to_spam`
 ([ADR 0023](decisions/0023-one-order-for-unsubscribe-checks.md)).
 
 ## 3. Decision tables
@@ -205,10 +214,10 @@ An unsubscribe is irreversible. During `run` it happens only when **all** of the
 |---|---|---|
 | 1 | The final category's action is `archive_unsubscribe` | `policy._apply` |
 | 2 | Decided by a sender rule, or by Jev at or above the category threshold. An archive-group or Review decision never unsubscribes | `policy.decide` |
-| 3 | **Verified**: `dmarc=pass` in Gmail's own `Authentication-Results` ([4.2](#42-dmarc)) and a `List-Unsubscribe` header with an `https:` or `mailto:` URI (an `http:`-only header counts as none, [4.3](#43-list-unsubscribe-one-click-and-mailto)). If not, the email keeps its category, is archived, and `downgraded_to_spam` is set ("unsubscribe skipped: unverified sender"). It is never moved to Spam for this | `policy._check_unsubscribe` |
-| 4 | **Not a group or discussion list** (`_group_list`): no `List-Post` header; no unsubscribe target on `googlegroups.com` / `groups.google.com` (host or subdomain); not relayed by a Google Group (`group_author` found, trusted or not); sender domain and `List-Id` not on the account's own domain (or a subdomain) | `policy._check_unsubscribe` |
-| 5 | For a category with `unsubscribe_known_contacts: false` (`cold_outreach`): `previous_contact` is not `wrote_to_sender` / `wrote_to_their_domain` (`known_contact_kept` otherwise). Unknown (`None`, the search failed or wasn't run) does **not** block it | `policy._check_unsubscribe` |
-| 6 | Mode is `act`, and the account has no `act_categories` or lists the category | `policy.plan` |
+| 3 | **Verified**: `dmarc=pass` in Gmail's own `Authentication-Results` ([4.2](#42-dmarc)) and a `List-Unsubscribe` header with an `https:` or `mailto:` URI (an `http:`-only header counts as none, [4.3](#43-list-unsubscribe-one-click-and-mailto)). If not, the email keeps its category, is archived, and `downgraded_to_spam` is set ("unsubscribe skipped: unverified sender"). It is never moved to Spam for this | `policy.unsubscribe_gate` |
+| 4 | **Not a group or discussion list** (`_group_list`): no `List-Post` header; no unsubscribe target on `googlegroups.com` / `groups.google.com` (host or subdomain); not relayed by a Google Group (`group_author` found, trusted or not); sender domain and `List-Id` not on the account's own domain (or a subdomain) | `policy.unsubscribe_gate` |
+| 5 | For a category with `unsubscribe_known_contacts: false` (`cold_outreach`): `previous_contact` is not `wrote_to_sender` / `wrote_to_their_domain` (`known_contact_kept` otherwise). Unknown (`None`, the search failed or wasn't run) does **not** block it | `policy.unsubscribe_gate` |
+| 6 | Mode is `act`, and the account has no `act_categories` or lists the category | `policy.acts_on`, from `policy.plan` |
 | 7 | The run's budget (`MAX_UNSUBSCRIBES_PER_RUN`, 20) has attempts left | `triage.process` |
 | 8 | The list isn't **settled**: no `unsubscribes` row for `(account, list_key)`, or its row is `failed` with fewer than 3 attempts | `triage._unsubscribe` |
 | 9 | `dmarc_pass` again, inside the unsubscriber (defence in depth) | `unsubscribe.unsubscribe` |
@@ -216,14 +225,16 @@ An unsubscribe is irreversible. During `run` it happens only when **all** of the
 The same checks run on the **rule path**, in the same order: a sender rule skips Jev, not the
 sender checks. For a
 rule to a category that spares known contacts, `triage` runs the sent-mail search only when the
-answer could change the outcome (`_rule_needs_contact`: act mode, category acted on, verified,
-not a group, list not settled).
+answer could change the outcome (`triage.rule_needs_contact`: `acts_on`, `unsubscribe_gate`
+passes with only the unknown contact left to decide, list not settled).
 
 A `failed` row is retried by `run` the next time an email from the same list passes all the
-checks (until 3 attempts), and by `inbox-jev unsubscribe-retry`.
+checks (until 3 attempts), and by `inbox-jev unsubscribe-retry`. Both store an attempt the same
+way (`triage.record_attempt`: result, `attempts + 1`, time, an `unsubscribe` log line).
 
 **`unsubscribe-retry`** (`triage.retry_unsubscribes`) re-checks each `failed` row with fewer than
-3 attempts against the email's current state. Differences from `run`:
+3 attempts against the email's current state, with the same `acts_on` and `unsubscribe_gate`
+as `run`. Differences from `run`:
 
 | Check | `run` | `unsubscribe-retry` |
 |---|---|---|
@@ -329,7 +340,7 @@ Keep categories can earn a rule too.
 
 ### 3.6 Modes and `act_categories`
 
-`policy.plan`:
+`policy.plan`, with `policy.acts_on` deciding whether a category is acted on:
 
 | Mode | DB + digest | Gmail labels | Archive / spam / unsubscribe |
 |---|---|---|---|
@@ -382,10 +393,13 @@ pass, and never in `dry_run`):
 "Hands off" means: the row is marked `done` in the current mode, nothing changes in Gmail and the
 email isn't revisited in that mode. A starred **new** email (no earlier pass) is processed normally.
 
-**Restore** (`inbox-jev restore -a EMAIL --since 1d [--category K]`): for `label`/`act` rows in the
-window, moves archived/spammed emails back to the inbox, removes our labels and `SPAM`, and marks
+**Restore** (`inbox-jev restore -a EMAIL --since 1d [--category K]`, `triage.restore`): for
+`label`/`act` rows in the window, moves archived/spammed emails back to the inbox, removes our labels and `SPAM`, and marks
 them `restored`. Restored emails are never processed again, aren't learned as corrections, and
 their failed unsubscribes are `skipped` by `unsubscribe-retry`. Unsubscribes can't be undone.
+An email Gmail no longer has (HTTP 404) is skipped, its row left unchanged, and counted in the
+command's output; any other Gmail error stops the command (emails restored before it stay
+restored). See [EX-20](#ex-20--restore-with-an-email-deleted-in-gmail).
 
 ## 4. What it checks and how
 
@@ -408,7 +422,7 @@ Each query's answer is cached in the `Gmail` object, so per account per run. Any
 `None` (logged as a warning, not cached).
 
 When it runs: on the Jev path for every email (in every mode, including `dry_run`), and on the
-rule path only when `_rule_needs_contact` says it can change an unsubscribe. Never for
+rule path only when `triage.rule_needs_contact` says it can change an unsubscribe. Never for
 allowlisted senders or keep rules (their flags-only Jev call goes without it).
 
 Consequences of each value:
@@ -770,6 +784,21 @@ the probabilities that matter are shown; the rest are ~0.
   flags depend on Jev. Failing the email would make "always important" depend on Jev, and after
   8 failed passes it would never be labeled
   ([ADR 0020](decisions/0020-flags-for-allowlist-and-keep-rules.md)).
+
+### EX-20 — Restore with an email deleted in Gmail
+
+- **Test**: `test_ex20_restore_skips_emails_deleted_in_gmail`
+- **Input**: in act mode, `news@weekly.example`'s issue (newsletter 0.97) and
+  `promo@shop.example`'s sale (marketing 0.97) are archived. You delete the newsletter in Gmail,
+  then run `inbox-jev restore -a me@example.com --since 1d`.
+- **Outcome**: the sale goes back to the inbox without Jev labels and its row is `restored`. The
+  deleted newsletter is skipped (Gmail answers 404), its row is left as it was, and the command
+  says `Restored 1 emails. Skipped 1 deleted in Gmail.` Running it again restores nothing more and
+  skips the newsletter again.
+- **Why**: before, the first deleted email stopped the command with an error, and since its row
+  was never marked restored, every later attempt stopped at the same email: nothing after it in
+  the window could be undone. Skipping only 404s keeps any other Gmail failure visible
+  ([ADR 0027](decisions/0027-restore-skips-deleted-emails.md)).
 
 ## 6. Glossary
 

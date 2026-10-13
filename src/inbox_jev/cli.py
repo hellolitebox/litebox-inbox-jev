@@ -131,32 +131,12 @@ def restore(
 ) -> None:
     """Undo: move processed emails back to the inbox and remove Jev labels."""
     s = _settings()
-    sessions = make_session_factory(s.database_url)
+    window = _parse_since(since)
     gmail = gmail_mod.Gmail(gmail_mod.load_credentials(s.google_tokens_dir, account))
-    ids = gmail.labels()
-    query = select(Message).where(
-        Message.account == account,
-        Message.status == "done",
-        Message.mode != Mode.DRY_RUN.value,
-        Message.restored.is_(False),
-        Message.processed_at >= now() - _parse_since(since),
-    )
-    if category:
-        query = query.where(Message.category == category)
-    count = 0
-    with sessions() as session:
-        for msg in session.scalars(query):
-            remove = [ids[n] for n in (msg.labels_added or []) if n in ids and n != "SPAM"]
-            add = []
-            if msg.archived or msg.spammed:
-                add.append("INBOX")
-            if msg.spammed:
-                remove.append("SPAM")
-            gmail.modify(msg.gmail_id, add=add, remove=remove)
-            msg.restored = True
-            session.commit()
-            count += 1
-    typer.echo(f"Restored {count} emails. Unsubscribes cannot be undone.")
+    with make_session_factory(s.database_url)() as session:
+        result = triage.restore(session, gmail, account, window, category)
+    deleted = f" Skipped {result.deleted} deleted in Gmail." if result.deleted else ""
+    typer.echo(f"Restored {result.restored} emails.{deleted} Unsubscribes cannot be undone.")
 
 
 @app.command()
