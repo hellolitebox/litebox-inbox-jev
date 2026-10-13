@@ -13,7 +13,7 @@ from pathlib import Path
 import httpx
 import pytest
 from conftest import GMAIL_PASS, make_signals
-from test_triage import FakeClassifier, FakeGmail, email
+from test_triage import FakeClassifier, FakeGmail, _JevDown, email
 
 from inbox_jev import digest, rules, triage
 from inbox_jev import unsubscribe as unsub
@@ -419,14 +419,27 @@ def test_ex11_unverified_cold_outreach_is_archived_never_unsubscribed(cfg, accou
         rules.record_auto(s, cfg, account.email, sig.sender, jev, d)
         assert s.query(SenderRule).one().hits == 1  # still counts toward an auto rule
 
-    # Known gap (Jev path): a known contact gets known_contact_kept before the verified check,
-    # so the same unverified answer doesn't count toward an auto rule.
+    # A known contact: the unverified check stopped the unsubscribe, so known_contact_kept
+    # isn't set (same order as the rule path), but the answer still doesn't count toward an
+    # auto rule: known contacts never earn a cold_outreach rule.
     d = decide(cfg, account, sig, jev, previous_contact="wrote_to_sender")
-    assert d.archive and d.downgraded_to_spam and d.known_contact_kept and not d.unsubscribe
+    assert d.archive and d.downgraded_to_spam and not d.known_contact_kept and not d.unsubscribe
     with sessions() as s:
         s.query(SenderRule).delete()
-        rules.record_auto(s, cfg, account.email, sig.sender, jev, d)
+        rules.record_auto(s, cfg, account.email, sig.sender, jev, d, "wrote_to_sender")
         assert s.query(SenderRule).count() == 0
+
+    # A List-Unsubscribe with only http:// URIs counts as none: unverified the same way.
+    http_only = extract(
+        {
+            "from": ["Founder <founder@devshop.example>"],
+            "authentication-results": [GMAIL_PASS],
+            "list-unsubscribe": ["<http://devshop.example/unsubscribe?u=1>"],
+        }
+    )
+    assert not http_only.has_unsubscribe
+    d = decide(cfg, account, http_only, jev, previous_contact="never")
+    assert d.archive and d.downgraded_to_spam and not d.unsubscribe
 
 
 # --- EX-12 -----------------------------------------------------------------------------------
@@ -442,14 +455,17 @@ def test_ex12_pulling_back_to_inbox_becomes_a_rule(spec):
 
     gmail.emails["1"].label_ids.append("INBOX")  # the user moves it back
     gmail.emails["2"] = email("2", "Weekly <news@weekly.example>", "Issue 42")
-    calls = ctx._classifier.calls
+    ctx._classifier.answers["Issue 42"] = answer("newsletter", newsletter=0.97)
+    states = len(ctx._classifier.states)
     triage.run_account(ctx, account, Mode.ACT)
 
     assert _row(ctx, "1").corrected_category == "important"
     with ctx.sessions() as s:
         rule = s.query(SenderRule).filter_by(sender_key="news@weekly.example").one()
         assert (rule.category, rule.source, rule.active) == ("important", "correction", True)
-    assert ctx._classifier.calls == calls  # the rule decided issue 42
+    # A keep rule decided issue 42: Jev was asked only for the flags, its newsletter answer
+    # was ignored.
+    assert [st["subject"] for st in ctx._classifier.states[states:]] == ["Issue 42"]
     row = _row(ctx, "2")
     assert (row.category, row.source, row.archived) == ("important", "rule", False)
     assert "Label_Jev/Important" in gmail.modified[-1][1] and gmail.modified[-1][2] == []
@@ -495,6 +511,180 @@ def test_ex13_failing_email_backs_off_then_gives_up(spec):
     triage.run_account(ctx, account, Mode.ACT)
     row = _row(ctx, "1")
     assert (row.status, row.category, row.error_attempts) == ("done", "transactional", 0)
+
+
+# --- EX-14 -----------------------------------------------------------------------------------
+
+
+def test_ex14_rule_to_removed_category_goes_through_jev(spec, caplog):
+    """EX-14 (docs/how-it-decides.md §5, §3.5 sender rules)."""
+    ctx, gmail, account = spec
+    gmail.emails = {
+        "1": email("1", "Deals <sale@deals.example>", "Weekend picks"),
+        "2": email("2", "Deals <sale@deals.example>", "Monday picks"),
+    }
+    for subject in ("Weekend picks", "Monday picks"):
+        ctx._classifier.answers[subject] = answer("newsletter", newsletter=0.93, marketing=0.07)
+    gmail.emails["3"] = email("3", "Billing <billing@vendor.example>", "Invoice 88")
+    ctx._classifier.answers["Invoice 88"] = answer("important", important=0.96, marketing=0.04)
+    with ctx.sessions() as s:
+        rules.set_rule(s, account.email, "@deals.example", "promotions", "manual")
+        rules.set_rule(s, account.email, "@vendor.example", "marketing", "manual")
+        rules.set_rule(s, account.email, "billing@vendor.example", "promotions", "manual")
+        s.commit()
+    run = triage.run_account(ctx, account, Mode.ACT)
+
+    assert (run.processed, run.errors) == (3, 0)
+    assert ctx._classifier.calls == 3
+    for gmail_id in ("1", "2"):
+        row = _row(ctx, gmail_id)
+        assert (row.source, row.category, row.archived) == ("jev", "newsletter", True)
+    # The stale exact rule doesn't hand billing@ to the @vendor.example rule it overrode.
+    row = _row(ctx, "3")
+    assert (row.source, row.category, row.archived) == ("jev", "important", False)
+    warned = [
+        r for r in caplog.records if r.getMessage() == "sender rule ignored: unknown category"
+    ]
+    # once per stale rule and run, not once per email
+    assert sorted(r.sender_key for r in warned) == ["@deals.example", "billing@vendor.example"]
+    with ctx.sessions() as s:
+        rule = s.query(SenderRule).filter_by(sender_key="@deals.example").one()
+        assert (rule.category, rule.active) == ("promotions", True)  # left for you to delete
+
+
+# --- EX-15 -----------------------------------------------------------------------------------
+
+
+def test_ex15_keep_rule_still_gets_needs_reply(spec):
+    """EX-15 (docs/how-it-decides.md §5, §3.1 extra labels, §3.5 sender rules)."""
+    ctx, gmail, account = spec
+    gmail.emails = {
+        "1": email("1", "Ana <ana@client.example>", "Signed contract by Friday?"),
+        "2": email("2", "Weekly <news@weekly.example>", "Issue 43"),
+    }
+    ctx._classifier.answers["Signed contract by Friday?"] = answer(
+        "cold_outreach", needs_reply=0.92, cold_outreach=0.55, important=0.45
+    )
+    with ctx.sessions() as s:
+        rules.set_rule(s, account.email, "ana@client.example", "important", "correction")
+        rules.set_rule(s, account.email, "news@weekly.example", "newsletter", "auto")
+        s.commit()
+    triage.run_account(ctx, account, Mode.ACT)
+
+    assert [st["subject"] for st in ctx._classifier.states] == ["Signed contract by Friday?"]
+    assert "previous_contact" not in ctx._classifier.states[0]
+    assert gmail.written_queries == []  # no sent-mail search for a keep decision
+    mods = {m[0]: m for m in gmail.modified}
+    assert {"Label_Jev/Important", "Label_Jev/Needs Reply"} <= set(mods["1"][1])
+    assert "Label_Jev/Outreach" not in mods["1"][1] and mods["1"][2] == []
+    assert mods["2"][2] == ["INBOX"]  # the newsletter rule still skips Jev
+    row = _row(ctx, "1")
+    assert (row.source, row.category, row.confidence) == ("rule", "important", 1.0)
+    with ctx.sessions() as s:
+        assert s.query(SenderRule).count() == 2  # the answer counted toward nothing
+        text = digest.build(s, ctx.cfg, account.email)
+    assert "Signed contract by Friday?" in text.split("Piden respuesta")[1]
+
+
+# --- EX-19 -----------------------------------------------------------------------------------
+
+
+def test_ex19_flags_only_jev_failure_still_labels(spec, caplog):
+    """EX-19 (docs/how-it-decides.md §5, §3.5 sender rules)."""
+    ctx, gmail, account = spec
+    account.allow_domains = ["acme.example"]
+    gmail.emails = {
+        "1": email("1", "Lea <lea@acme.example>", "Budget review"),
+        "2": email("2", "Ana <ana@client.example>", "Signed contract by Friday?"),
+    }
+    ctx._classifier = _JevDown({})
+    with ctx.sessions() as s:
+        rules.set_rule(s, account.email, "ana@client.example", "important", "correction")
+        s.commit()
+    run = triage.run_account(ctx, account, Mode.ACT)
+
+    assert (run.processed, run.errors) == (2, 0) and ctx._classifier.calls == 2
+    mods = {m[0]: m for m in gmail.modified}
+    for gmail_id, source in (("1", "allowlist"), ("2", "rule")):
+        row = _row(ctx, gmail_id)
+        assert (row.status, row.source, row.category) == ("done", source, "important")
+        assert row.needs_reply is None and row.tags is None
+        assert "Label_Jev/Important" in mods[gmail_id][1] and mods[gmail_id][2] == []
+        assert "Label_Jev/Needs Reply" not in mods[gmail_id][1]
+    warned = [r for r in caplog.records if r.getMessage() == "flags-only Jev call failed"]
+    assert sorted(r.id for r in warned) == ["1", "2"]
+    for r in warned:
+        assert not {"Budget review", "Signed contract by Friday?"} & {
+            str(v) for v in vars(r).values()
+        }
+
+
+# --- EX-16 -----------------------------------------------------------------------------------
+
+
+def test_ex16_archive_group_respects_category_thresholds(cfg, account):
+    """EX-16 (docs/how-it-decides.md §5, §3.2 archive group condition 5)."""
+    cfg.by_key["marketing"].min_confidence = 0.95
+    sig = make_signals(sender="hello@brand.example", sender_domain="brand.example")
+    jev = answer("newsletter", newsletter=0.50, marketing=0.45, important=0.01)
+    d = decide(cfg, account, sig, jev, previous_contact="never")
+    assert d.low_confidence and not d.archive and not d.archive_group
+    assert d.add_labels == ["Jev/Review", "Jev/Newsletters"]
+
+    lenient = account.model_copy(update={"min_confidence": {"marketing": 0.90}})
+    d = decide(cfg, lenient, sig, jev, previous_contact="never")
+    assert d.archive and d.archive_group and not d.unsubscribe  # the account override wins
+
+
+# --- EX-17 -----------------------------------------------------------------------------------
+
+
+def test_ex17_no_gmail_authentication_results_is_unverified(spec, monkeypatch):
+    """EX-17 (docs/how-it-decides.md §5, §4.2 DMARC, §3.3 condition 3)."""
+    ctx, gmail, account = spec
+    gmail.emails = {
+        "1": email(
+            "1",
+            "Shop <promo@shop.example>",
+            "Flash sale",
+            authentication_results="mail.shop.example; dmarc=pass header.from=shop.example",
+            list_unsubscribe="<https://shop.example/u/1>",
+            list_unsubscribe_post="List-Unsubscribe=One-Click",
+        )
+    }
+    ctx._classifier.answers["Flash sale"] = answer("marketing", marketing=0.97)
+    posts = _one_click_posts(monkeypatch)
+    triage.run_account(ctx, account, Mode.ACT)
+
+    assert gmail.modified[-1][2] == ["INBOX"] and "SPAM" not in gmail.modified[-1][1]
+    assert posts == [] and gmail.sent == []
+    row = _row(ctx, "1")
+    assert (row.category, row.archived, row.downgraded_to_spam) == ("marketing", True, True)
+    with ctx.sessions() as s:
+        assert s.query(Unsubscribe).count() == 0
+
+
+# --- EX-18 -----------------------------------------------------------------------------------
+
+
+def test_ex18_dry_run_learns_no_rules(spec):
+    """EX-18 (docs/how-it-decides.md §5, §3.5 automatic rules, §3.6 modes)."""
+    ctx, gmail, account = spec
+    gmail.emails = {
+        str(n): email(str(n), "Weekly <news@weekly.example>", f"Issue {n}") for n in (1, 2, 3)
+    }
+    for n in (1, 2, 3):
+        ctx._classifier.answers[f"Issue {n}"] = answer("newsletter", newsletter=0.97)
+    triage.run_account(ctx, account, Mode.DRY_RUN)
+    with ctx.sessions() as s:
+        assert s.query(SenderRule).count() == 0
+    assert all(add == [] and remove == [] for _, add, remove in gmail.modified)
+
+    triage.run_account(ctx, account, Mode.ACT)  # the dry-run rows are processed again
+    assert ctx._classifier.calls == 6
+    with ctx.sessions() as s:
+        rule = s.query(SenderRule).one()
+        assert (rule.category, rule.hits, rule.active) == ("newsletter", 3, True)
 
 
 # --- docs <-> tests ----------------------------------------------------------------------------

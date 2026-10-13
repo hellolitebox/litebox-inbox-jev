@@ -1,6 +1,6 @@
 # 0013. Sender rules, and when Jev's answers may become automatic rules
 
-- Status: Accepted
+- Status: Accepted (amended by [0020](0020-flags-for-allowlist-and-keep-rules.md), [0023](0023-one-order-for-unsubscribe-checks.md), [0024](0024-no-auto-rules-in-dry-run.md))
 - Date: 2026-10-13
 - PR: initial design; #8 (keep guards); #12 (unverified senders, known contacts); #13 (author key)
 
@@ -28,5 +28,5 @@ next approval request without asking Jev (#8 QA round 1, finding 1).
 ## Consequences
 - Fewer auto rules form (more Jev calls), which is the safe direction.
 - Existing active auto rules had to be reviewed at deploy; the guards only prevent new ones.
-- Rule decisions carry no `needs_reply` or tags (see
-  [how-it-decides, Known gaps](../how-it-decides.md#known-gaps)).
+- Rule decisions carry no `needs_reply` or tags (superseded by
+  [0020](0020-flags-for-allowlist-and-keep-rules.md) for keep rules and the allowlist).

@@ -151,3 +151,30 @@ def test_group_author_only_trusted_on_own_domains(group, own, trusted):
 def test_original_sender_only_trusted_from_a_verified_group(over):
     sig = resolve_relay(extract(_group_headers(**over)), ["acme.com"])
     assert sig.sender == "hello@acme.com" and sig.relayed_by is None and sig.group_author is None
+
+
+def test_dmarc_without_a_gmail_header_is_not_trusted():
+    # Gmail stamps every inbound email; any other Authentication-Results may be the sender's.
+    assert not dmarc_passed(["attacker.com; dmarc=pass header.from=bank.com"])
+    assert not dmarc_passed(["relay.example; dmarc=pass", "other.example; dmarc=pass"])
+    sig = extract(
+        {
+            "from": ["Shop <promo@shop.com>"],
+            "authentication-results": ["shop.com; dmarc=pass header.from=shop.com"],
+            "list-unsubscribe": ["<https://shop.com/u>"],
+        }
+    )
+    assert not sig.dmarc_pass
+
+
+def test_http_only_list_unsubscribe_counts_as_none():
+    assert parse_list_unsubscribe("<http://shop.com/u?id=1>") == ([], [])
+    sig = extract(
+        {
+            "from": ["Shop <promo@shop.com>"],
+            "authentication-results": [GMAIL_PASS],
+            "list-unsubscribe": ["<http://shop.com/u?id=1>"],
+            "list-unsubscribe-post": ["List-Unsubscribe=One-Click"],
+        }
+    )
+    assert sig.dmarc_pass and not sig.has_unsubscribe and not sig.one_click

@@ -2,11 +2,13 @@
 
 For each email: the category stored in the DB (if any), then what this checkout's code and
 categories.yaml decide now (category, confidence, outcome, flags, top-3 probabilities), with
-From and Subject truncated. Never prints bodies.
+From and Subject truncated, and a final count of Jev calls. Never prints bodies.
 
 It never writes Gmail or the DB: Gmail is only read (messages.list/get, the sent-mail search),
 `gmail.modify`/`send` are never called, a SQLite DB is opened with mode=ro and nothing is
-committed. Calls Jev (TYPESAFE_API_KEY), so each email costs one classification.
+committed. Calls Jev (TYPESAFE_API_KEY) as `run` would: once per email, except for rules to
+archive or spam categories (allowlisted and keep-rule emails are asked for the flags only), and
+runs the sent-mail search only where `run` does (in the account's mode).
 See CLAUDE.md "Validating behaviour changes" for the docker compose command.
 """
 
@@ -25,7 +27,7 @@ from inbox_jev.classifier import Classifier, build_state
 from inbox_jev.config import Settings, load_accounts, load_categories
 from inbox_jev.db import Message
 from inbox_jev.gmail import Gmail, load_credentials
-from inbox_jev.policy import decide, is_allowed
+from inbox_jev.policy import decide, flags_only, is_allowed
 
 
 def _short(text: str, n: int) -> str:
@@ -95,10 +97,13 @@ def main() -> None:
         svc = build("gmail", "v1", credentials=creds, cache_discovery=False).users()
         ids += [i for i in _ids(svc, args.query, args.limit) if i not in ids]
 
+    mode = triage.effective_mode(s, account, None)  # the sent-mail search on rules depends on it
     classifier = Classifier(s.typesafe_api_key, s.typesafe_model, cfg)
+    jev_calls = 0
     try:
         with Session(_read_only_engine(s.database_url)) as session:
             for message_id in ids:
+                flags_failed = False
                 email = gmail.get(message_id)
                 sig = triage.signals_for(email, account)
                 old = session.scalar(
@@ -106,16 +111,30 @@ def main() -> None:
                         Message.account == account.email, Message.gmail_id == message_id
                     )
                 )
-                rule = (
-                    None if args.ignore_rules else rules.lookup(session, account.email, sig.sender)
+                rule, stale = (
+                    (None, None)
+                    if args.ignore_rules
+                    else rules.match(session, account.email, sig.sender, cfg.by_key)
                 )
+                # Same calls as `run` (triage.process): Jev with the sent-mail search when no
+                # rule or allowlist decides, Jev for the flags only on keep rules and the
+                # allowlist, and the sent-mail search on a rule only when it could unsubscribe.
                 classification, contact = None, None
-                if not is_allowed(account, sig):
+                if not is_allowed(account, sig) and rule is None:
                     contact = triage.previous_contact(gmail, account.email, sig.sender)
-                    if rule is None:
-                        classification = classifier.classify(
-                            build_state(email, account.email, s.body_chars, contact, sig)
-                        )
+                    classification = classifier.classify(
+                        build_state(email, account.email, s.body_chars, contact, sig)
+                    )
+                elif flags_only(cfg, account, sig, rule.category if rule else None):
+                    classification = triage.flags_classification(
+                        classifier, email, account, s.body_chars, sig
+                    )
+                    flags_failed = classification is None
+                elif rule and triage.rule_needs_contact(
+                    cfg, session, account, sig, rule.category, mode
+                ):
+                    contact = triage.previous_contact(gmail, account.email, sig.sender)
+                jev_calls += classification is not None or flags_failed
                 decision = decide(
                     cfg,
                     account,
@@ -130,6 +149,9 @@ def main() -> None:
                     *(["unsub"] if decision.unsubscribe else []),
                     *(["unverified"] if decision.downgraded_to_spam else []),
                     *(["known_contact"] if decision.known_contact_kept else []),
+                    *(["needs_reply"] if cfg.needs_reply.label in decision.add_labels else []),
+                    *(["stale_rule"] if stale else []),
+                    *(["flags_failed"] if flags_failed else []),
                 ]
                 acts = account.act_categories
                 if acts is not None and decision.category not in acts:
@@ -146,6 +168,7 @@ def main() -> None:
                     f"  subject={_short(email.header('Subject'), 70)!r}"
                 )
             session.rollback()
+        print(f"emails={len(ids)} jev_calls={jev_calls}")
     finally:
         classifier.close()
 

@@ -15,6 +15,10 @@ CATEGORY_Q = "category"
 NEEDS_REPLY_Q = "needs_reply"
 TAG_PREFIX = "tag_"
 
+# What a failed Jev call raises (API, connection, invalid answer). Callers that can do without
+# Jev's answer catch this, not Exception.
+JevError = TypeSafeError
+
 CATEGORY_INSTRUCTIONS = (
     "Classify this email received in my work inbox into exactly one category. "
     "Judge by who wrote it and why, not only by the topic. "

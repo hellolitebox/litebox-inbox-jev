@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import and_, or_, select, update
@@ -12,14 +12,15 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from . import corrections, rules
 from . import unsubscribe as unsub
-from .classifier import Classifier, build_state
+from .classifier import Classification, Classifier, JevError, build_state
 from .config import FREE_MAIL, Account, Action, CategoriesConfig, Mode, Settings
-from .db import MAX_ERROR_ATTEMPTS, Message, Run, Unsubscribe, now
+from .db import MAX_ERROR_ATTEMPTS, Message, Run, SenderRule, Unsubscribe, now
 from .gmail import Email, Gmail, is_token_refresh_error, load_credentials, token_error_detail
 from .policy import (
     KNOWN_CONTACT,
     can_unsubscribe,
     decide,
+    flags_only,
     is_allowed,
     plan,
     spares_known_contacts,
@@ -48,6 +49,8 @@ class Context:
     cfg: CategoriesConfig
     sessions: sessionmaker
     _classifier: Classifier | None = None
+    # (account, sender_key) of rules to removed categories already logged in this invocation.
+    stale_rules_logged: set[tuple[str, str]] = field(default_factory=set)
 
     @property
     def classifier(self) -> Classifier:
@@ -270,17 +273,19 @@ def process(
         prev.error_attempts = 0
         session.commit()
         return prev
-    rule = rules.lookup(session, account.email, sig.sender)
+    rule = rule_for(ctx, session, account, sig.sender)
 
     classification, contact = None, None
-    if is_allowed(account, sig):
-        pass
-    elif rule is None:
+    if not is_allowed(account, sig) and rule is None:
         contact = previous_contact(gmail, account.email, sig.sender)
         classification = ctx.classifier.classify(
             build_state(email, account.email, ctx.settings.body_chars, contact, sig)
         )
-    elif _rule_needs_contact(ctx.cfg, session, account, sig, rule.category, mode):
+    elif flags_only(ctx.cfg, account, sig, rule.category if rule else None):
+        classification = flags_classification(
+            ctx.classifier, email, account, ctx.settings.body_chars, sig
+        )
+    elif rule and rule_needs_contact(ctx.cfg, session, account, sig, rule.category, mode):
         contact = previous_contact(gmail, account.email, sig.sender)
     decision = decide(
         ctx.cfg,
@@ -323,8 +328,12 @@ def process(
     msg.archived, msg.spammed = actions.archived, actions.spammed
     msg.processed_at = now()
 
-    if classification:
-        rules.record_auto(session, ctx.cfg, account.email, sig.sender, classification, decision)
+    # Only Jev's own decisions count, and not in dry_run: a rule learned there would apply
+    # without Jev (and act) as soon as the mode is label or act.
+    if classification and decision.source == "jev" and mode != Mode.DRY_RUN:
+        rules.record_auto(
+            session, ctx.cfg, account.email, sig.sender, classification, decision, contact
+        )
     if (
         actions.unsubscribe
         and unsub_budget[0] > 0
@@ -352,6 +361,47 @@ def process(
         },
     )
     return msg
+
+
+def flags_classification(
+    classifier: Classifier, email: Email, account: Account, body_chars: int, sig: Signals
+) -> Classification | None:
+    """Jev's answer for an email kept by the allowlist or a keep rule, or None if the call fails.
+
+    Jev only adds Needs Reply and the tags there, so no sent-mail search: its answer can't
+    change a keep decision. A failed call doesn't fail the email: it is decided without Jev's
+    answer (labeled by the allowlist or the rule, without the flags) and a warning is logged.
+    """
+    try:
+        return classifier.classify(build_state(email, account.email, body_chars, None, sig))
+    except JevError as exc:
+        log.warning(
+            "flags-only Jev call failed",
+            extra={"account": account.email, "id": email.id, "error_type": type(exc).__name__},
+        )
+        return None
+
+
+def rule_for(ctx: Context, session: Session, account: Account, sender: str) -> SenderRule | None:
+    """The sender's rule (`rules.match`): None when its first rule points to a removed category.
+
+    Such a rule makes Jev decide (never the @domain rule behind it) and is logged once per
+    invocation, so the user can `rules delete` it or restore the category. It stays in the DB:
+    the category may come back, and a manual or correction rule can't be relearned.
+    """
+    rule, stale = rules.match(session, account.email, sender, ctx.cfg.by_key)
+    if stale is not None and (account.email, stale.sender_key) not in ctx.stale_rules_logged:
+        ctx.stale_rules_logged.add((account.email, stale.sender_key))
+        log.warning(
+            "sender rule ignored: unknown category",
+            extra={
+                "account": account.email,
+                "sender_key": stale.sender_key,
+                "category": stale.category,
+                "rule_source": stale.source,
+            },
+        )
+    return rule
 
 
 def signals_for(email: Email, account: Account) -> Signals:
@@ -472,7 +522,7 @@ def _user_edit(
     return None
 
 
-def _rule_needs_contact(
+def rule_needs_contact(
     cfg: CategoriesConfig,
     session: Session,
     account: Account,
@@ -558,8 +608,8 @@ def retry_unsubscribes(
             names = {v: k for k, v in gmail.labels().items()}
         current = {names.get(i, i) for i in email.label_ids}
         sig = signals_for(email, account)
-        rule = rules.lookup(session, account.email, sig.sender)
-        rule_category = rule.category if rule and rule.category in ctx.cfg.by_key else None
+        rule = rule_for(ctx, session, account, sig.sender)
+        rule_category = rule.category if rule else None
         category = rule_category or msg.category
         unsubscribes = category in ctx.cfg.by_key and ctx.cfg.by_key[category].action == (
             Action.ARCHIVE_UNSUBSCRIBE

@@ -1,6 +1,6 @@
 # 0006. Archive by action confidence (the archive group)
 
-- Status: Accepted
+- Status: Accepted (member threshold amended by [0021](0021-archive-group-member-threshold.md))
 - Date: 2026-10-12
 - PR: #8 (QA round 1, findings 2–5)
 
@@ -30,4 +30,4 @@ together reach `archive_group_min_confidence` (0.90), archive under the top cate
 - Review shrinks to genuinely uncertain mail.
 - `archive_group` is logged but not stored; it can be reconstructed from `probabilities`.
 - A category-level (not account-level) threshold above the floor doesn't exclude a non-top member
-  (QA nit, left as is).
+  (QA nit, left as is; fixed by [0021](0021-archive-group-member-threshold.md)).

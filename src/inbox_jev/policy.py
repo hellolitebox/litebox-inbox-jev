@@ -21,7 +21,8 @@ class Decision:
     source: str  # jev | rule | allowlist
     low_confidence: bool = False
     # Historical name (kept to match the DB column): it now means "unsubscribe skipped:
-    # unverified sender". The email keeps its archive_unsubscribe category and is archived only.
+    # unverified sender". Set only when the decision would otherwise unsubscribe; the email keeps
+    # its archive_unsubscribe category and is archived only.
     downgraded_to_spam: bool = False
     add_labels: list[str] = field(default_factory=list)
     archive: bool = False
@@ -30,7 +31,8 @@ class Decision:
     # Archived because the archive categories together were confident, not the top one alone.
     archive_group: bool = False
     # Unsubscribe skipped because I wrote to the sender or their domain (the category's
-    # unsubscribe_known_contacts is false). Applies on the Jev and rule paths.
+    # unsubscribe_known_contacts is false), on a verified, non-group sender that would otherwise
+    # have been unsubscribed. Same order on the Jev and rule paths (_check_unsubscribe).
     known_contact_kept: bool = False
 
 
@@ -54,21 +56,22 @@ def decide(
     *,
     previous_contact: str | None = None,
 ) -> Decision:
-    """`previous_contact` is triage.previous_contact's answer (None = unknown / not checked)."""
+    """Decide what happens to one email.
+
+    `previous_contact` is triage.previous_contact's answer (None = unknown / not checked).
+    A `rule_category` that isn't in `cfg` (removed from categories.yaml) is ignored, as if there
+    were no rule. On the allowlist and rule paths a `classification` only adds the Needs Reply
+    and tag labels: the category stays the allowlist's or the rule's.
+    """
     if is_allowed(account, sig):
-        return _apply(cfg, Decision(category="important", confidence=1.0, source="allowlist"))
-    if rule_category and rule_category in cfg.by_key:
+        decision = _apply(cfg, Decision(category="important", confidence=1.0, source="allowlist"))
+        return _add_flags(cfg, classification, decision) if classification else decision
+    if rule_category in cfg.by_key:
         decision = _apply(cfg, Decision(category=rule_category, confidence=1.0, source="rule"))
         # A rule skips Jev, not the sender checks: manual and correction rules can point at
         # senders that never proved who they are.
-        if decision.unsubscribe and not _verified(sig):
-            decision.unsubscribe, decision.downgraded_to_spam = False, True
-        if _group_list(sig, account):
-            decision.unsubscribe = False
-        if decision.unsubscribe and previous_contact in KNOWN_CONTACT:
-            decision.known_contact_kept = spares_known_contacts(cfg, rule_category)
-            decision.unsubscribe = not decision.known_contact_kept
-        return decision
+        _check_unsubscribe(cfg, account, sig, decision, previous_contact)
+        return _add_flags(cfg, classification, decision) if classification else decision
     if classification is None:
         raise ValueError("classification is required when no allowlist entry or rule matches")
 
@@ -80,19 +83,10 @@ def decide(
         return _add_flags(cfg, classification, decision)
 
     decision = Decision(category=category, confidence=classification.confidence, source="jev")
-
-    # Never unsubscribe from something that can't prove who it is: it confirms the address.
-    # The email keeps its category (unverified isn't fraud) and is only archived, never spammed.
-    unverified = cfg.by_key[category].action == Action.ARCHIVE_UNSUBSCRIBE and not _verified(sig)
-    decision.downgraded_to_spam = unverified
-
     threshold = account.min_confidence.get(category, cfg.by_key[category].min_confidence)
     if decision.confidence >= threshold:
         _apply(cfg, decision)
-        if decision.unsubscribe and previous_contact in KNOWN_CONTACT:
-            decision.known_contact_kept = spares_known_contacts(cfg, category)
-        if unverified or decision.known_contact_kept or _group_list(sig, account):
-            decision.unsubscribe = False
+        _check_unsubscribe(cfg, account, sig, decision, previous_contact)
     elif _archive_group_confident(cfg, account, classification, threshold, previous_contact):
         # Jev is sure the email gets archived, just not which archive category fits best
         # (e.g. notification 0.55 / newsletter 0.45). Archive it under the top category, but
@@ -105,6 +99,47 @@ def decide(
         decision.add_labels += [cfg.review_label, cfg.by_key[category].label]
 
     return _add_flags(cfg, classification, decision)
+
+
+def _check_unsubscribe(
+    cfg: CategoriesConfig,
+    account: Account,
+    sig: Signals,
+    decision: Decision,
+    previous_contact: str | None,
+) -> None:
+    """The sender checks on a decision that would unsubscribe, in the same order on both paths.
+
+    Unverified (no DMARC pass or no usable List-Unsubscribe) sets `downgraded_to_spam`: never
+    unsubscribe from something that can't prove who it is, it only confirms the address; the
+    email keeps its category (unverified isn't fraud) and is only archived. Then groups and
+    discussion lists, whose List-Unsubscribe would remove *me*. Then known contacts, for a
+    category that spares them (`known_contact_kept`). Each flag is set only when that check is
+    what stopped the unsubscribe.
+    """
+    if not decision.unsubscribe:
+        return
+    if not _verified(sig):
+        decision.unsubscribe, decision.downgraded_to_spam = False, True
+    elif _group_list(sig, account):
+        decision.unsubscribe = False
+    elif previous_contact in KNOWN_CONTACT and spares_known_contacts(cfg, decision.category):
+        decision.unsubscribe, decision.known_contact_kept = False, True
+
+
+def flags_only(
+    cfg: CategoriesConfig, account: Account, sig: Signals, rule_category: str | None
+) -> bool:
+    """The allowlist or a rule to a keep category decides: Jev is asked only for the flags.
+
+    The email stays in the inbox either way, so Needs Reply and the tags are worth a Jev call.
+    A rule to an archive or spam category skips Jev entirely (its email leaves the inbox and
+    would never get Needs Reply).
+    """
+    if is_allowed(account, sig):
+        return True
+    category = cfg.by_key.get(rule_category) if rule_category else None
+    return category is not None and category.action == Action.KEEP
 
 
 def spares_known_contacts(cfg: CategoriesConfig, category: str) -> bool:
@@ -187,7 +222,8 @@ def _archive_group_confident(
     confidence, never lower the bar:
     - the floor is at least the top category's own threshold (`threshold`, which already
       includes an account-level min_confidence), so a stricter setting is never bypassed;
-    - a member whose account-level min_confidence is above the floor doesn't count;
+    - a member whose threshold (account-level min_confidence, else the category's own) is
+      above the floor doesn't count;
     - with `act_categories`, only categories the account acts on count;
     - an email Jev thinks expects a reply (needs_reply >= threshold) stays in Review. For a
       sender I have never written to (or when that's unknown) this only applies when the keep
@@ -214,7 +250,8 @@ def _archive_group_confident(
             return False
         if acts is not None and key not in acts:
             return False
-        return key == top or account.min_confidence.get(key, 0.0) <= floor
+        member = account.min_confidence.get(key, cfg.by_key[key].min_confidence)
+        return key == top or member <= floor
 
     total = sum(p for key, p in classification.probabilities.items() if counts(key))
     return total >= floor

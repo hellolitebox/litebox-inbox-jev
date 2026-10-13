@@ -103,14 +103,16 @@ archive_group_min_confidence: 0.90
 archive_group_reply_keep_probability: 0.05
 
 # Extra yes/no questions. Additive: a label is applied when probability >= threshold,
-# on top of the category. Remove the list or leave it empty to skip.
+# on top of the category (also on allowlisted emails and rules to keep categories, which ask Jev
+# for these flags only). Remove the list or leave it empty to skip.
 tags:
   - key: invoice_to_pay
     label: Jev/Invoices
     question: Does this email contain an invoice or bill that I need to pay?
     threshold: 0.8
 
-# Only applied to emails that stay in the inbox (action keep, or low confidence).
+# Only applied to emails that stay in the inbox (action keep, or low confidence), including
+# allowlisted emails and rules to keep categories (Jev is asked for the flags only).
 needs_reply:
   label: Jev/Needs Reply
   question: Does the sender expect a reply or an action from me personally?
@@ -119,8 +121,9 @@ needs_reply:
 review_label: Jev/Review
 processed_label: Jev/Processed
 
-# A sender becomes an automatic rule (skips Jev) after this many consistent
-# classifications at or above this confidence. An answer doesn't count when the keep categories
+# A sender becomes an automatic rule (skips Jev, or for keep categories asks it for the flags
+# only) after this many consistent classifications at or above this confidence, in label or act
+# mode (never in dry_run). An answer doesn't count when the keep categories
 # (other than the decided one) add up to max_keep_probability or more, and a keep answer restarts
 # a pending archive rule: senders that mix routine and action-needed mail keep going through Jev.
 auto_rule:

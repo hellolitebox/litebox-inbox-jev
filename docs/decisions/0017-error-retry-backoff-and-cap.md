@@ -41,4 +41,5 @@ persists. None of them stores the token endpoint's response, only the `invalid_g
 - An outage longer than ~10 hours still makes the emails of that window give up; after it,
   `inbox-jev retry-errors` plus `run --lookback` recovers them.
 - A sender rule whose category was removed now fails each of that sender's emails 8 times, not
-  for the whole `LOOKBACK` (see Known gaps in the spec).
+  for the whole `LOOKBACK` (since [0019](0019-rules-to-removed-categories-ignored.md) such a rule
+  is ignored instead).

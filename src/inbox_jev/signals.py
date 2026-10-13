@@ -41,7 +41,12 @@ class Signals:
 
 
 def parse_list_unsubscribe(value: str | None) -> tuple[list[str], list[str]]:
-    """RFC 2369: comma-separated <uri> entries. Returns (https urls, mailto uris)."""
+    """RFC 2369: comma-separated <uri> entries. Returns (https urls, mailto uris).
+
+    Every other scheme is dropped, plain `http://` included: a one-click POST or a manual link
+    over http can be read or rewritten on the way and only confirms the address. A header with
+    nothing but http URIs counts as no List-Unsubscribe, so the sender is unverified.
+    """
     https, mailto = [], []
     for uri in _ANGLE.findall(value or ""):
         uri = uri.strip()
@@ -57,12 +62,12 @@ def dmarc_passed(authentication_results: list[str]) -> bool:
     """True if Gmail's Authentication-Results reports dmarc=pass.
 
     A sender can inject its own Authentication-Results header, even one claiming to be
-    mx.google.com. Gmail prepends its own, so only the topmost mx.google.com header is trusted
-    when present; every verdict in it must be "pass".
+    mx.google.com. Gmail prepends its own, so only the topmost mx.google.com header is trusted;
+    every verdict in it must be "pass". Without one, nothing is trusted: Gmail stamps every
+    inbound email, and any other header could have been written by the sender.
     """
     gmail = [h for h in authentication_results if h.strip().lower().startswith("mx.google.com")]
-    trusted = gmail[:1] or authentication_results
-    verdicts = [m.lower() for h in trusted for m in _DMARC.findall(h)]
+    verdicts = [m.lower() for h in gmail[:1] for m in _DMARC.findall(h)]
     return bool(verdicts) and all(v == "pass" for v in verdicts)
 
 

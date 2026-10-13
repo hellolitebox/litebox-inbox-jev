@@ -76,20 +76,23 @@ flowchart TD
     D2 --> E{"User edit?<br/>starred, our label removed,<br/>another Jev label added"}
     E -- yes --> STOP["Hands off: mark done, change nothing in Gmail"]
     E -- no --> F
-    C -- no --> F["Look up sender rule<br/>(exact address, then @domain)"]
+    C -- no --> F["Look up sender rule: the first active one decides (exact address, then @domain);<br/>if its category was removed from categories.yaml, no rule (never the @domain one behind it)"]
     F --> G{"Allowlisted?<br/>author in allow_senders/allow_domains,<br/>or group address in allow_senders"}
-    G -- yes --> DEC
+    G -- yes --> FL["Ask Jev for the flags only<br/>(Needs Reply, tags; no previous_contact);<br/>if the call fails, decide without them (warning)"]
     G -- no --> H{"Active sender rule?"}
     H -- no --> I["previous_contact (sent-mail search)<br/>then ask Jev (build_state)"]
-    H -- yes --> J{"Rule would unsubscribe<br/>a category that spares known contacts?"}
+    H -- yes --> HK{"Rule to a keep category?"}
+    HK -- yes --> FL
+    HK -- no --> J{"Rule would unsubscribe<br/>a category that spares known contacts?"}
     J -- yes --> K["previous_contact (sent-mail search)"]
     J -- no --> DEC
     I --> DEC
     K --> DEC
+    FL --> DEC
     DEC["policy.decide<br/>allowlist / rule / threshold / archive group / Review<br/>+ Needs Reply and tag labels"] --> PL["policy.plan<br/>mode + act_categories"]
     PL --> AP["Gmail modify: add labels, remove INBOX (archive/spam),<br/>add SPAM, drop stale labels from an earlier pass"]
     AP --> DB["Store the row (category, confidence, probabilities, labels...)"]
-    DB --> AR{"Jev answered?"}
+    DB --> AR{"Jev decided (not allowlist or rule)<br/>and mode is not dry_run?"}
     AR -- yes --> AR2["rules.record_auto<br/>(count toward / reset an auto rule)"]
     AR -- no --> U
     AR2 --> U{"plan.unsubscribe and run budget left?"}
@@ -129,12 +132,12 @@ flowchart TD
     M -- "no, or none has an @" --> MP["manual_pending (listed in the digest)"]
 ```
 
-The chart shows the **rule path** order (`policy.decide`, rule branch): verified (C), then group
-(D), then known contact (E). On the **Jev path** `policy.decide` checks E first: when the category
-action is `archive_unsubscribe`, Jev is at or above the threshold and the sender is a known
-contact, a category that spares known contacts sets `known_contact_kept` even if the sender is
-unverified or a group. The email is archived only either way, but `known_contact_kept` stops the
-answer counting toward an auto rule (see [Known gaps](#known-gaps)).
+The Jev path and the rule path run C, D and E in this order (`policy._check_unsubscribe`), and
+only on a decision that would otherwise unsubscribe. So `downgraded_to_spam` means "an
+unsubscribe was skipped because the sender is unverified" and `known_contact_kept` means "an
+unsubscribe was skipped because of a known contact": an unverified or group sender never gets
+`known_contact_kept`, and an archive-group or Review decision never gets `downgraded_to_spam`
+([ADR 0023](decisions/0023-one-order-for-unsubscribe-checks.md)).
 
 ## 3. Decision tables
 
@@ -158,8 +161,8 @@ Extra labels:
 
 | Label | When |
 |---|---|
-| `Jev/Needs Reply` | Jev's `needs_reply` ≥ 0.7 (`needs_reply.threshold`) **and** the decision doesn't archive or spam the email. Never on rule or allowlist decisions (Jev isn't asked). |
-| `Jev/Invoices` | Tag `invoice_to_pay` ≥ 0.8. Added whatever the category, archived or not. Never on rule or allowlist decisions. |
+| `Jev/Needs Reply` | Jev's `needs_reply` ≥ 0.7 (`needs_reply.threshold`) **and** the decision doesn't archive or spam the email. Also on allowlist decisions and rules to a keep category, where Jev is asked for the flags only ([3.5](#35-sender-rules)). Never on rules to archive or spam categories (Jev isn't asked). |
+| `Jev/Invoices` | Tag `invoice_to_pay` ≥ 0.8. Added whatever the category, archived or not. Also on allowlist and keep-rule decisions; never on rules to archive or spam categories. |
 | `Jev/Review` | The decision is low confidence (below the threshold and no archive group), or Jev named a category that doesn't exist. |
 | `Jev/Processed` | Every email labeled in `label` or `act` mode. |
 
@@ -184,7 +187,7 @@ With the shipped thresholds (0.0), a keep answer is always applied and never goe
 | 2 | Jev's top category has action `archive` or `archive_unsubscribe` (spam and keep categories never use the group) | |
 | 3 | Needs-reply veto doesn't apply. It applies when `needs_reply ≥ 0.7` **and** either `previous_contact` is `wrote_to_sender` / `wrote_to_their_domain`, or the keep categories (`important` + `action_required`) together reach `archive_group_reply_keep_probability` | 0.05 |
 | 4 | Floor = max(`archive_group_min_confidence`, the top category's `threshold`): the group never lowers a bar | 0.90 |
-| 5 | The probabilities of the counted categories add up to the floor or more. A category counts when its action is `archive`/`archive_unsubscribe`, it is in `act_categories` (when the account sets it), and it is the top category or its **account-level** `min_confidence` (default 0.0) is at most the floor | |
+| 5 | The probabilities of the counted categories add up to the floor or more. A category counts when its action is `archive`/`archive_unsubscribe`, it is in `act_categories` (when the account sets it), and it is the top category or its threshold (the account's `min_confidence`, else the category's own) is at most the floor | 0.80 / 0.90 ≤ 0.90: every archive category counts |
 
 `archive_group_reply_keep_probability` must be at most `1 - archive_group_min_confidence`
 (config load fails otherwise): the group only fires when the archive categories hold ≥ 0.90, so
@@ -202,15 +205,16 @@ An unsubscribe is irreversible. During `run` it happens only when **all** of the
 |---|---|---|
 | 1 | The final category's action is `archive_unsubscribe` | `policy._apply` |
 | 2 | Decided by a sender rule, or by Jev at or above the category threshold. An archive-group or Review decision never unsubscribes | `policy.decide` |
-| 3 | **Verified**: `dmarc=pass` in Gmail's `Authentication-Results` and a `List-Unsubscribe` header with an `https:` or `mailto:` URI. If not, the email keeps its category, is archived, and `downgraded_to_spam` is set ("unsubscribe skipped: unverified sender"). It is never moved to Spam for this | `policy._verified` |
-| 4 | **Not a group or discussion list** (`_group_list`): no `List-Post` header; no unsubscribe target on `googlegroups.com` / `groups.google.com` (host or subdomain); not relayed by a Google Group (`group_author` found, trusted or not); sender domain and `List-Id` not on the account's own domain (or a subdomain) | `policy._group_list` |
-| 5 | For a category with `unsubscribe_known_contacts: false` (`cold_outreach`): `previous_contact` is not `wrote_to_sender` / `wrote_to_their_domain`. Unknown (`None`, the search failed or wasn't run) does **not** block it | `policy.decide` |
+| 3 | **Verified**: `dmarc=pass` in Gmail's own `Authentication-Results` ([4.2](#42-dmarc)) and a `List-Unsubscribe` header with an `https:` or `mailto:` URI (an `http:`-only header counts as none, [4.3](#43-list-unsubscribe-one-click-and-mailto)). If not, the email keeps its category, is archived, and `downgraded_to_spam` is set ("unsubscribe skipped: unverified sender"). It is never moved to Spam for this | `policy._check_unsubscribe` |
+| 4 | **Not a group or discussion list** (`_group_list`): no `List-Post` header; no unsubscribe target on `googlegroups.com` / `groups.google.com` (host or subdomain); not relayed by a Google Group (`group_author` found, trusted or not); sender domain and `List-Id` not on the account's own domain (or a subdomain) | `policy._check_unsubscribe` |
+| 5 | For a category with `unsubscribe_known_contacts: false` (`cold_outreach`): `previous_contact` is not `wrote_to_sender` / `wrote_to_their_domain` (`known_contact_kept` otherwise). Unknown (`None`, the search failed or wasn't run) does **not** block it | `policy._check_unsubscribe` |
 | 6 | Mode is `act`, and the account has no `act_categories` or lists the category | `policy.plan` |
 | 7 | The run's budget (`MAX_UNSUBSCRIBES_PER_RUN`, 20) has attempts left | `triage.process` |
 | 8 | The list isn't **settled**: no `unsubscribes` row for `(account, list_key)`, or its row is `failed` with fewer than 3 attempts | `triage._unsubscribe` |
 | 9 | `dmarc_pass` again, inside the unsubscriber (defence in depth) | `unsubscribe.unsubscribe` |
 
-The same checks run on the **rule path**: a sender rule skips Jev, not the sender checks. For a
+The same checks run on the **rule path**, in the same order: a sender rule skips Jev, not the
+sender checks. For a
 rule to a category that spares known contacts, `triage` runs the sent-mail search only when the
 answer could change the outcome (`_rule_needs_contact`: act mode, category acted on, verified,
 not a group, list not settled).
@@ -275,29 +279,53 @@ Held rows stay `failed`.
 | `correction` | A detected correction ([3.7](#37-corrections-user-edits-and-restore)) | exact resolved sender address | Replaces any rule on the same key |
 | `auto` | `rules.record_auto` after consistent Jev answers | exact resolved sender address | Never changes manual/correction rules |
 
-- Lookup: active rule on the exact address, else on `@domain` (`policy.rule_keys`). Allowlist wins
-  over rules.
-- A rule decision has source `rule`, confidence 1.0, and no Jev call: no `needs_reply`, no tags,
-  no `previous_contact` unless the unsubscribe needs it.
-- A rule whose category no longer exists in `categories.yaml` makes processing of that sender's
-  email fail (see [Known gaps](#known-gaps)); delete such rules when removing a category.
+- Lookup (`rules.match`): the first active rule decides, on the exact address, else on `@domain`
+  (`policy.rule_keys`). Allowlist wins over rules.
+- A rule decision has source `rule` and confidence 1.0, and no `previous_contact` unless the
+  unsubscribe needs it.
+- **Rules to a keep category** (`important`, `action_required`), like the allowlist, still ask
+  Jev, for the flags only: `Jev/Needs Reply` and the tag labels follow Jev's answer, the
+  category stays the rule's (or `important`), Jev's own category is stored as `jev_category`
+  and ignored, and the answer never counts toward an auto rule. No sent-mail search is run for
+  it (`previous_contact` is left out of the Jev state). If that call fails (a Jev outage, an
+  error on that email), the email is decided without Jev's answer, as if it hadn't been asked:
+  labeled by the rule or the allowlist, without Needs Reply or tags, with a warning in the log
+  (`flags-only Jev call failed`, account, id and error type, no content). It isn't stored as
+  `error`. See [EX-19](#ex-19--jev-is-down-when-an-allowlisted-email-arrives).
+  **Rules to an archive or spam category**
+  skip Jev: their email leaves the inbox, where Needs Reply is never added. See
+  [EX-15](#ex-15--a-client-with-a-keep-rule-asks-a-question) and
+  [ADR 0020](decisions/0020-flags-for-allowlist-and-keep-rules.md).
+- A rule whose category no longer exists in `categories.yaml` counts as no rule: when it is the
+  first match, Jev decides. Lookup **never falls through** to the `@domain` rule behind a stale
+  exact rule: the exact rule is your exception to the domain rule, so applying the domain rule
+  would undo it (archive, maybe unsubscribe, the sender you singled out). A stale `@domain` rule
+  with no exact rule also sends the email to Jev. It is logged once per run
+  (`sender rule ignored: unknown category`) and left in the DB, active, for you to
+  `rules delete` (or to apply again if the category comes back). `unsubscribe-retry` and
+  `dry_classify.py` use the same lookup. An **auto** rule in that state is relearned like a
+  pending one: auto rules are keyed on the exact address, so a stale one is always the first
+  match and its sender goes to Jev; the next counted answer replaces its category with
+  `hits = 1`. See [EX-14](#ex-14--a-rule-to-a-category-you-removed).
 
-**Automatic rules** (`rules.record_auto`, Jev path only; any mode, including `dry_run`):
+**Automatic rules** (`rules.record_auto`): only decisions Jev made (source `jev`, not allowlist
+or rule, so never a flags-only answer), and only in `label` and `act`. Nothing is learned in
+`dry_run` ([EX-18](#ex-18--a-dry-run-trial-learns-no-rules)):
 
 | Step | Condition | Effect |
 |---|---|---|
 | Reset | The decision is a keep category, **or** the keep categories other than the decided one hold ≥ `auto_rule.max_keep_probability` (0.02) — even on a low-confidence answer — **and** the sender has a pending (inactive) `auto` rule to a non-keep category | `hits = 0` |
-| Doesn't count | `low_confidence`, `archive_group`, `known_contact_kept`, the keep signal above, or Jev's confidence < `auto_rule.min_confidence` (0.95) | nothing more |
+| Doesn't count | `low_confidence`, `archive_group`, a known contact (`previous_contact` is `wrote_to_sender` / `wrote_to_their_domain`) in a category that spares known contacts, the keep signal above, or Jev's confidence < `auto_rule.min_confidence` (0.95) | nothing more |
 | Counts, no rule yet | | new `auto` rule, `hits = 1`, active if `auto_rule.hits` ≤ 1 |
-| Counts, rule is manual/correction or already active | | unchanged |
+| Counts, rule is manual/correction, or an active auto rule to an existing category | | unchanged |
 | Counts, same category | | `hits += 1`; active at `auto_rule.hits` (3) |
-| Counts, other category | | category switches, `hits = 1` |
+| Counts, other category (incl. an active auto rule to a removed category) | | category switches, `hits = 1`, active only if `auto_rule.hits` ≤ 1 |
 
-Unverified senders (`downgraded_to_spam`) can earn a rule, unless they are also a known contact
-in a category that spares known contacts (`cold_outreach`): the Jev path sets
-`known_contact_kept` before the verified check (see [Known gaps](#known-gaps)). The rule path
-re-runs the DMARC/`List-Unsubscribe`/group checks on each email. Keep categories can earn a rule
-too.
+Unverified senders (`downgraded_to_spam`) can earn a rule: the rule path re-runs the
+DMARC/`List-Unsubscribe`/group checks on each email. A known contact never earns a rule to a
+category that spares known contacts (`cold_outreach`), whether the sender is verified, unverified
+or a group: such a "pitch" is where Jev is most likely wrong, so the sender stays on the Jev path.
+Keep categories can earn a rule too.
 
 ### 3.6 Modes and `act_categories`
 
@@ -305,7 +333,7 @@ too.
 
 | Mode | DB + digest | Gmail labels | Archive / spam / unsubscribe |
 |---|---|---|---|
-| `dry_run` | yes | no | no |
+| `dry_run` | yes (no auto rules learned) | no | no |
 | `label` | yes | yes (+ `Jev/Processed`) | no |
 | `act` | yes | yes | yes |
 | `act`, category not in the account's `act_categories` | yes | yes | no (treated as `label`) |
@@ -381,13 +409,13 @@ Each query's answer is cached in the `Gmail` object, so per account per run. Any
 
 When it runs: on the Jev path for every email (in every mode, including `dry_run`), and on the
 rule path only when `_rule_needs_contact` says it can change an unsubscribe. Never for
-allowlisted senders.
+allowlisted senders or keep rules (their flags-only Jev call goes without it).
 
 Consequences of each value:
 
 | Value | Jev state | Needs-reply veto on the archive group | `cold_outreach` unsubscribe (`run`) | `unsubscribe-retry` | Auto rule |
 |---|---|---|---|---|---|
-| `wrote_to_sender` / `wrote_to_their_domain` | sent | any reply signal vetoes | no (`known_contact_kept`) | `skipped` | doesn't count in a category that spares known contacts, even when the sender is unverified or a group ([Known gaps](#known-gaps)) |
+| `wrote_to_sender` / `wrote_to_their_domain` | sent | any reply signal vetoes | no (`known_contact_kept` when verified and not a group) | `skipped` | doesn't count in a category that spares known contacts, verified or not, group or not |
 | `never` | sent | only with keep probability ≥ 0.05 | yes | proceeds | normal |
 | `None` | key left out | only with keep probability ≥ 0.05 | **yes** (other checks still apply) | **held** | normal |
 
@@ -398,14 +426,19 @@ The value is logged on the "message processed" line; it isn't stored in the DB.
 `signals.dmarc_passed(Authentication-Results headers)`: Gmail prepends its own
 `Authentication-Results`, and a sender can inject more (even ones claiming `mx.google.com`).
 Only the **topmost** header that starts with `mx.google.com` is trusted. Every `dmarc=` verdict in
-it must be `pass`, and there must be at least one. If no header starts with `mx.google.com`, all
-the headers are used with the same rule.
+it must be `pass`, and there must be at least one. If no header starts with `mx.google.com`, DMARC
+doesn't pass: Gmail stamps every inbound email, so any other header could be the sender's own
+([EX-17](#ex-17--an-unsubscribe-header-without-gmails-authentication-results)). Besides the
+unsubscribe checks, `dmarc_pass` also gates the Google Groups author recovery ([4.5](#45-x-original-sender-trust)).
 
 ### 4.3 `List-Unsubscribe`, one-click and `mailto:`
 
 - `List-Unsubscribe` (first header) is parsed as RFC 2369 `<uri>` entries. Only `https://` and
   `mailto:` URIs are kept; `http://` and anything else is ignored. "Has unsubscribe" = at least
-  one of them.
+  one of them. So an `http://`-only header counts as no header: the sender is unverified
+  (archived only, `downgraded_to_spam`), the URL is never `POST`ed nor offered as a
+  `manual_pending` link, and `is_mailing_list` in the Jev state depends on `List-Id` alone
+  ([ADR 0025](decisions/0025-http-only-list-unsubscribe-is-none.md)).
 - **One-click** = `List-Unsubscribe-Post` contains `List-Unsubscribe=One-Click` (spaces and case
   ignored) and there is at least one `https` URI.
 - Order in `unsubscribe.unsubscribe`:
@@ -479,7 +512,7 @@ If the body is empty after all that, Jev gets Gmail's `snippet` (HTML-unescaped)
 | `precedence` | `Precedence` header or null |
 | `body` | Extracted body, else the snippet, first `BODY_CHARS` (3000) characters |
 | `original_sender`, `sent_via_group` | Only for a trusted group relay: the author and the group |
-| `previous_contact` | Only when known (`None` leaves the key out) |
+| `previous_contact` | Only when known (`None` leaves the key out); always left out of the flags-only call for allowlist and keep-rule emails |
 
 Questions (`build_questions`): one `Choice` over the categories, with each category's `criteria`
 and the instruction to judge by who wrote it and why, explaining `previous_contact` ("a
@@ -619,10 +652,12 @@ the probabilities that matter are shown; the rest are ~0.
   cold_outreach 0.97.
 - **Outcome**: archived with `Jev/Outreach`, `downgraded_to_spam = true`; never unsubscribed and
   never moved to Spam. It still counts toward an auto rule, because `previous_contact` is
-  `never`: for a known contact the Jev path sets `known_contact_kept` and it wouldn't count (see
-  [Known gaps](#known-gaps)).
+  `never`. From a known contact it would be archived the same way, with `known_contact_kept =
+  false` (the unverified check is what stopped the unsubscribe), and it wouldn't count toward an
+  auto rule. A `List-Unsubscribe` with only an `http://` URL is treated like no header.
 - **Why**: unsubscribing from an unverified sender only confirms your address; being unverified
   isn't fraud. A rule for it is safe: the rule path re-runs the sender checks on every email.
+  Known contacts stay on the Jev path whatever the headers say.
 
 ### EX-12 — A correction becomes a sender rule
 
@@ -630,8 +665,9 @@ the probabilities that matter are shown; the rest are ~0.
 - **Input**: in act mode, `news@weekly.example` is archived as `newsletter` (0.97). You move it
   back to the inbox. A week later another email from that sender arrives.
 - **Outcome**: the next run records a correction to `important` and an active `correction` rule
-  for `news@weekly.example`. The new email is decided by the rule (Jev isn't called) and stays in
-  the inbox with `Jev/Important`.
+  for `news@weekly.example`. The new email is decided by the rule and stays in the inbox with
+  `Jev/Important`; since `important` is a keep category, Jev is asked only for its flags
+  (Needs Reply, tags) and its own category is ignored.
 - **Why**: pulling an archived email back to the inbox is a correction to `important`; changing
   the category label would be a correction to that category.
 
@@ -650,6 +686,91 @@ the probabilities that matter are shown; the rest are ~0.
   Jev calls and log noise for an email that fails the same way; the backoff still rides out an
   outage of several hours ([ADR 0017](decisions/0017-error-retry-backoff-and-cap.md)).
 
+### EX-14 — A rule to a category you removed
+
+- **Test**: `test_ex14_rule_to_removed_category_goes_through_jev`
+- **Input**: a manual rule `@deals.example` → `promotions`, a category since removed from
+  `categories.yaml`. Two emails from `sale@deals.example` arrive in one run. Jev: newsletter
+  0.93, marketing 0.07. Also `@vendor.example` → `marketing` (manual) with the exception
+  `billing@vendor.example` → `promotions` (manual, same removed category); `billing@` sends
+  "Invoice 88". Jev: important 0.96.
+- **Outcome**: the two `sale@` emails go through Jev and are archived as `newsletter`. "Invoice
+  88" goes through Jev too and stays in the inbox as `important`: the `@vendor.example` rule
+  doesn't apply. The run logs `sender rule ignored: unknown category` once for
+  `@deals.example` and once for `billing@vendor.example`. The rules stay in the DB, active.
+- **Why**: before, `decide` raised and the emails were stored as `error`, retried with the
+  backoff until they gave up. Treating the rule as absent decides them the way they would be
+  without it; leaving it in place keeps a manual or correction rule you may still want if the
+  category comes back. Falling through to `@vendor.example` would apply the very rule the
+  exact one overrode, without Jev, in `act`
+  ([ADR 0019](decisions/0019-rules-to-removed-categories-ignored.md)).
+
+### EX-15 — A client with a keep rule asks a question
+
+- **Test**: `test_ex15_keep_rule_still_gets_needs_reply`
+- **Input**: `ana@client.example` has a `correction` rule → `important`;
+  `news@weekly.example` has an active `auto` rule → `newsletter`. Ana writes "Signed contract
+  by Friday?". Jev: cold_outreach 0.55, important 0.45; `needs_reply` 0.92.
+- **Outcome**: Ana's email stays in the inbox with `Jev/Important` and `Jev/Needs Reply`, and is
+  listed in the digest's "Piden respuesta" section. Jev's cold_outreach answer is ignored (no
+  `Jev/Outreach`), the answer counts toward no rule, and no sent-mail search runs. The
+  newsletter is archived by its rule without a Jev call.
+- **Why**: a keep rule (or the allowlist) is exactly the mail that needs a reply most, and its
+  email stays in the inbox, so Needs Reply and the tags are worth one Jev call. An archive rule
+  takes the email out of the inbox, where Needs Reply is never added, so it still skips Jev
+  ([ADR 0020](decisions/0020-flags-for-allowlist-and-keep-rules.md)).
+
+### EX-16 — The archive group respects a stricter category threshold
+
+- **Test**: `test_ex16_archive_group_respects_category_thresholds`
+- **Input**: `categories.yaml` raises `marketing`'s `min_confidence` to 0.95 (shipped: 0.90).
+  `hello@brand.example` sends an announcement. Jev: newsletter 0.50, marketing 0.45,
+  important 0.01.
+- **Outcome**: stays in the inbox with `Jev/Review` and `Jev/Newsletters`. With
+  `min_confidence: {marketing: 0.90}` on the account, marketing counts again and the email is
+  archived as `newsletter` through the group.
+- **Why**: a member whose threshold is above the floor (0.90) doesn't count, whether that
+  threshold comes from the account or from the category; before, only the account's counted
+  ([ADR 0021](decisions/0021-archive-group-member-threshold.md)). With the shipped thresholds
+  (0.80 and 0.90) every archive category counts.
+
+### EX-17 — An unsubscribe header without Gmail's Authentication-Results
+
+- **Test**: `test_ex17_no_gmail_authentication_results_is_unverified`
+- **Input**: `promo@shop.example` with `List-Unsubscribe: <https://shop.example/u/1>` and
+  one-click, and a single `Authentication-Results: mail.shop.example; dmarc=pass …` (no
+  `mx.google.com` header). Jev: marketing 0.97.
+- **Outcome**: archived with `Jev/Marketing`, `downgraded_to_spam = true`; no one-click `POST`,
+  no `unsubscribes` row.
+- **Why**: Gmail stamps every inbound email with its own header; one that is missing means the
+  only verdict was written by someone else, possibly the sender
+  ([ADR 0022](decisions/0022-dmarc-only-from-gmail.md)).
+
+### EX-18 — A dry-run trial learns no rules
+
+- **Test**: `test_ex18_dry_run_learns_no_rules`
+- **Input**: three issues from `news@weekly.example` in the inbox, each newsletter 0.97. A
+  `dry_run` pass, then an `act` pass.
+- **Outcome**: after `dry_run` there are no sender rules. The `act` pass asks Jev again for the
+  three (dry-run rows are processed again), archives them, and only then the `auto` rule
+  reaches 3 hits and activates.
+- **Why**: a rule learned in `dry_run` would apply without Jev, and act, as soon as the mode
+  changes, on answers nobody could correct (dry runs add no labels)
+  ([ADR 0024](decisions/0024-no-auto-rules-in-dry-run.md)).
+
+### EX-19 — Jev is down when an allowlisted email arrives
+
+- **Test**: `test_ex19_flags_only_jev_failure_still_labels`
+- **Input**: `acme.example` is on `allow_domains`, and `ana@client.example` has a `correction` rule
+  → `important`. Each sends an email while every Jev call fails.
+- **Outcome**: both are stored `done` (not `error`) with `Jev/Important`, without
+  `Jev/Needs Reply` or tags, and stay in the inbox. The log has `flags-only Jev call failed`
+  for each (account, id, error type; no subject or body). No error is counted for them.
+- **Why**: the category was already decided by the allowlist or the rule; only the optional
+  flags depend on Jev. Failing the email would make "always important" depend on Jev, and after
+  8 failed passes it would never be labeled
+  ([ADR 0020](decisions/0020-flags-for-allowlist-and-keep-rules.md)).
+
 ## 6. Glossary
 
 - **Action**: what a category does: `keep`, `archive`, `archive_unsubscribe`, `spam`.
@@ -661,7 +782,10 @@ the probabilities that matter are shown; the rest are ~0.
 - **Correction**: a change you made in Gmail (another category label, back to the inbox) that
   becomes a `correction` sender rule.
 - **`downgraded_to_spam`**: historical column name. Means "unsubscribe skipped: unverified
-  sender"; the email keeps its category.
+  sender", set only when the decision would otherwise unsubscribe; the email keeps its category.
+- **Flags-only call**: the Jev call for an allowlisted email or one decided by a rule to a keep
+  category: only its Needs Reply and tags are used. If it fails, the email is decided without
+  them.
 - **Error retry / gave up**: an email whose processing failed (`status = error`) is retried
   with a backoff, and not after 8 failures ("gave up"; `inbox-jev retry-errors` resets that).
 - **Group / discussion list**: mail whose `List-Unsubscribe` would remove you from a list you
@@ -673,6 +797,7 @@ the probabilities that matter are shown; the rest are ~0.
   is the **keep probability**; ≥ 0.02 (other than the decided one) is the auto-rule **keep
   signal**, ≥ 0.05 enables the needs-reply veto on the group.
 - **Known contact**: `previous_contact` is `wrote_to_sender` or `wrote_to_their_domain`.
+  `known_contact_kept`: an unsubscribe was skipped because of one (verified, non-group sender).
 - **`list_key`**: identity of a list for "once per list": `List-Id`, else the sender domain.
 - **Low confidence / Review**: below the threshold and no archive group: `Jev/Review` + the
   suggested label, nothing destructive.
@@ -690,29 +815,6 @@ the probabilities that matter are shown; the rest are ~0.
 
 Behaviour found while writing this spec, documented as it is today:
 
-- A sender rule whose category was removed from `categories.yaml` makes `decide` raise
-  (`classification is required…`): every email from that sender is stored as `error` and retried
-  with the error backoff until it gives up (8 failures); after deleting the rule, run
-  `inbox-jev retry-errors`. `unsubscribe-retry` ignores such a rule instead.
-- Rule and allowlist decisions never add `Jev/Needs Reply` or tag labels. A sender that earns a
-  keep auto rule (e.g. `important`, 3 answers ≥ 0.95 with little other keep probability), or a
-  `correction` rule to `important`, stops getting `Jev/Needs Reply` and drops out of the digest's
-  "needs reply" section.
-- In the archive group, a non-top category is excluded only by its **account-level**
-  `min_confidence`; a category-level `min_confidence` above the floor doesn't exclude it.
-- Without any `mx.google.com` `Authentication-Results` header, DMARC falls back to whatever
-  headers are present. Gmail always adds its own, so this matters only for unusual delivery paths.
-- `downgraded_to_spam` is also set on archive-group and Review decisions for an unverified
-  `archive_unsubscribe` category, where no unsubscribe was possible anyway.
-- Auto rules are learned in `dry_run` too (DB only); they apply without Jev once the mode is
-  `label` or `act`.
-- An `http://`-only `List-Unsubscribe` counts as no header: the sender is unverified (archived
-  only, `downgraded_to_spam`), and the `http` URL is never offered as a `manual_pending` target.
-- `known_contact_kept` is set in a different order on the two paths. The Jev path sets it
-  before the verified and group checks, so a known contact in a category that spares known
-  contacts (`cold_outreach`) gets it even when the sender is unverified (no DMARC pass or no
-  `List-Unsubscribe`) or a group (`List-Post`, a Google Groups target, a relay). The rule path sets
-  it only after those checks pass, so the same unverified input gives `false`. Only
-  `rules.record_auto` reads the flag, so no unsubscribe differs, but on the Jev path an unverified
-  known contact, or a group-relayed pitch from a known author (EX-06 with `previous_contact`
-  known), never counts toward an auto rule.
+- An email processed again in a stronger mode (`label`, then `act`, or after `reprocess`) is
+  sent to Jev again, and that answer counts toward an auto rule a second time: one email can
+  give a sender two of the three hits.

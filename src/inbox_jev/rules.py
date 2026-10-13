@@ -2,27 +2,53 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .classifier import Classification
 from .config import Action, CategoriesConfig
 from .db import SenderRule
-from .policy import Decision, rule_keys
+from .policy import KNOWN_CONTACT, Decision, rule_keys, spares_known_contacts
 
 
 def lookup(session: Session, account: str, sender: str) -> SenderRule | None:
-    for key in rule_keys(sender):
-        rule = session.scalar(
-            select(SenderRule).where(
-                SenderRule.account == account,
-                SenderRule.sender_key == key,
-                SenderRule.active.is_(True),
-            )
+    """The first active rule for `sender` (exact address, then @domain), whatever its category.
+
+    Deciding code uses `match`, which also checks the category still exists.
+    """
+    found = active(session, account, sender)
+    return found[0] if found else None
+
+
+def match(
+    session: Session, account: str, sender: str, categories: Collection[str]
+) -> tuple[SenderRule | None, SenderRule | None]:
+    """The rule that decides for `sender`, as `(rule, stale)`.
+
+    The first active rule decides (exact address, then @domain). If its category isn't one of
+    `categories` (removed from categories.yaml), it comes back as `stale` and `rule` is None: the
+    sender has no rule and Jev decides. It never falls through to the @domain rule: an exact rule
+    is the user's exception to it, so applying the domain rule would undo that exception.
+    """
+    first = lookup(session, account, sender)
+    if first is None or first.category in categories:
+        return first, None
+    return None, first
+
+
+def active(session: Session, account: str, sender: str) -> list[SenderRule]:
+    """Active rules matching `sender`, in lookup order (exact address, then @domain)."""
+    keys = rule_keys(sender)
+    found = session.scalars(
+        select(SenderRule).where(
+            SenderRule.account == account,
+            SenderRule.sender_key.in_(keys),
+            SenderRule.active.is_(True),
         )
-        if rule:
-            return rule
-    return None
+    ).all()
+    return sorted(found, key=lambda r: keys.index(r.sender_key))
 
 
 def set_rule(session: Session, account: str, sender_key: str, category: str, source: str) -> None:
@@ -42,10 +68,15 @@ def record_auto(
     sender: str,
     classification: Classification,
     decision: Decision,
+    previous_contact: str | None = None,
 ) -> None:
     """Count consistent high-confidence answers; activate after cfg.auto_rule.hits.
 
-    Only touches automatic rules: manual and correction rules are never changed here.
+    Only for Jev decisions (`decision.source == "jev"`) outside dry_run: the caller checks.
+    Only touches automatic rules: manual and correction rules are never changed here. An active
+    auto rule whose category was removed from categories.yaml is replaced like a pending one
+    (`match` sends its sender to Jev: auto rules are keyed on the exact address, so they come
+    first).
     """
     is_keep = _is_keep(cfg, decision.category)
     other_keep = cfg.keep_probability(classification.probabilities, exclude=decision.category)
@@ -66,13 +97,17 @@ def record_auto(
     # Unverified senders (downgraded_to_spam) can earn a rule: the rule path re-runs the
     # DMARC/List-Unsubscribe and group checks on every email, so it never unsubscribes them.
     # A group archive never earns one: the top category alone was below its threshold. Nor does
-    # an unsubscribe skipped for a known contact: the rule path re-checks previous_contact too,
-    # but a "pitch" from someone I wrote to is where Jev is most likely wrong, so such senders
-    # stay on the Jev path, which sees the relationship on every email.
+    # a known contact in a category that spares known contacts (cold_outreach), whether or not
+    # an unsubscribe was in play (verified or not, group or not): a "pitch" from someone I wrote
+    # to is where Jev is most likely wrong, so such senders stay on the Jev path, which sees the
+    # relationship on every email.
+    known_contact = previous_contact in KNOWN_CONTACT and spares_known_contacts(
+        cfg, decision.category
+    )
     if (
         decision.low_confidence
         or decision.archive_group
-        or decision.known_contact_kept
+        or known_contact
         or keep_signal
         or classification.confidence < cfg.auto_rule.min_confidence
     ):
@@ -89,13 +124,14 @@ def record_auto(
             )
         )
         return
-    if rule.source != "auto" or rule.active:
+    if rule.source != "auto" or (rule.active and rule.category in cfg.by_key):
         return
     if rule.category == decision.category:
         rule.hits += 1
         rule.active = rule.hits >= cfg.auto_rule.hits
     else:
         rule.category, rule.hits = decision.category, 1
+        rule.active = cfg.auto_rule.hits <= 1
 
 
 def _is_keep(cfg: CategoriesConfig, key: str) -> bool:

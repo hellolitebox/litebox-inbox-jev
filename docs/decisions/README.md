@@ -29,3 +29,10 @@ record when the decision changes: add a new one and mark the old one `Superseded
 | [0016](0016-reproducible-build.md) | Reproducible build with `uv.lock` | Accepted | #16 |
 | [0017](0017-error-retry-backoff-and-cap.md) | Retry failed emails with a backoff, give up after 8 failures | Accepted | #20 |
 | [0018](0018-one-click-pinned-to-validated-ip.md) | One-click unsubscribe connects to the validated IPs | Accepted | #20 |
+| [0019](0019-rules-to-removed-categories-ignored.md) | A rule to a removed category is ignored, not deleted | Accepted | #21 |
+| [0020](0020-flags-for-allowlist-and-keep-rules.md) | Allowlist and keep rules ask Jev for the flags only | Accepted | #21 |
+| [0021](0021-archive-group-member-threshold.md) | An archive-group member counts against its own threshold | Accepted | #21 |
+| [0022](0022-dmarc-only-from-gmail.md) | DMARC passes only on Gmail's own `Authentication-Results` | Accepted | #21 |
+| [0023](0023-one-order-for-unsubscribe-checks.md) | One order for the unsubscribe checks | Accepted | #21 |
+| [0024](0024-no-auto-rules-in-dry-run.md) | No automatic rules are learned in `dry_run` | Accepted | #21 |
+| [0025](0025-http-only-list-unsubscribe-is-none.md) | An `http://`-only `List-Unsubscribe` counts as no header | Accepted | #21 |

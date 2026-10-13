@@ -4,8 +4,9 @@ import pytest
 from conftest import make_classification, make_signals
 
 from inbox_jev import corrections, rules
+from inbox_jev.config import Account
 from inbox_jev.corrections import detect
-from inbox_jev.db import Message, make_session_factory, now
+from inbox_jev.db import Message, SenderRule, make_session_factory, now
 from inbox_jev.policy import Decision, decide
 
 
@@ -186,7 +187,9 @@ def test_known_contact_cold_outreach_does_not_earn_rule(cfg, session, account):
     c = make_classification("cold_outreach", 0.99)
     for _ in range(cfg.auto_rule.hits):
         d = decide(cfg, account, make_signals(), c, previous_contact="wrote_to_their_domain")
-        rules.record_auto(session, cfg, "me@acme.com", "rep@vendor.com", c, d)
+        rules.record_auto(
+            session, cfg, "me@acme.com", "rep@vendor.com", c, d, "wrote_to_their_domain"
+        )
         session.commit()
     assert rules.lookup(session, "me@acme.com", "rep@vendor.com") is None
 
@@ -234,3 +237,49 @@ def test_check_puts_never_and_longest_unchecked_rows_first(cfg, session, monkeyp
     assert gmail.checked == ["new_unchecked", "old_unchecked", "old_checked_long_ago"]
     corrections.check(session, gmail, "me@acme.com", cfg)  # the others are within the hour now
     assert gmail.checked[3:] == ["new_checked"]
+
+
+def test_match_never_falls_through_a_stale_exact_rule_to_the_domain_rule(cfg, session):
+    rules.set_rule(session, "me@acme.com", "news@shop.com", "promotions", "manual")
+    rules.set_rule(session, "me@acme.com", "@shop.com", "newsletter", "manual")
+    session.commit()
+    assert rules.lookup(session, "me@acme.com", "news@shop.com").category == "promotions"
+    rule, stale = rules.match(session, "me@acme.com", "news@shop.com", cfg.by_key)
+    assert rule is None and stale.sender_key == "news@shop.com"  # Jev decides, not @shop.com
+    rule, stale = rules.match(session, "me@acme.com", "other@shop.com", cfg.by_key)
+    assert (rule.sender_key, stale) == ("@shop.com", None)
+
+
+def test_match_with_stale_domain_rule_and_no_exact_rule(cfg, session):
+    rules.set_rule(session, "me@acme.com", "@shop.com", "promotions", "manual")
+    session.commit()
+    rule, stale = rules.match(session, "me@acme.com", "news@shop.com", cfg.by_key)
+    assert rule is None and stale.sender_key == "@shop.com"
+    assert rules.match(session, "me@acme.com", "x@other.com", cfg.by_key) == (None, None)
+
+
+def test_active_auto_rule_to_removed_category_is_relearned(cfg, session):
+    rules.set_rule(session, "me@acme.com", "news@shop.com", "promotions", "auto")
+    session.commit()
+    c = make_classification("newsletter", 0.99)
+    d = decide(cfg, Account(email="me@acme.com"), make_signals(), c)
+    rules.record_auto(session, cfg, "me@acme.com", "news@shop.com", c, d)
+    rule = session.query(SenderRule).one()
+    assert (rule.category, rule.hits, rule.active) == ("newsletter", 1, False)
+
+
+def test_known_contact_never_earns_cold_outreach_rule_even_unverified(cfg, session, account):
+    c = make_classification("cold_outreach", 0.99)
+    for sig in (make_signals(dmarc_pass=False), make_signals(is_discussion_list=True)):
+        for _ in range(cfg.auto_rule.hits):
+            d = decide(cfg, account, sig, c, previous_contact="wrote_to_sender")
+            rules.record_auto(
+                session, cfg, "me@acme.com", "rep@vendor.com", c, d, "wrote_to_sender"
+            )
+        assert rules.lookup(session, "me@acme.com", "rep@vendor.com") is None
+    # marketing unsubscribes known contacts too, so they can earn a marketing rule.
+    m = make_classification("marketing", 0.99)
+    for _ in range(cfg.auto_rule.hits):
+        d = decide(cfg, account, make_signals(), m, previous_contact="wrote_to_sender")
+        rules.record_auto(session, cfg, "me@acme.com", "rep@vendor.com", m, d, "wrote_to_sender")
+    assert rules.lookup(session, "me@acme.com", "rep@vendor.com").category == "marketing"

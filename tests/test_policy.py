@@ -2,7 +2,7 @@ import pytest
 from conftest import GMAIL_PASS, make_classification, make_signals
 
 from inbox_jev.config import Mode
-from inbox_jev.policy import decide, plan, rule_keys
+from inbox_jev.policy import decide, flags_only, plan, rule_keys
 from inbox_jev.signals import extract, resolve_relay
 
 
@@ -48,7 +48,8 @@ def test_marketing_without_proof_is_archived_without_unsubscribe(cfg, account, s
 def test_unverified_marketing_below_threshold_stays_in_inbox(cfg, account):
     c = make_classification("marketing", 0.85)
     d = decide(cfg, account, make_signals(dmarc_pass=False), c)
-    assert d.low_confidence and d.downgraded_to_spam
+    # No unsubscribe was in play (Review), so it isn't flagged as a skipped one.
+    assert d.low_confidence and not d.downgraded_to_spam
     assert not (d.archive or d.spam or d.unsubscribe)
     assert d.add_labels[:2] == ["Jev/Review", "Jev/Marketing"]
 
@@ -537,3 +538,63 @@ def test_untrusted_group_cannot_claim_an_allowlisted_author(cfg, account, group)
         decide(cfg, account, sig)  # not allowlisted: Jev has to classify it
     # No unsubscribe through something shaped like a group, trusted or not.
     assert not decide(cfg, account, sig, rule_category="cold_outreach").unsubscribe
+
+
+def test_rule_to_removed_category_is_ignored(cfg, account):
+    c = make_classification("newsletter", 0.97)
+    d = decide(cfg, account, make_signals(), c, rule_category="promotions")
+    assert (d.source, d.category, d.archive) == ("jev", "newsletter", True)
+    with pytest.raises(ValueError, match="classification is required"):
+        decide(cfg, account, make_signals(), rule_category="promotions")
+
+
+def test_keep_rule_with_classification_adds_flags_not_category(cfg, account):
+    c = make_classification("cold_outreach", 0.99, needs_reply=0.9, tags={cfg.tags[0].key: 0.95})
+    d = decide(cfg, account, make_signals(), c, rule_category="important")
+    assert (d.source, d.category, d.confidence, d.archive) == ("rule", "important", 1.0, False)
+    assert d.add_labels == ["Jev/Important", "Jev/Needs Reply", cfg.tags[0].label]
+    allow = make_signals(sender="ceo@acme.com", sender_domain="acme.com")
+    d = decide(cfg, account, allow, c)
+    assert (d.source, d.category) == ("allowlist", "important")
+    assert d.add_labels == ["Jev/Important", "Jev/Needs Reply", cfg.tags[0].label]
+    assert decide(cfg, account, allow).add_labels == ["Jev/Important"]  # no answer: no flags
+
+
+def test_flags_only_for_allowlist_and_keep_rules(cfg, account):
+    sig = make_signals()
+    assert flags_only(cfg, account, make_signals(sender="vip@partner.com"), None)
+    assert flags_only(cfg, account, sig, "important")
+    assert flags_only(cfg, account, sig, "action_required")
+    assert not flags_only(cfg, account, sig, "newsletter")
+    assert not flags_only(cfg, account, sig, "spam")
+    assert not flags_only(cfg, account, sig, "promotions")  # removed category
+    assert not flags_only(cfg, account, sig, None)
+
+
+def test_archive_group_skips_member_with_stricter_category_threshold(cfg, account):
+    # Category-level, not only account-level: marketing at 0.95 (above the 0.90 floor) is out.
+    cfg.by_key["marketing"].min_confidence = 0.95
+    d = decide(cfg, account, make_signals(), probs("newsletter", 0.50, marketing=0.45))
+    assert d.low_confidence and not d.archive
+    account.min_confidence = {"marketing": 0.90}  # the account override wins
+    d = decide(cfg, account, make_signals(), probs("newsletter", 0.50, marketing=0.45))
+    assert d.archive and d.archive_group
+
+
+@pytest.mark.parametrize("confidence", [0.60, 0.85])  # archive group / Review
+def test_unverified_flag_only_when_an_unsubscribe_was_in_play(cfg, account, confidence):
+    c = probs("marketing", confidence, newsletter=0.98 - confidence)
+    d = decide(cfg, account, make_signals(dmarc_pass=False), c)
+    assert not d.unsubscribe and not d.downgraded_to_spam
+
+
+def test_known_contact_flag_set_after_the_verified_and_group_checks(cfg, account):
+    c = make_classification("cold_outreach", 0.97)
+    for sig in (make_signals(dmarc_pass=False), make_signals(is_discussion_list=True)):
+        for rule in (None, "cold_outreach"):
+            d = decide(
+                cfg, account, sig, None if rule else c, rule, previous_contact="wrote_to_sender"
+            )
+            assert d.archive and not d.unsubscribe and not d.known_contact_kept
+    d = decide(cfg, account, make_signals(), c, previous_contact="wrote_to_sender")
+    assert d.known_contact_kept and not d.unsubscribe and not d.downgraded_to_spam

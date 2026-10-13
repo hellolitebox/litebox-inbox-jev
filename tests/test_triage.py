@@ -6,6 +6,7 @@ import pytest
 from conftest import GMAIL_PASS, make_classification
 
 from inbox_jev import digest, rules, triage
+from inbox_jev.classifier import JevError
 from inbox_jev.config import Mode, Settings
 from inbox_jev.db import Message, SenderRule, Unsubscribe, make_session_factory, now
 from inbox_jev.gmail import Email
@@ -103,6 +104,8 @@ def setup(cfg, account, monkeypatch):
         "Proposal": make_classification("important", 0.9, needs_reply=0.9),
         "50% off": make_classification("marketing", 0.97),
         "Maybe promo": make_classification("marketing", 0.6),
+        # Allowlisted: Jev is asked only for the flags; its category is ignored.
+        "Internal": make_classification("notification", 0.99),
     }
     gmail = FakeGmail(emails)
     monkeypatch.setattr(triage, "Gmail", lambda creds: gmail)
@@ -117,7 +120,7 @@ def test_act_mode_end_to_end(setup):
     ctx, gmail, account = setup
     run = triage.run_account(ctx, account, Mode.ACT)
     assert (run.processed, run.errors) == (4, 0)
-    assert ctx._classifier.calls == 3  # allowlisted sender skips Jev
+    assert ctx._classifier.calls == 4  # the allowlisted one only for the flags
 
     mods = {m[0]: m for m in gmail.modified}
     assert "Label_Jev/Needs Reply" in mods["1"][1] and mods["1"][2] == []
@@ -129,13 +132,15 @@ def test_act_mode_end_to_end(setup):
         rows = {m.gmail_id: m for m in s.query(Message)}
         assert rows["2"].archived and rows["2"].category == "marketing"
         assert rows["3"].source == "allowlist"
+        assert (rows["3"].category, rows["3"].archived) == ("important", False)
+        assert rows["3"].jev_category == "notification"  # Jev's answer, ignored
         assert rows["4"].low_confidence
         unsub = s.query(Unsubscribe).one()
         assert (unsub.list_key, unsub.method, unsub.status) == ("shop.com", "mailto", "ok")
 
     # second pass: nothing new, no duplicate work
     run2 = triage.run_account(ctx, account, Mode.ACT)
-    assert run2.processed == 0 and ctx._classifier.calls == 3
+    assert run2.processed == 0 and ctx._classifier.calls == 4
 
 
 def test_dry_run_touches_nothing_then_label_reprocesses(setup):
@@ -275,7 +280,9 @@ def test_reprocess_follows_category_the_user_changed_since_last_check(setup):
     assert "Label_Jev/Important" in add and "Label_Jev/Marketing" not in add
     assert "INBOX" not in remove
     assert gmail.sent == []
-    assert ctx._classifier.calls == calls + 2  # "50% off" skipped Jev: the new rule decided
+    # The new correction rule (important, a keep category) decided "50% off": Jev was only
+    # asked for its flags, like for the allowlisted "Internal"; 1 and 4 went through Jev again.
+    assert ctx._classifier.calls == calls + 4
     with ctx.sessions() as s:
         rule = s.query(SenderRule).filter_by(sender_key="promo@shop.com").one()
         assert (rule.category, rule.source, rule.active) == ("important", "correction", True)
@@ -292,7 +299,7 @@ def test_reprocess_leaves_alone_email_whose_needs_reply_was_removed(setup):
     gmail.modified.clear()
     triage.run_account(ctx, account, Mode.ACT)
     assert _mods(gmail, "1") == []
-    assert ctx._classifier.calls == calls + 2  # "1" was not sent to Jev again
+    assert ctx._classifier.calls == calls + 3  # "1" was not sent to Jev again
     with ctx.sessions() as s:
         row = s.query(Message).filter_by(gmail_id="1").one()
         assert row.status == "done" and row.mode == "act"
@@ -470,7 +477,12 @@ def test_previous_contact_is_sent_to_jev(setup):
     ctx, gmail, account = setup
     triage.run_account(ctx, account, Mode.LABEL)
     contacts = {s["subject"]: s.get("previous_contact") for s in ctx._classifier.states}
-    assert contacts == {"Proposal": "wrote_to_sender", "50% off": "never", "Maybe promo": "never"}
+    assert contacts == {
+        "Proposal": "wrote_to_sender",
+        "50% off": "never",
+        "Maybe promo": "never",
+        "Internal": None,  # allowlisted: asked for the flags, without previous_contact
+    }
     assert "acme.com" not in gmail.written_queries  # allowlisted sender: no lookup at all
 
 
@@ -1138,3 +1150,146 @@ def test_retry_holds_row_without_stored_message(setup):
         s.commit()
     out, rows = _retry(ctx, gmail, account)
     assert out == {"agency.io": "held: no stored message"} and rows["agency.io"] == ("failed", 1)
+
+
+def test_rule_to_removed_category_goes_through_jev_and_warns_once(setup, caplog):
+    ctx, gmail, account = setup
+    gmail.emails["5"] = email("5", "Shop <promo@shop.com>", "Second promo")
+    ctx._classifier.answers["Second promo"] = make_classification("marketing", 0.97)
+    with ctx.sessions() as s:
+        rules.set_rule(s, account.email, "promo@shop.com", "promotions", "manual")
+        s.commit()
+    run = triage.run_account(ctx, account, Mode.LABEL)
+    assert (run.processed, run.errors) == (5, 0)
+    with ctx.sessions() as s:
+        rows = {m.gmail_id: m for m in s.query(Message)}
+        assert (rows["2"].source, rows["2"].category) == ("jev", "marketing")
+        assert (rows["5"].source, rows["5"].category) == ("jev", "marketing")
+        rule = s.query(SenderRule).filter_by(sender_key="promo@shop.com").one()
+        assert (rule.category, rule.source, rule.active) == ("promotions", "manual", True)
+    warned = [
+        r for r in caplog.records if r.getMessage() == "sender rule ignored: unknown category"
+    ]
+    assert len(warned) == 1 and warned[0].sender_key == "promo@shop.com"
+
+
+def test_stale_exact_rule_sends_sender_to_jev_not_to_the_domain_rule(setup, caplog):
+    # promo@shop.com's own rule is the user's exception to @shop.com: with its category gone,
+    # Jev decides (and relearns the auto rule); the @shop.com rule doesn't apply.
+    ctx, gmail, account = setup
+    with ctx.sessions() as s:
+        rules.set_rule(s, account.email, "promo@shop.com", "promotions", "auto")
+        rules.set_rule(s, account.email, "@shop.com", "newsletter", "manual")
+        s.commit()
+    triage.run_account(ctx, account, Mode.ACT)
+    with ctx.sessions() as s:
+        row = s.query(Message).filter_by(gmail_id="2").one()
+        assert (row.source, row.category, row.jev_category) == ("jev", "marketing", "marketing")
+        rule = s.query(SenderRule).filter_by(sender_key="promo@shop.com").one()
+        assert (rule.category, rule.source, rule.hits, rule.active) == (
+            "marketing",
+            "auto",
+            1,
+            False,
+        )
+    warned = [
+        r for r in caplog.records if r.getMessage() == "sender rule ignored: unknown category"
+    ]
+    assert [r.sender_key for r in warned] == ["promo@shop.com"]
+
+
+def test_retry_holds_rule_decision_whose_exact_rule_went_stale(setup):
+    # The @agency.io rule would unsubscribe, but bob's own (now stale) rule overrides it.
+    ctx, gmail, account = setup
+    account.mode = Mode.ACT
+    gmail.emails = _archived(_pitch("9"))
+    with ctx.sessions() as s:
+        rules.set_rule(s, account.email, "bob@agency.io", "promotions", "manual")
+        rules.set_rule(s, account.email, "@agency.io", "cold_outreach", "manual")
+        _failed_unsub(s, account, "9", "agency.io", "cold_outreach", source="rule", confidence=1)
+    out, rows = _retry(ctx, gmail, account)
+    assert out == {"agency.io": "held: rule since removed"} and rows["agency.io"] == ("failed", 1)
+    assert gmail.sent == []
+
+
+class _JevDown(FakeClassifier):
+    def classify(self, state):
+        self.calls += 1
+        raise JevError("Jev is down")
+
+
+def test_flags_only_jev_failure_still_labels_allowlist_and_keep_rule(setup, caplog):
+    ctx, gmail, account = setup
+    ctx._classifier = _JevDown({})
+    with ctx.sessions() as s:
+        rules.set_rule(s, account.email, "promo@shop.com", "important", "correction")
+        s.commit()
+    run = triage.run_account(ctx, account, Mode.ACT)
+    assert (run.processed, run.errors) == (2, 2)  # only the Jev-decided emails fail
+    important = "Label_" + ctx.cfg.by_key["important"].label
+    mods = {m[0]: m for m in gmail.modified}
+    with ctx.sessions() as s:
+        rows = {m.gmail_id: m for m in s.query(Message)}
+        for gmail_id, source in (("2", "rule"), ("3", "allowlist")):
+            row = rows[gmail_id]
+            assert (row.status, row.source, row.category) == ("done", source, "important")
+            assert (row.jev_category, row.needs_reply, row.error_attempts) == (None, None, 0)
+            assert important in mods[gmail_id][1] and mods[gmail_id][2] == []
+            assert "Label_Jev/Needs Reply" not in mods[gmail_id][1]
+        assert (rows["1"].status, rows["4"].status) == ("error", "error")
+    warned = [r for r in caplog.records if r.getMessage() == "flags-only Jev call failed"]
+    assert sorted(r.id for r in warned) == ["2", "3"]
+    assert {r.error_type for r in warned} == {"TypeSafeError"}
+    assert not any("50% off" in r.getMessage() or "Internal" in r.getMessage() for r in warned)
+
+
+def test_keep_rule_and_allowlist_ask_jev_for_flags_only(setup):
+    ctx, gmail, account = setup
+    tag = {ctx.cfg.tags[0].key: 0.9}
+    ctx._classifier.answers["Internal"] = make_classification("notification", 0.99, 0.9, tag)
+    ctx._classifier.answers["50% off"] = make_classification("marketing", 0.99, 0.9)
+    with ctx.sessions() as s:
+        rules.set_rule(s, account.email, "promo@shop.com", "important", "correction")
+        rules.set_rule(s, account.email, "w@weird.biz", "newsletter", "manual")
+        s.commit()
+    triage.run_account(ctx, account, Mode.ACT)
+    asked = {st["subject"]: st for st in ctx._classifier.states}
+    assert set(asked) == {"Proposal", "Internal", "50% off"}  # not the newsletter rule
+    assert (
+        "previous_contact" not in asked["Internal"] and "previous_contact" not in asked["50% off"]
+    )
+    assert "promo@shop.com" not in gmail.written_queries
+    mods = {m[0]: m for m in gmail.modified}
+    for gmail_id in ("2", "3"):
+        assert "Label_Jev/Needs Reply" in mods[gmail_id][1] and mods[gmail_id][2] == []
+    assert "Label_" + ctx.cfg.tags[0].label in mods["3"][1]
+    assert mods["4"][2] == ["INBOX"]  # the newsletter rule archived it, no Jev
+    with ctx.sessions() as s:
+        rows = {m.gmail_id: m for m in s.query(Message)}
+        assert (rows["2"].source, rows["2"].category, rows["2"].confidence) == (
+            "rule",
+            "important",
+            1.0,
+        )
+        assert (rows["2"].jev_category, rows["2"].needs_reply) == ("marketing", 0.9)
+        assert (rows["3"].source, rows["3"].category) == ("allowlist", "important")
+        # Flags-only answers never count toward an auto rule ("Internal": notification 0.99).
+        assert s.query(SenderRule).filter_by(source="auto").count() == 0
+        text = digest.build(s, ctx.cfg, account.email)
+    reply_section = text.split("Piden respuesta")[1]
+    assert "50% off" in reply_section and "Internal" in reply_section
+
+
+def test_dry_run_learns_no_auto_rules(setup):
+    ctx, gmail, account = setup
+    for _ in range(3):  # "50% off" (marketing 0.97) would earn a rule in three passes
+        with ctx.sessions() as s:
+            s.query(Message).delete()
+            s.commit()
+        triage.run_account(ctx, account, Mode.DRY_RUN)
+    with ctx.sessions() as s:
+        assert s.query(SenderRule).count() == 0
+    triage.run_account(ctx, account, Mode.LABEL)
+    with ctx.sessions() as s:
+        rule = s.query(SenderRule).one()
+        assert (rule.sender_key, rule.hits, rule.active) == ("promo@shop.com", 1, False)

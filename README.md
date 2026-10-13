@@ -43,11 +43,16 @@ alternatives that were rejected, are in **[docs/decisions/](docs/decisions/READM
 for each new inbox email:
 
 1. **Allowlist** (`allow_domains` / `allow_senders` in `accounts.yaml`): always *important*, never
-   touched, Jev isn't called.
-2. **Sender rules** skip Jev. They come from your corrections, from `inbox-jev rules set`, or are
-   created automatically after 3 consistent answers at ≥ 0.95 (never from a group archive, a
-   known contact's skipped unsubscribe, or an answer with some *keep* probability, so senders
-   that mix routine and action-needed mail keep going through Jev).
+   archived. Jev is asked only for "needs a reply" and the tags.
+2. **Sender rules** decide the category. They come from your corrections, from
+   `inbox-jev rules set`, or are created automatically after 3 consistent answers at ≥ 0.95 in
+   `label`/`act` (never in `dry_run`, never from a group archive, a known contact's pitch, or an
+   answer with some *keep* probability, so senders that mix routine and action-needed mail keep
+   going through Jev). Rules to archive or spam categories skip Jev; rules to keep categories
+   still ask it for "needs a reply" and the tags, like the allowlist (if that call fails, the
+   email is still labeled, just without those flags). A rule whose category was removed from
+   `categories.yaml` is ignored (with a warning in the log): Jev decides, even when a `@domain`
+   rule also matches.
 3. **Jev** gets the headers that matter, the start of the body (`BODY_CHARS`; the HTML when the
    `text/plain` part is just a "view this in your browser" stub) and `previous_contact`: whether
    you ever wrote to the sender or their domain, from a search over your sent mail. It answers
@@ -85,7 +90,7 @@ with `inbox-jev senders backfill` (safe to run again). Details:
 
 | `MODE` | DB + digest | Gmail labels | archive / spam / unsubscribe |
 |---|---|---|---|
-| `dry_run` | ✅ | | |
+| `dry_run` | ✅ (learns no sender rules) | | |
 | `label` | ✅ | ✅ | |
 | `act` | ✅ | ✅ | ✅ |
 
@@ -148,6 +153,8 @@ shows the whole backlog, including re-listed "needs reply" and low-confidence em
 - When a category's meaning changes (for example `spam` narrowed to fraud), review
   `inbox-jev rules list --all` for rules with that category (auto, correction or manual) and
   `rules delete` the ones that no longer fit: a rule skips Jev, so it keeps the old meaning.
+- When you remove a category, its rules are ignored (each logged once per run as `sender rule
+  ignored: unknown category`) and their senders go through Jev; `rules delete` them.
 
 ### Adding a category / label
 

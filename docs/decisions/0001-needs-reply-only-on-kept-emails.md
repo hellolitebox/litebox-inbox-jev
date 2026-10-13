@@ -1,6 +1,6 @@
 # 0001. Flag "needs reply" only on emails that stay in the inbox
 
-- Status: Accepted
+- Status: Accepted (rule/allowlist consequence superseded by [0020](0020-flags-for-allowlist-and-keep-rules.md))
 - Date: 2026-10-11
 - PR: #2 (extended by #8 and #9)
 
@@ -23,7 +23,8 @@ works in `dry_run` too.
 
 ## Consequences
 - An archived email never carries `Jev/Needs Reply`, even if Jev thought it expected a reply.
-- Rule and allowlist decisions don't ask Jev, so they never get the label (see
-  [how-it-decides, Known gaps](../how-it-decides.md#known-gaps)).
+- Rule and allowlist decisions don't ask Jev, so they never get the label (superseded by
+  [0020](0020-flags-for-allowlist-and-keep-rules.md): allowlist and keep rules now ask Jev for
+  the flags).
 - The reply signal is still used on the archive group
   ([0008](0008-needs-reply-veto-with-keep-signal.md)).
