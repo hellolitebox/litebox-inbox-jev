@@ -4,15 +4,16 @@
 # action:
 #   keep                 stay in the inbox
 #   archive              remove from inbox
-#   archive_unsubscribe  remove from inbox and unsubscribe (only with dmarc=pass + List-Unsubscribe;
-#                        otherwise it keeps its category and label and is only archived, never
-#                        unsubscribed or spammed)
+#   archive_unsubscribe  remove from inbox and unsubscribe (only with dmarc=pass + List-Unsubscribe
+#                        and never through a group or discussion list; otherwise it keeps its
+#                        category and label and is only archived, never unsubscribed or spammed.
+#                        See README "Unsubscribe safety")
 #   spam                 move to Gmail Spam
 # min_confidence: below it, nothing destructive happens; the email stays in the inbox with the
 #   review label plus the suggested category label (unless archive_group_min_confidence below
 #   applies).
 # unsubscribe_known_contacts (archive_unsubscribe only, default true): false archives but never
-#   unsubscribes when I have written to the sender or their domain.
+#   unsubscribes when you have written to the sender or their domain.
 categories:
   - key: important
     label: Jev/Important

@@ -3,83 +3,159 @@
 Triage your Gmail inbox with [TypeSafe Jev](https://typesafe.ai). Every few minutes it reads
 new inbox emails, asks Jev which category they belong to (with a calibrated confidence), and:
 
-- **labels** them (`Jev/Important`, `Jev/Transactional`, `Jev/Marketing`, …),
-- **archives** receipts, tool notifications, newsletters and cold sales outreach (`Jev/Outreach`),
-- **unsubscribes** from marketing and cold outreach sequences (RFC 8058 one-click or `mailto:`)
-  and **moves scams/phishing to Spam**,
+- **labels** them (`Jev/Important`, `Jev/Action`, `Jev/Marketing`, …),
+- **archives** receipts, tool notifications, newsletters, marketing and cold sales outreach,
+- **unsubscribes** from verified marketing and cold-outreach sequences (RFC 8058 one-click or
+  `mailto:`) and **moves scams/phishing to Spam**,
+- keeps what needs you in the inbox: personal email (`Jev/Important`) and automated email that
+  needs an action (`Jev/Action`: approve a payment, update a card, verify a domain…),
 - leaves anything it is **not sure about** in the inbox with `Jev/Review`,
 - **learns** from your corrections (change a label or move an email back → sender rule),
 - sends a **daily Slack digest** of what it did.
 
 Everything is recorded in a database (SQLite by default) so it can be audited and undone.
 
+## Categories and labels
+
+Defaults from [`categories.yaml`](categories.yaml) (editable, see
+[Adding a category](#adding-a-category--label)):
+
+| Category | Label | Action | `min_confidence` |
+|---|---|---|---|
+| `important` | `Jev/Important` | keep | — |
+| `action_required` | `Jev/Action` | keep | — |
+| `transactional` | `Jev/Transactional` | archive | 0.80 |
+| `notification` | `Jev/Notifications` | archive | 0.80 |
+| `newsletter` | `Jev/Newsletters` | archive | 0.80 |
+| `marketing` | `Jev/Marketing` | archive + unsubscribe | 0.90 |
+| `cold_outreach` | `Jev/Outreach` | archive + unsubscribe (never from known contacts) | 0.90 |
+| `spam` (scams, phishing) | `Jev/Spam` | move to Spam | 0.90 |
+
+Extra labels: `Jev/Needs Reply` (Jev thinks the sender expects a reply; only on emails that stay
+in the inbox), `Jev/Invoices` (tag: an invoice to pay), `Jev/Review` (low confidence) and
+`Jev/Processed` (technical marker).
+
 ## How it decides
 
-1. **Allowlist** (`accounts.yaml`): matching senders/domains are always *important*, never touched.
-   For email relayed by a Google Group ("'Jane' via Hello <hello@yourco.com>"), the sender is
-   the author from `X-Original-Sender`, trusted only when the group is on a domain listed in the
-   account's `group_domains` (opt-in: none by default, not even the account's own domain), its
-   domain passes DMARC (Gmail's topmost `Authentication-Results`) and `Mailing-list` names the
-   same group. Anyone can write those headers from a domain they own or from a public provider
-   address, and anyone can create an `@googlegroups.com` group, so other groups stay keyed on
-   the group address. `group_domains` rejects public providers, `googlegroups.com` and bare
-   suffixes such as `co.uk`; list only domains whose Google Workspace you control. Rules,
-   corrections, the allowlist and `previous_contact` all use the author. A group only counts as
-   allowlisted when its exact address is in `allow_senders`; `allow_domains: [yourco.com]`
-   doesn't trust strangers who write to it. `inbox-jev senders backfill` re-reads stored group
-   emails saved before this and stores their author as sender (safe to run again; it skips
-   emails deleted in Gmail and stops on any other Gmail error).
-2. **Sender rules**: learned from your corrections, set manually (`inbox-jev rules set`), or
-   created automatically after 3 consistent high-confidence answers. They skip Jev. An answer
-   doesn't count toward an automatic rule when it was a group archive (see below) or when the
-   keep categories (`important`, `action_required`) together get `auto_rule.max_keep_probability`
-   (0.02) or more, and a keep answer restarts a pending archive rule, so senders that mix routine
-   and action-needed mail (for example `noreply@github.com`) keep going through Jev.
-3. **Jev**: one `Choice` over the categories in [`categories.yaml`](categories.yaml), one `Noul`
-   for "needs a reply", plus one `Noul` per tag. Jev also gets `previous_contact`: whether you
-   ever sent an email to the sender (`wrote_to_sender`), to someone else at their domain
-   (`wrote_to_their_domain`, skipped for free mail providers and your own domain) or `never`.
-   It comes from one or two Gmail searches over your sent mail, cached per run, and is the
-   strongest hint that a personal-looking email is cold outreach.
-4. **Safety checks**:
-   - An `archive_unsubscribe` category (*marketing*, *cold_outreach*) without `dmarc=pass` or
-     without a `List-Unsubscribe` header keeps its category and label and is archived, but never
-     unsubscribed (unsubscribing from an unverified sender only confirms your address) and never
-     moved to Spam. This also applies when a sender rule decided the category. Links in the body
-     are never followed. The `downgraded_to_spam` column keeps its historical name and now means
-     "unsubscribe skipped: unverified sender".
-   - Mail relayed by a discussion list or group is archived but never unsubscribed: its
-     `List-Unsubscribe` would remove *you* from the group. That is any email with a `List-Post`
-     header (Google Groups, Mailman, groups.io, LISTSERV, Discourse; ESPs and sequence tools
-     don't send it), an unsubscribe target on a Google Groups host, or a list or sender on your
-     own domain (such as a pitch sent to `hello@yourcompany.com`).
-   - *cold_outreach* from someone you have written to (or whose domain you have written to) is
-     archived but never unsubscribed (`unsubscribe_known_contacts: false` in `categories.yaml`):
-     a "pitch" from a known contact is where Jev is most likely wrong, and the opt-out can cover
-     all of that company's mail. This also applies when a sender rule (auto, manual or
-     correction) decided the category: before unsubscribing, the rule path runs the same
-     sent-mail check, so a relationship that starts after the rule exists is covered too. Such
-     Jev answers don't earn an auto rule either. When the sent-mail check fails (unknown), the
-     unsubscribe goes ahead under the other checks.
-   - Below a category's `min_confidence` nothing destructive happens, with one exception:
-     when Jev's top answer is an archive category and all archive categories together reach
-     `archive_group_min_confidence` (0.90 by default), the email is archived under the top
-     category. Jev is sure it goes away, just not which label fits (for example notification
-     0.55 / newsletter 0.42). This never unsubscribes or moves to Spam, and it can only add
-     confidence, never lower the bar: the floor is at least the top category's own threshold
-     (including an account-level `min_confidence`); a category whose account-level
-     `min_confidence` is above that floor doesn't count toward the sum; with `act_categories`,
-     only the archive categories listed there count; and an email Jev thinks expects a reply
-     (`needs_reply` at or above its threshold) stays in Review with `Jev/Needs Reply` when I
-     have written to the sender or their domain, or when the keep categories (`important`,
-     `action_required`) together reach `archive_group_reply_keep_probability` (0.05, at most
-     `1 - archive_group_min_confidence`). Otherwise the reply signal is ignored for the group:
-     every pitch from a stranger "expects a reply".
-   - Categories with `action: keep` other than `important` (by default `action_required`:
-     automated emails that need you to approve, pay, verify or fix something, including a held
-     message pending your approval) stay in the inbox and get their own section in the digest.
-   - Unsubscribe URLs must be public `https` hosts (no redirects, no private IPs).
-   - Each list is unsubscribed from at most once, and each run has a cap.
+For each new inbox email, in order:
+
+1. **Allowlist** (`allow_domains` / `allow_senders` in `accounts.yaml`): always *important*, never
+   touched, Jev isn't called.
+2. **Sender rules** skip Jev. They come from your corrections, from `inbox-jev rules set`, or are
+   created automatically after 3 consistent answers at ≥ 0.95. An answer doesn't count toward an
+   automatic rule when it was a group archive (below), when the keep categories other than the
+   decided one (by default `important` + `action_required`) together get
+   `auto_rule.max_keep_probability` (0.02) or more, or when it was cold outreach from a known
+   contact. A keep answer, or that keep signal, restarts a pending archive rule. So senders that
+   mix routine and action-needed mail (for example `noreply@github.com`) keep going through Jev.
+3. **Jev** gets the headers that matter, the start of the body (`BODY_CHARS`), and:
+   - one `Choice` over the categories, one `Noul` for "needs a reply" and one per tag;
+   - `previous_contact`: whether you ever sent an email to the sender (`wrote_to_sender`), to
+     someone else at their domain (`wrote_to_their_domain`, skipped for free mail providers and
+     your own domain) or `never`. It comes from one or two Gmail searches over your sent mail,
+     cached per run, and is the strongest hint that a personal-looking email is cold outreach;
+   - for group mail, `original_sender` and `sent_via_group` (see
+     [Groups and mailing lists](#groups-and-mailing-lists)).
+
+   The body is the `text/plain` part. With no `text/plain` at all it is the HTML stripped of
+   tags, and when that is empty too, Gmail's snippet. A plain part that is a stub inside a
+   `multipart/alternative` ("your mail client doesn't support HTML, open this URL", or even
+   `undefined`) is replaced by the stripped HTML: under 300 characters (URLs excluded) next to
+   HTML with at least 3× as much text (and ≥ 60 characters). Bulk senders such as emBlue or
+   Constant Contact do this, and Jev would otherwise classify blind. Your own note above a
+   forwarded message is never replaced.
+4. **Policy** turns the answer into actions (see the safety rules below), and the **mode**
+   decides how much of that is applied.
+
+### Confidence
+
+- At or above a category's `min_confidence`, its action applies.
+- Below it nothing destructive happens: the email stays in the inbox with `Jev/Review` plus the
+  suggested category label. Thresholds are asymmetric: *marketing*, *cold_outreach* and *spam*
+  (0.90) need more certainty than the archive-only categories (0.80). Below 0.90, *marketing* and
+  *cold_outreach* are archived only through the archive group (next item), which never
+  unsubscribes.
+- **Archive group.** When Jev's top answer is an archive category and all archive categories
+  together reach `archive_group_min_confidence` (0.90), the email is archived under the top
+  category: Jev is sure it goes away, just not which label fits (for example notification 0.55 /
+  newsletter 0.42). This never unsubscribes or spams, and it can only add confidence, never lower
+  the bar:
+  - the floor is at least the top category's own threshold (including an account-level
+    `min_confidence`), and a category whose account-level `min_confidence` is above that floor
+    doesn't count toward the sum;
+  - with `act_categories`, only the archive categories listed there count;
+  - an email Jev thinks expects a reply (`needs_reply` at or above its threshold) stays in Review
+    with `Jev/Needs Reply` when you have written to the sender or their domain, or when
+    `important` + `action_required` together reach `archive_group_reply_keep_probability` (0.05,
+    at most `1 - archive_group_min_confidence`). Otherwise the reply signal is ignored for the
+    group: every pitch from a stranger "expects a reply".
+- Keep categories other than `important` (by default `action_required`, including a held group
+  message pending your approval) stay in the inbox and get their own section in the digest.
+
+### Unsubscribe safety
+
+An unsubscribe is irreversible, so a triage pass (`inbox-jev run`, including the sender-rule path
+below) unsubscribes only when **all** of these hold:
+
+- `MODE=act` and, if the account sets `act_categories`, the final category is listed there;
+- the category is `archive_unsubscribe` (*marketing*, *cold_outreach*) at or above its own
+  `min_confidence` (a group archive never unsubscribes);
+- the sender passes DMARC (Gmail's topmost `Authentication-Results` header) and sends a
+  `List-Unsubscribe` header. Otherwise the email keeps its category and is archived, never
+  unsubscribed (that would only confirm your address to an unverified sender) and never moved to
+  Spam. Links in the body are never followed. The `downgraded_to_spam` column keeps its historical
+  name and means "unsubscribe skipped: unverified sender";
+- it isn't relayed by a group or discussion list, whose `List-Unsubscribe` would remove *you*
+  from the group: any email with a `List-Post` header (Google Groups, Mailman, groups.io,
+  LISTSERV, Discourse; ESPs and sequence tools don't send it), an unsubscribe target on a Google
+  Groups host, a list or sender on your own domain, or any relayed group email;
+- for *cold_outreach* (`unsubscribe_known_contacts: false`), you have never written to the sender
+  or their domain: a "pitch" from a known contact is where Jev is most likely wrong, and the
+  opt-out can cover all of that company's mail. When the sent-mail check fails (unknown), the
+  unsubscribe goes ahead under the other checks;
+- the list wasn't unsubscribed from already (once per list), and the run's cap
+  (`MAX_UNSUBSCRIBES_PER_RUN`) isn't reached.
+
+The method then depends on the `List-Unsubscribe` header:
+
+- an `https` URL is used only with RFC 8058 one-click (`List-Unsubscribe-Post:
+  List-Unsubscribe=One-Click`), and only when the URL is a public `https` host (no redirects, no
+  private IPs). If it fails, or no URL passes that check, a `mailto:` is tried next;
+- otherwise the first `mailto:` gets an email sent from your Gmail (no URL check applies);
+- otherwise nothing is sent: the row is `manual_pending` and listed in the digest for you to click.
+
+All of this also applies when a sender rule (auto, manual or correction) decided the category:
+before unsubscribing, the rule path re-runs the same checks, including the sent-mail search, so a
+relationship that starts after the rule exists is covered too.
+
+> **Exception: don't run `inbox-jev unsubscribe-retry` for now.** It retries `failed` rows but
+> re-checks only DMARC and the one-click URL guard. It skips the group / `List-Post` / own-domain
+> checks, the known-contact check, the run cap, `MODE` and `act_categories`, so it can unsubscribe
+> you from a group or from a contact's mail that `run` would now spare. A fix that makes it apply
+> the same checks is tracked separately.
+
+### Groups and mailing lists
+
+Google Groups rewrites `From` to the group ("'Jane' via Hello <hello@yourco.com>") and keeps the
+author in `X-Original-Sender`. For groups on a domain listed in the account's `group_domains`,
+the author is used as the sender, so rules, corrections, the allowlist, `previous_contact` and
+the digest apply to the person, not to everyone who writes to the group. The author is trusted
+only when:
+
+- the group's domain is in `group_domains`. This is opt-in: empty by default, not even the
+  account's own domain. Anyone can write these headers from a domain they own or from a public
+  provider address, and anyone can create an `@googlegroups.com` group, so other groups stay
+  keyed on the group address. `group_domains` rejects public providers, `googlegroups.com` and
+  bare suffixes such as `co.uk`; list only domains whose Google Workspace you control;
+- the group's domain passes DMARC and `Mailing-list` names the same group.
+
+For a group on a trusted domain (in `group_domains`), the allowlist is checked against the
+author, so `allow_domains: [yourco.com]` doesn't trust strangers who write to `hello@yourco.com`;
+allowlist the group itself by putting its exact address in `allow_senders`. For any other group
+the sender is the group address, so `allow_domains` matching the group's domain allowlists every
+email sent through it. Group
+emails stored before this existed can be fixed with `inbox-jev senders backfill` (safe to run
+again; it skips emails deleted in Gmail and stops on any other Gmail error).
 
 ### Modes
 
@@ -204,15 +280,16 @@ uv run inbox-jev digest --dry-print
 
 | Command | What it does |
 |---|---|
+| `inbox-jev auth add EMAIL` | Authorize a Gmail account (opens the browser; token → `secrets/tokens/`) |
 | `inbox-jev run [-a EMAIL] [--mode M] [--limit N] [--lookback 30d]` | One triage pass (what the timer runs) |
 | `inbox-jev digest [-a EMAIL] [--hours 24] [--dry-print]` | Slack digest |
 | `inbox-jev restore -a EMAIL --since 1d [--category marketing]` | Undo: back to inbox, remove labels |
 | `inbox-jev reprocess -a EMAIL --category KEY [--low-confidence-only]` | Have the next `act` run redo that category's emails still in the inbox (pair with `run --lookback`) |
-| `inbox-jev rules list [--all]` / `rules set -a EMAIL @domain.com newsletter` / `rules delete` | Sender rules |
-| `inbox-jev unsubscribe-retry` | Retry failed unsubscribes |
+| `inbox-jev rules list [-a EMAIL] [--all]` / `rules set -a EMAIL @domain.com newsletter` / `rules delete -a EMAIL SENDER` | Sender rules |
+| `inbox-jev unsubscribe-retry [-a EMAIL]` | Retry failed unsubscribes. **Don't use for now**: it re-checks only DMARC and the URL guard, not the other [unsubscribe checks](#unsubscribe-safety) |
 | `inbox-jev senders backfill [-a EMAIL]` | Store the author, not the group, for group emails saved before authors were recovered |
-| `inbox-jev stats [--days 7]` | Counts per category |
-| `inbox-jev labels rename OLD NEW [-a EMAIL]` | Rename a label in Gmail and the DB (see below) |
+| `inbox-jev stats [-a EMAIL] [--days 7]` | Counts per category |
+| `inbox-jev labels rename OLD NEW [-a EMAIL]` | Rename a label in Gmail and the DB (see [Renaming a label](#renaming-a-label)) |
 
 ## Deploy (Docker + systemd timers)
 
@@ -238,12 +315,40 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now inbox-jev-triage.timer inbox-jev-digest.timer
 ```
 
-- Triage runs every 10 minutes; the digest runs daily at 08:00 (edit `OnCalendar`/timezone in
-  the `.timer` files).
+- Triage runs every 10 minutes, so a new email can sit in the inbox for up to ~10 minutes before
+  it is handled; the digest runs daily at 08:00 America/Argentina/Buenos_Aires (edit
+  `OnCalendar`/timezone in the `.timer` files).
 - Run logs (JSON lines): `journalctl -u inbox-jev-triage -f`.
 - Browse the DB: `docker compose --profile viewer up -d viewer`, then
   `ssh -L 8001:localhost:8001 <host>` and open http://localhost:8001. It is bound to localhost
   on the server, never public.
+
+## Daily digest
+
+One Slack DM per account (`slack_user_id`), by default at 08:00. It lists: totals per category
+and how many are in Review; one section per keep category other than `important` (e.g.
+`Jev/Action`); emails that need a reply; unsubscribes done, pending a manual click, or failed;
+low-confidence emails; corrections learned; and run errors. Preview it with
+`inbox-jev digest --dry-print`.
+
+## Updating a deployment
+
+```bash
+cd /opt/inbox-jev
+sudo systemctl stop inbox-jev-triage.timer        # no pass while you change things
+# wait for a running pass: the oneshot service is "activating" while it runs, not "active"
+while [ "$(systemctl show -p ActiveState --value inbox-jev-triage.service)" = activating ]; do
+  sleep 2
+done
+# SQLite only (the default DATABASE_URL). data/ belongs to APP_UID with mode 700: needs sudo
+sudo cp -p data/inbox-jev.db "data/inbox-jev.db.bak-$(date +%Y%m%d%H%M)"
+git pull && docker compose build
+# one-off steps from the PR's deploy notes (reprocess, senders backfill, rules review…)
+sudo systemctl start inbox-jev-triage.timer
+```
+
+New `act_categories` keys go into `accounts.yaml` only after the code that knows them is
+deployed (see [Rolling out a category change](#rolling-out-a-category-change)).
 
 ## Database
 
@@ -262,7 +367,9 @@ To use a hosted DB, install its driver and change the URL. For example, Postgres
 ## Privacy
 
 Email headers and the first `BODY_CHARS` characters of each body are sent to the TypeSafe API.
-Email bodies are not stored in the database, only sender, subject and the classification.
+Email bodies are not stored in the database or logged, only sender, subject and the
+classification. `previous_contact` runs Gmail searches over your sent mail; its result is logged on each
+"message processed" line but not stored in the DB.
 
 ## License
 
