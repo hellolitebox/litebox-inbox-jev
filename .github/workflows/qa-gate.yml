@@ -1,0 +1,43 @@
+name: QA gate
+
+# Turns the latest "## QA review" comment on a PR into the `qa-verdict` commit status of its head
+# (scripts/qa_gate.py). The repo ruleset requires that status, so a PR merges only when QA
+# approved the exact commit being merged. Re-evaluated on every push to the PR and on every
+# comment. The comment-triggered run uses the workflow and script from `main`.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created, edited]
+
+permissions:
+  contents: read        # commits and compare, for update-branch merges
+  pull-requests: read   # the PR head and base
+  issues: read          # the PR comments
+  statuses: write       # the qa-verdict status
+
+concurrency:
+  group: qa-gate-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: QA gate
+    # Only the commit status is called `qa-verdict`: a job of that name would be a check run
+    # with the same name, green whenever the script exits 0. Dependabot's pull_request runs
+    # get a read-only token and can't post statuses, so they are skipped: its PRs get the
+    # status from the comment-triggered run, once the session posts its review.
+    if: >-
+      (github.event_name == 'pull_request' && github.actor != 'dependabot[bot]')
+      || github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: scripts/qa_gate.py
+          sparse-checkout-cone-mode: false
+      - run: python3 scripts/qa_gate.py --repo "$GITHUB_REPOSITORY" --pr "$PR"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number || github.event.issue.number }}

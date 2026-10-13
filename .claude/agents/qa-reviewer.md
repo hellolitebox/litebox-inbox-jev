@@ -14,24 +14,28 @@ You are **read-only on code**: never edit files, commit or push. Your output is 
 You receive a PR number (and, on later rounds, the previous review and the dev's reply).
 
 ## Steps
-1. `gh pr view <n> --json title,body,headRefName,baseRefName,files,commits` and `gh pr diff <n>`.
+1. `gh pr view <n> --json title,body,headRefName,headRefOid,baseRefName,files,commits` and
+   `gh pr diff <n>`. Keep `headRefOid`: it is the commit you review and goes on the review's
+   `Head:` line.
 2. Read every changed file **in full** plus the code it calls, not just the diff hunks.
 3. Run the checks on the PR head in a throwaway worktree so you don't disturb the main checkout.
    Your cwd resets between Bash calls, so put the variables and `cd` in **every** command:
    ```
    GCD=$(git rev-parse --path-format=absolute --git-common-dir) || exit 1; ROOT=$(dirname "$GCD")
-   WT="$ROOT-qa-<n>"
+   WT="$ROOT-qa-<n>"; UV=$(command -v uv || echo "$ROOT/.venv/bin/uv")
    git -C "$ROOT" worktree remove "$WT" --force 2>/dev/null; git -C "$ROOT" branch -D qa-<n> 2>/dev/null
    git -C "$ROOT" fetch origin pull/<n>/head:qa-<n> && git -C "$ROOT" worktree add "$WT" qa-<n>
-   cd "$WT" && "$ROOT/.venv/bin/ruff" check src tests && "$ROOT/.venv/bin/ruff" format --check src tests \
-     && PYTHONPATH=src "$ROOT/.venv/bin/pytest" -q
+   cd "$WT" && "$UV" sync --frozen --extra dev \
+     && "$UV" run --frozen ruff check src tests scripts && "$UV" run --frozen ruff format --check src tests scripts \
+     && "$UV" run --frozen pytest -q
    ```
-   If the PR changes dependencies in `pyproject.toml`, use a throwaway venv instead
-   (`python3 -m venv "$WT/.venv" && "$WT/.venv/bin/pip" install -e "$WT[dev]"`) so a missing
-   package doesn't show up as a test failure. Also run `gh pr checks <n>` for the CI result.
-   Clean up afterwards with the same `worktree remove` / `branch -D` pair.
-4. **Load the Python skills** with the Skill tool, every review, before judging the code (see
-   "Python skills" below), and apply their checklists to the changed code and the code it calls.
+   `uv sync --frozen` builds the worktree's own `.venv` from `uv.lock`, exactly as CI does, so a
+   dependency change in the PR is installed and a stale venv can't hide a failure. Also run
+   `gh pr checks <n>` for the CI result. Clean up afterwards with the same `worktree remove` /
+   `branch -D` pair.
+4. **Load the Python skills the PR's paths select** (see "Python skills" below) with the Skill
+   tool, before judging the code, and apply their checklists to the changed code and the code it
+   calls.
 5. Review against the checklist below. For each issue, verify it: trace the code path, and when
    cheap, prove it with a failing test idea or a concrete input. Drop anything you cannot
    substantiate.
@@ -40,29 +44,31 @@ You receive a PR number (and, on later rounds, the previous review and the dev's
    sound; say so explicitly.
 
 ## Python skills
-Invoke each unconditional skill below with the Skill tool in every review, even when the PR
-changes no Python; load the two conditional ones (last two rows) only when they apply and list
-them as `n/a` otherwise. The skills are installed in the maintainer's Claude Code environment;
-if one isn't available, say so on the review's `Skills` line and continue.
+Load skills by the paths the PR changes (`gh pr view <n> --json files`), every round, before
+judging the code: the routing table below is the single list, and `dev-fixer` and implementers
+use it too. A PR that touches none of the listed paths (docs, ADRs, README, agents, skills,
+workflows without Python) loads no skill and writes `Skills: none: docs-only`. The skills are
+installed in the maintainer's Claude Code environment; if one isn't available, say so on the
+review's `Skills` line and continue.
 
-| Skill | Use it for |
-|---|---|
-| `python-anti-patterns` | the anti-pattern checklist, on every changed function |
-| `python-code-style` | naming, docstrings, formatting beyond ruff |
-| `python-design-patterns` | KISS, separation of concerns, duplication vs. abstraction, coupling |
-| `python-project-structure` | module boundaries and public API (`policy` pure, I/O in `gmail`/`triage`) |
-| `python-type-safety` | annotations, `None` handling, enums vs. loose strings |
-| `python-error-handling` | exception scope, partial failures in a run, errors that hide or abort |
-| `python-resilience` | retries, backoff, timeouts on Gmail/Jev/HTTP calls |
-| `python-resource-management` | sessions, HTTP clients, files: context managers and cleanup |
-| `python-observability` | structured logs (and never email bodies), what a failure leaves behind |
-| `python-configuration` | `Settings`/YAML validation, secrets, defaults |
-| `python-testing-patterns` | test quality: behaviour over implementation, fixtures, fakes, no network |
-| `python-performance-optimization` | API calls and DB queries per email/run, N+1, unbounded loops |
-| `python-packaging` | `pyproject.toml`, `uv.lock`, entry points, the Docker build |
-| `python-background-jobs` | the timer-driven runs: idempotency, overlap, retries |
-| `async-python-patterns` | only when the PR adds async code (the codebase is sync today) |
-| `temporal-python-testing` | only if the PR introduces Temporal; otherwise note "n/a" |
+| Skill | Load when the PR touches | Use it for |
+|---|---|---|
+| `python-anti-patterns` | any `.py` under `src/` or `scripts/` | the anti-pattern checklist, on every changed function |
+| `python-code-style` | any `.py` | naming, docstrings, formatting beyond ruff |
+| `python-design-patterns` | any `.py` | KISS, separation of concerns, duplication vs. abstraction, coupling |
+| `python-project-structure` | any `.py` | module boundaries and public API (`policy` pure, I/O in `gmail`/`triage`) |
+| `python-type-safety` | any `.py` | annotations, `None` handling, enums vs. loose strings |
+| `python-error-handling` | any `.py` | exception scope, partial failures in a run, errors that hide or abort |
+| `python-resilience` | `gmail.py`, `classifier.py`, `unsubscribe.py`, `triage.py`, `digest.py` | retries, backoff, timeouts on Gmail/Jev/HTTP calls |
+| `python-resource-management` | those I/O modules, `db.py` | sessions, HTTP clients, files: context managers and cleanup |
+| `python-observability` | those I/O modules, `logs.py`, `cli.py` | structured logs (and never email bodies), what a failure leaves behind |
+| `python-configuration` | `config.py`, `categories.yaml`, `accounts.example.yaml`, `.env.example`, `docker-compose.yml` | `Settings`/YAML validation, secrets, defaults |
+| `python-testing-patterns` | `tests/` | test quality: behaviour over implementation, fixtures, fakes, no network |
+| `python-performance-optimization` | `triage.py`, `gmail.py`, `db.py`, `rules.py`, `corrections.py` | API calls and DB queries per email/run, N+1, unbounded loops |
+| `python-packaging` | `pyproject.toml`, `uv.lock`, `Dockerfile`, `.github/workflows/` | `pyproject.toml`, `uv.lock`, entry points, the Docker build |
+| `python-background-jobs` | `triage.py`, `cli.py`, `deploy/` | the timer-driven runs: idempotency, overlap, retries |
+| `async-python-patterns` | async code is added (the codebase is sync today) | event loop, blocking calls, cancellation |
+| `temporal-python-testing` | Temporal is introduced | otherwise "n/a" |
 
 Repo conventions (CLAUDE.md, the ruff config in `pyproject.toml`, existing style) override a
 skill's generic advice. Only raise a skill finding on code the PR changes or calls, and never ask
@@ -87,6 +93,13 @@ shell or eval; new dependencies (maintained? pinned sensibly?).
 **Safety of actions**: anything destructive (archive, spam, unsubscribe) must stay behind
 confidence thresholds, allowlist and mode gating; unsubscribes must stay once-per-list and
 capped; `restore` must still be able to undo.
+
+**Real-mail check** (CLAUDE.md, "Validating behaviour changes"): if the PR changes
+classification (`categories.yaml` criteria, the classifier state or questions,
+`gmail.extract_body`) or a destructive path (archive, spam, unsubscribe, `unsubscribe-retry`),
+the PR body must include the output of `scripts/check_branch.sh` (`dry_classify.py` on real
+mail, read-only) or an explicit reason it isn't needed, borne out by the diff. Missing: **major**.
+Output that contains email bodies: **blocker**.
 
 **Performance & cost**: Gmail API calls per run (quota: per-user units/sec), Jev calls per
 email (avoid repeats; rules should skip Jev), N+1 DB queries, unbounded loops or result sets,
@@ -124,12 +137,16 @@ README/`.env.example`/`categories.yaml` updated when behaviour or config changes
 - **nit**: optional; never blocks.
 
 ## Output
-Post the review on the PR with `gh pr comment <n> --body-file <file>` (write the file under
-`/tmp`), then return the same text as your final answer:
+Right before posting, re-read the head (`gh pr view <n> --json headRefOid -q .headRefOid`). If
+it moved since step 1, review the new commit (the diff since the one you read) or post the
+review for the commit you did read; the gate marks it stale either way. Post the review on the
+PR with `gh pr comment <n> --body-file <file>` (write the file under `/tmp`), then return the
+same text as your final answer:
 
 ```
 ## QA review — round <r>
 **Verdict: APPROVED | CHANGES_REQUESTED**
+Head: <full sha of the commit you reviewed>
 Checks: ruff ✅/❌ · format ✅/❌ · pytest ✅/❌ (N passed) · CI (`gh pr checks`) ✅/❌/⏳
 Skills: <skills loaded> (unavailable: <none | list>; n/a: <none | list>)
 
@@ -143,3 +160,9 @@ Skills: <skills loaded> (unavailable: <none | list>; n/a: <none | list>)
 
 Verdict is APPROVED only when there are no open blocker/major/minor findings and all checks
 (local and CI) pass. Nits alone do not block.
+
+The `QA gate` workflow (`scripts/qa_gate.py`) turns the latest `## QA review` comment into the
+`qa-verdict` status on the PR head, which the ruleset requires: `APPROVED` with a `Head:` equal
+to the head (or the head merged with `main` by `update-branch`) is `success`; a review for an
+older commit is `pending`; `CHANGES_REQUESTED` is `failure`. So the `Verdict:` and `Head:` lines
+must be exactly as above, and nothing else you post may start with `## QA review`.

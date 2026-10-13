@@ -22,4 +22,7 @@ dist/
 build/
 *.egg-info/
 
+# Worktrees that Claude Code agents create inside the checkout
+.claude/worktrees/
+
 .DS_Store

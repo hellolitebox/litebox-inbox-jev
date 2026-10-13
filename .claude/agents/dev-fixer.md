@@ -38,13 +38,12 @@ review threads (CodeRabbit or human) on the PR.
    - **Dispute it**: only when it is genuinely wrong or out of scope. Give concrete reasoning
      (code path, input, why it can't happen). Don't dispute to avoid work.
    Nits are optional.
-   Before changing code, load the unconditional Python skills listed in
-   `.claude/agents/qa-reviewer.md` ("Python skills") with the Skill tool, every round, plus a
-   conditional one when your fix touches what it covers or a finding cites it, and apply them to
-   your fixes (repo conventions win over a skill's generic advice). A skill a finding cites
-   (e.g. `[python-type-safety]`) is the one to read most closely. List the skills you loaded on
-   the reply's `Skills:` line, conditional ones you didn't load as `n/a`; if a skill isn't
-   available, say so there and continue.
+   Before changing code, load with the Skill tool, every round, the Python skills that the
+   routing table in `.claude/agents/qa-reviewer.md` ("Python skills") selects for the files you
+   change, plus any skill a finding cites (e.g. `[python-type-safety]`: read that one most
+   closely), and apply them to your fixes (repo conventions win over a skill's generic advice).
+   List the skills you loaded on the reply's `Skills:` line (`none: docs-only` when the fix
+   touches no listed path); if a skill isn't available, say so there and continue.
 4. Don't expand scope. Don't refactor unrelated code. If you find a new bug outside the PR,
    mention it in your reply instead of fixing it.
    When a fix changes decision logic (`categories.yaml`, `policy`, `triage`, `rules`,
@@ -54,11 +53,18 @@ review threads (CodeRabbit or human) on the PR.
    `docs/how-it-decides.md`, the affected `EX-NN` examples and `tests/test_spec_examples.py` (a
    new rule or guard that changes an outcome gets a new `EX-NN`), and the ADR in `docs/decisions/` if the fix changes a design decision, in the same push (see
    CLAUDE.md, "Decision logic docs").
-5. Make the checks green (use `$ROOT/.venv`, or a throwaway venv if `pyproject.toml` deps changed):
-   `cd "$WT" && "$ROOT/.venv/bin/ruff" format src tests && "$ROOT/.venv/bin/ruff" check src tests && PYTHONPATH=src "$ROOT/.venv/bin/pytest" -q`.
+5. Make the checks green in the worktree's own venv, built from `uv.lock` exactly as CI does:
+   ```
+   cd "$WT" && UV=$(command -v uv || echo "$ROOT/.venv/bin/uv") && "$UV" sync --frozen --extra dev \
+     && "$UV" run --frozen ruff format src tests scripts && "$UV" run --frozen ruff check src tests scripts \
+     && "$UV" run --frozen pytest -q
+   ```
+   If you change `pyproject.toml`, run `"$UV" lock` first and commit `uv.lock` with it.
 6. Stage files by explicit path (`git add <file> …`), commit with a message describing what was
    fixed (end with the repo's `Co-Authored-By` trailer if the session provides one) and push with
-   `cd "$WT" && git push origin HEAD:"$BR"`.
+   `cd "$WT" && git push origin HEAD:"$BR"`. The push moves the head, so the `qa-verdict` status
+   goes back to `pending` until QA reviews it: never post anything that starts with
+   `## QA review` yourself.
 7. Post a reply on the PR with `gh pr comment <n> --body-file <file>`, then remove the worktree
    (`git -C "$ROOT" worktree remove "$WT"`):
 
