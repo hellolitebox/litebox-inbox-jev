@@ -273,6 +273,14 @@ and given up after 8 failures, about 10.5 hours; `inbox-jev retry-errors` retrie
 Everything taken from an email is escaped for Slack, so a subject can't mention `@channel` or
 fake a link. Preview it with `inbox-jev digest --dry-print`.
 
+The digest's language is set per account with `digest_language` in `accounts.yaml`: `en`
+(default) or `es`; any other value is rejected when the file is loaded. Category and label names
+come from `categories.yaml` and are shown as written there. The texts live in one table per
+language (`MESSAGES` in `src/inbox_jev/digest.py`); to add a language, add a table there and
+its code to `DigestLanguage` in `config.py` (a test checks every table has every text with the
+same placeholders). Counts inside a sentence ("1 email", "2 emails") have a `one` and an
+`other` form.
+
 ## Updating a deployment
 
 CI builds the image once per commit, smoke-tests it and pushes it to GHCR on `main`

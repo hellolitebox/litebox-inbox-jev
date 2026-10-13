@@ -4,7 +4,7 @@ from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from inbox_jev import cli
-from inbox_jev.config import Account, CategoriesConfig, Settings
+from inbox_jev.config import Account, CategoriesConfig, DigestLanguage, Settings
 
 
 def account(text):
@@ -21,6 +21,17 @@ def test_act_categories_absent_means_all_and_empty_list_means_none():
     assert account("").act_categories is None
     assert account("act_categories: []\n").act_categories == []
     assert account("act_categories: [marketing]\n").act_categories == ["marketing"]
+
+
+def test_digest_language_defaults_to_english():
+    assert account("").digest_language is DigestLanguage.EN
+    assert account("digest_language: es\n").digest_language is DigestLanguage.ES
+
+
+@pytest.mark.parametrize("value", ["fr", "ES", "spanish", "''"])
+def test_digest_language_rejects_unknown_languages(value):
+    with pytest.raises(ValidationError, match="digest_language"):
+        account(f"digest_language: {value}\n")
 
 
 @pytest.mark.parametrize("value", ["30", "30days", "3w", "30d OR from:x", ""])

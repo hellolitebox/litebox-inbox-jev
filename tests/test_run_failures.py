@@ -13,7 +13,7 @@ from typer.testing import CliRunner
 
 from inbox_jev import cli, digest, triage
 from inbox_jev import gmail as inbox_gmail
-from inbox_jev.config import Mode
+from inbox_jev.config import DigestLanguage, Mode
 from inbox_jev.db import MAX_ERROR_ATTEMPTS, Message, Run, Unsubscribe
 from inbox_jev.unsubscribe import UnsubscribeMethod, UnsubscribeStatus
 
@@ -33,7 +33,7 @@ def _runs(ctx):
 
 def _digest(ctx, account, hours=24):
     with ctx.sessions() as s:
-        return digest.build(s, ctx.cfg, account.email, hours)
+        return digest.build(s, ctx.cfg, account.email, hours, language=DigestLanguage.ES)
 
 
 def test_expired_token_is_recorded_on_the_run_and_raised(triage_setup, monkeypatch):
@@ -55,7 +55,7 @@ def test_expired_token_is_recorded_on_the_run_and_raised(triage_setup, monkeypat
         "run `inbox-jev auth add me@acme.com`"
     )
     text = _digest(ctx, account)
-    assert "1 corridas fallidas" in text and "run `inbox-jev auth add me@acme.com`" in text
+    assert "1 corrida fallida" in text and "run `inbox-jev auth add me@acme.com`" in text
 
 
 class _TokenEndpoint(google.auth.transport.Request):
@@ -279,7 +279,7 @@ def test_failed_email_backs_off_then_gives_up_and_shows_in_digest(triage_setup):
     assert (run.processed, run.errors) == (0, 0) and ctx._classifier.calls == calls
 
     text = _digest(ctx, account, hours=48)
-    assert "1 mails (1 sin más reintentos)" in text
+    assert "1 mail (1 sin más reintentos)" in text
     assert "Proposal" in text.split("Sin más reintentos")[1]
 
 

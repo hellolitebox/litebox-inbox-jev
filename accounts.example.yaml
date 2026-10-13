@@ -4,6 +4,8 @@ accounts:
   - email: you@example.com
     # Slack member ID to DM the daily digest to (Profile → ⋯ → Copy member ID). Optional.
     slack_user_id: U0123456789
+    # Language of the digest: en or es. Optional (default: en).
+    digest_language: en
     # Overrides the global MODE for this account. Optional.
     mode: label
     # Never touched: always "important", never archived or unsubscribed. Mail relayed by a

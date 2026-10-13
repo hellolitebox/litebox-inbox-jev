@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from typesafe_sdk import Noul, RetryPolicy, TypeSafeClient, TypeSafeError
 
 from inbox_jev import logs
-from inbox_jev.config import Mode, load_categories
+from inbox_jev.config import DigestLanguage, Mode, load_categories
 from inbox_jev.db import SQLITE_BUSY_TIMEOUT_MS, Base, Message, MessageStatus, make_engine
 from inbox_jev.digest import build
 from inbox_jev.policy import DecisionSource
@@ -79,7 +79,8 @@ def test_make_engine_adds_missing_columns(tmp_path):
         msg = s.scalars(select(Message)).one()
         assert msg.decided_labels is None
         # Pre-column rows fall back to the needs_reply score in the digest.
-        out = build(s, load_categories(ROOT / "categories.yaml"), "me@acme.com", hours=10_000)
+        cfg = load_categories(ROOT / "categories.yaml")
+        out = build(s, cfg, "me@acme.com", hours=10_000, language=DigestLanguage.ES)
     assert "Piden respuesta (1)" in out and "Old proposal" in out
 
 

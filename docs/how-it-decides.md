@@ -726,9 +726,9 @@ the probabilities that matter are shown; the rest are ~0.
   `news@weekly.example` has an active `auto` rule → `newsletter`. Ana writes "Signed contract
   by Friday?". Jev: cold_outreach 0.55, important 0.45; `needs_reply` 0.92.
 - **Outcome**: Ana's email stays in the inbox with `Jev/Important` and `Jev/Needs Reply`, and is
-  listed in the digest's "Piden respuesta" section. Jev's cold_outreach answer is ignored (no
-  `Jev/Outreach`), the answer counts toward no rule, and no sent-mail search runs. The
-  newsletter is archived by its rule without a Jev call.
+  listed in the digest's Needs reply section ("Piden respuesta" in `es`). Jev's cold_outreach
+  answer is ignored (no `Jev/Outreach`), the answer counts toward no rule, and no sent-mail
+  search runs. The newsletter is archived by its rule without a Jev call.
 - **Why**: a keep rule (or the allowlist) is exactly the mail that needs a reply most, and its
   email stays in the inbox, so Needs Reply and the tags are worth one Jev call. An archive rule
   takes the email out of the inbox, where Needs Reply is never added, so it still skips Jev

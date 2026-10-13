@@ -69,6 +69,13 @@ class Mode(StrEnum):
     ACT = "act"
 
 
+class DigestLanguage(StrEnum):
+    """Language of an account's Slack digest (the texts live in `digest.MESSAGES`)."""
+
+    EN = "en"
+    ES = "es"
+
+
 class Action(StrEnum):
     KEEP = "keep"
     ARCHIVE = "archive"
@@ -192,6 +199,7 @@ class Account(BaseModel):
     email: str
     slack_user_id: str | None = None
     mode: Mode | None = None
+    digest_language: DigestLanguage = DigestLanguage.EN
     allow_domains: list[str] = Field(default_factory=list)
     allow_senders: list[str] = Field(default_factory=list)
     # Domains whose Google Groups are trusted to name the original author (X-Original-Sender).

@@ -18,7 +18,7 @@ from test_triage import FakeClassifier, FakeGmail, _HttpError, _JevDown, email
 from inbox_jev import digest, rules, triage
 from inbox_jev import unsubscribe as unsub
 from inbox_jev.classifier import Classification, build_state
-from inbox_jev.config import Account, Mode, Settings
+from inbox_jev.config import Account, DigestLanguage, Mode, Settings
 from inbox_jev.db import Message, SenderRule, Unsubscribe, make_session_factory
 from inbox_jev.gmail import Email, extract_body
 from inbox_jev.policy import decide, plan
@@ -137,7 +137,7 @@ def test_ex02_payment_approval_stays_with_action_label(spec):
     assert (row.category, row.archived, row.low_confidence) == ("action_required", False, False)
     with ctx.sessions() as s:
         assert s.query(SenderRule).count() == 0  # 0.93 < 0.95 and a keep signal
-        text = digest.build(s, ctx.cfg, account.email)
+        text = digest.build(s, ctx.cfg, account.email, language=DigestLanguage.ES)
     assert "Jev/Action (1)" in text and text.count("Approve payment to Acme") == 1
 
 
@@ -503,7 +503,7 @@ def test_ex13_failing_email_backs_off_then_gives_up(spec):
     assert ctx._classifier.calls == calls
     assert not [m for m in gmail.modified if m[0] == "1"]  # untouched in Gmail
     with ctx.sessions() as s:
-        text = digest.build(s, ctx.cfg, account.email, hours=48)
+        text = digest.build(s, ctx.cfg, account.email, hours=48, language=DigestLanguage.ES)
     assert "Invoice 7" in text.split("Sin más reintentos")[1]
 
     ctx._classifier.answers["Invoice 7"] = answer("transactional", transactional=0.95)
@@ -583,7 +583,7 @@ def test_ex15_keep_rule_still_gets_needs_reply(spec):
     assert (row.source, row.category, row.confidence) == ("rule", "important", 1.0)
     with ctx.sessions() as s:
         assert s.query(SenderRule).count() == 2  # the answer counted toward nothing
-        text = digest.build(s, ctx.cfg, account.email)
+        text = digest.build(s, ctx.cfg, account.email, language=DigestLanguage.ES)
     assert "Signed contract by Friday?" in text.split("Piden respuesta")[1]
 
 

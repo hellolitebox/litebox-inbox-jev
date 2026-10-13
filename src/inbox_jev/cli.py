@@ -150,7 +150,7 @@ def digest(
     sessions = make_session_factory(s.database_url)
     for acc in _accounts(s, account):
         with sessions() as session:
-            text = digest_mod.build(session, cfg, acc.email, hours)
+            text = digest_mod.build(session, cfg, acc.email, hours, language=acc.digest_language)
         if dry_print or not (s.slack_bot_token and acc.slack_user_id):
             typer.echo(text + "\n")
             continue
