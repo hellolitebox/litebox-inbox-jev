@@ -47,8 +47,8 @@ Everything is recorded in a database (SQLite by default) so it can be audited an
      `1 - archive_group_min_confidence`). Otherwise the reply signal is ignored for the group:
      every pitch from a stranger "expects a reply".
    - Categories with `action: keep` other than `important` (by default `action_required`:
-     automated emails that need you to approve, pay, verify or fix something) stay in the inbox
-     and get their own section in the digest.
+     automated emails that need you to approve, pay, verify or fix something, including a held
+     message pending your approval) stay in the inbox and get their own section in the digest.
    - Unsubscribe URLs must be public `https` hosts (no redirects, no private IPs).
    - Each list is unsubscribed from at most once, and each run has a cap.
 

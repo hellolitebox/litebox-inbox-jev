@@ -23,10 +23,11 @@ categories:
   - key: action_required
     label: Jev/Action
     criteria: >-
-      Automated email from a service I use that needs me to do something: approve a payment or
-      request, update a payment method or expiring card, verify my account or domain, act on a
-      security alert, or fix or renew something before a deadline. Not receipts, reminders of
-      things already done, or FYI alerts.
+      Automated email from a service I use that needs me to do something: approve a payment,
+      a request or a message held for moderation that is pending my approval, update a payment
+      method or expiring card, verify my account or domain, act on a security alert, or fix or
+      renew something before a deadline. Not receipts, reminders of things already done, FYI
+      alerts, or held-spam reports.
     action: keep
     min_confidence: 0.0
 
@@ -44,7 +45,8 @@ categories:
     criteria: >-
       Automated FYI alerts and digests from software tools I use: GitHub, Slack, Google
       Calendar/Drive/Docs, Jira, Linear, Notion, analytics, monitoring, CI, policy or product
-      updates. Nothing for me to do.
+      updates, and automated held-spam reports from mailing lists and groups (e.g. Google
+      Groups "Moderator's spam report"). Nothing for me to do.
     action: archive
     min_confidence: 0.80
 
