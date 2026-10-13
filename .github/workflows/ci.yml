@@ -12,7 +12,7 @@ permissions:
 env:
   # Python the tests run on. The docker job checks the image's base Python against it, so a
   # Dependabot python:3.x-slim bump fails until this is bumped too.
-  PYTHON_VERSION: "3.12"
+  PYTHON_VERSION: "3.14"
 
 concurrency:
   # A newer push to a PR supersedes its run. Each push to main gets its own group, so main runs
