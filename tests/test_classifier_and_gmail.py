@@ -1,4 +1,5 @@
 import base64
+import time
 
 from inbox_jev.classifier import CATEGORY_Q, NEEDS_REPLY_Q, TAG_PREFIX, build_questions, build_state
 from inbox_jev.gmail import Email, extract_body
@@ -94,3 +95,111 @@ def test_classifier_parses_api_response(cfg):
     assert body["state"]["subject"] == "Weekly digest"
     assert body["questions"]["category"]["type"] == "choice"
     assert set(body["questions"]["category"]["criteria"]) == set(cfg.by_key)
+
+
+def _alternative(plain: str, html: str) -> dict:
+    return {
+        "mimeType": "multipart/alternative",
+        "parts": [
+            {"mimeType": "text/plain", "body": {"data": b64(plain)}},
+            {"mimeType": "text/html", "body": {"data": b64(html)}},
+        ],
+    }
+
+
+def test_extract_body_skips_plain_stub_for_html():
+    # emBlue-style: the plain part only says to open the HTML version in a browser.
+    stub = (
+        "Su Cliente de Mail NO soporta mensajes en formato HTML.\n"
+        "COPIE y PEGUE la siguiente URL en su Navegador Web (Chrome / Internet Explorer / "
+        "FireFox / Safari)\nhttps://app.example.com/OnlineV3/VON.aspx?data=" + "x" * 300
+    )
+    content = "Te invitamos al encuentro de socios del 21 de octubre. " * 10
+    assert extract_body(_alternative(stub, f"<p>{content}</p>")) == content.strip()
+
+
+def test_extract_body_keeps_short_plain_when_html_is_similar():
+    # A short real reply whose HTML version just adds markup and a signature.
+    plain = "Dale, nos vemos el martes a las 10."
+    html = f"<div>{plain}</div><div>-- <br>Guille</div>"
+    assert extract_body(_alternative(plain, html)) == plain
+
+
+def test_extract_body_keeps_long_plain_even_with_longer_html():
+    plain = "Contenido real del mail. " * 20
+    html = "<p>" + "Contenido real del mail con mucho más formato. " * 40 + "</p>"
+    assert extract_body(_alternative(plain, html)) == plain.strip()
+
+
+def test_extract_body_normalizes_nbsp_and_zwnj():
+    payload = {"mimeType": "text/plain", "body": {"data": b64("a\u00a0\u200c b  \n\nc")}}
+    assert extract_body(payload) == "a b\nc"
+
+
+def test_extract_body_html_only_link_does_not_beat_plain():
+    # HTML that is mostly one long tracking URL is not "more content" than the plain text.
+    plain = "Tu pedido salió hoy y llega el jueves."
+    html = f"<p>{plain} <a>https://track.example.com/{'y' * 400}</a></p>"
+    assert extract_body(_alternative(plain, html)) == plain
+
+
+EMBLUE_STUB = (
+    "Su Cliente de Mail NO soporta mensajes en formato HTML.\n"
+    "COPIE y PEGUE la siguiente URL en su Navegador Web\n"
+    "https://app.example.com/OnlineV3/VON.aspx?data=" + "x" * 300
+)
+NEWSLETTER = "Gran oferta de verano 50% off en toda la tienda, solo por esta semana. " * 8
+
+
+def test_extract_body_stub_check_works_inside_mixed_with_attachment():
+    payload = {
+        "mimeType": "multipart/mixed",
+        "parts": [
+            _alternative(EMBLUE_STUB, f"<p>{NEWSLETTER}</p>"),
+            {"mimeType": "application/pdf", "filename": "agenda.pdf", "body": {"size": 10}},
+        ],
+    }
+    assert extract_body(payload) == NEWSLETTER.strip()
+
+
+def test_extract_body_keeps_note_above_forwarded_html_message():
+    # The user's own short note must not be dropped in favour of a forwarded HTML newsletter.
+    note = "Mirá esto, ¿lo vemos el lunes? Es para el cliente X."
+    payload = {
+        "mimeType": "multipart/mixed",
+        "parts": [
+            {"mimeType": "text/plain", "body": {"data": b64(note)}},
+            {
+                "mimeType": "message/rfc822",
+                "parts": [{"mimeType": "text/html", "body": {"data": b64(f"<p>{NEWSLETTER}</p>")}}],
+            },
+        ],
+    }
+    assert extract_body(payload) == note
+
+
+def test_extract_body_keeps_note_next_to_inline_html_part():
+    note = "Te paso lo que mandaron, fijate."
+    payload = {
+        "mimeType": "multipart/mixed",
+        "parts": [
+            {"mimeType": "text/plain", "body": {"data": b64(note)}},
+            {"mimeType": "text/html", "body": {"data": b64(f"<p>{NEWSLETTER}</p>")}},
+        ],
+    }
+    assert extract_body(payload) == note
+
+
+def test_extract_body_url_only_plain_beats_empty_or_trivial_html():
+    plain = "https://zoom.us/j/123456789?pwd=abc"
+    assert extract_body(_alternative(plain, "<img src=x>")) == plain
+    assert extract_body(_alternative(plain, f"<a href='{plain}'>Unirse</a>")) == plain
+
+
+def test_extract_body_normalize_is_linear_on_long_whitespace_runs():
+    # U+2007 figure space isn't collapsed by the first pass; `\s+\n` used to be quadratic on it.
+    html = "<p>pre</p>" + " " * 200_000 + "\n<p>" + NEWSLETTER + "</p>"
+    start = time.perf_counter()
+    body = extract_body(_alternative("undefined", html))
+    assert time.perf_counter() - start < 2
+    assert body.startswith("pre") and body.endswith(NEWSLETTER.strip())
