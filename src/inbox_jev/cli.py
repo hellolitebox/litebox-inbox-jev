@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from datetime import timedelta
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as package_version
 from typing import Annotated
 
 import typer
@@ -30,10 +33,48 @@ log = logging.getLogger("inbox_jev")
 
 AccountOpt = Annotated[str | None, typer.Option("--account", "-a", help="Only this account.")]
 
+# Set by the image (Dockerfile ARG GIT_SHA): the commit the running code was built from. Read
+# here rather than through Settings so `--version` needs no configuration at all.
+REVISION_ENV = "INBOX_JEV_REVISION"
 
-def _settings() -> Settings:
+
+def _version(value: bool) -> None:
+    if not value:
+        return
+    try:
+        release = package_version("inbox-jev")
+    except PackageNotFoundError:
+        release = "unknown"
+    revision = os.environ.get(REVISION_ENV)
+    typer.echo(f"inbox-jev {release}" + (f" ({revision})" if revision else ""))
+    raise typer.Exit()
+
+
+@app.callback()
+def main(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            callback=_version,
+            is_eager=True,
+            help="Print the release and the commit the image was built from, then exit.",
+        ),
+    ] = False,
+) -> None:
+    pass  # the app's help text is on `typer.Typer(help=…)` above; nothing runs before a command
+
+
+def _settings(*, announce: bool = False) -> Settings:
+    """Load settings and set up logging; `announce` logs the image's commit first.
+
+    Only the timer-driven commands announce: their JSON logs then say which image produced them.
+    Interactive commands print tables, and the line would land before them on stdout.
+    """
     settings = Settings()
     logs.setup(settings.log_level)
+    if announce:
+        log.info("starting", extra={"revision": os.environ.get(REVISION_ENV, "unknown")})
     return settings
 
 
@@ -85,7 +126,7 @@ def run(
     ] = None,
 ) -> None:
     """Classify new inbox emails and apply labels/actions."""
-    s = _settings()
+    s = _settings(announce=True)
     ctx = triage.Context(
         s, load_categories(s.categories_file), make_session_factory(s.database_url)
     )
@@ -110,7 +151,7 @@ def digest(
     dry_print: Annotated[bool, typer.Option(help="Print instead of sending to Slack.")] = False,
 ) -> None:
     """Send the daily digest to each account's Slack user."""
-    s = _settings()
+    s = _settings(announce=True)
     cfg = load_categories(s.categories_file)
     sessions = make_session_factory(s.database_url)
     for acc in _accounts(s, account):

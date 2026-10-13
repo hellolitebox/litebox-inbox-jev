@@ -223,6 +223,7 @@ uv run inbox-jev digest --dry-print
 | `inbox-jev senders backfill [-a EMAIL]` | Store the author, not the group, for group emails saved before authors were recovered |
 | `inbox-jev stats [-a EMAIL] [--days 7]` | Counts per category |
 | `inbox-jev labels rename OLD NEW [-a EMAIL]` | Rename a label in Gmail and the DB (see [Renaming a label](#renaming-a-label)) |
+| `inbox-jev --version` | The release and, inside the image, the commit it was built from |
 
 ## Deploy (Docker + systemd timers)
 
@@ -241,7 +242,8 @@ elif getent passwd "$APP_UID" >/dev/null; then
 else
   mkdir -p data && sudo chown -R "$APP_UID:$APP_GID" data secrets && sudo chmod 700 data secrets
 fi
-docker compose build
+GIT_SHA=$(git rev-parse HEAD) docker compose build   # or docker login ghcr.io && docker compose pull
+docker compose run --rm app --version                       # the commit the image was built from
 docker compose run --rm app run --mode dry_run --limit 20   # smoke test
 sudo cp deploy/systemd/* /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -273,20 +275,28 @@ fake a link. Preview it with `inbox-jev digest --dry-print`.
 
 ## Updating a deployment
 
+CI builds the image once per commit, smoke-tests it and pushes it to GHCR on `main`
+(`ghcr.io/<owner>/<repo>:sha-<short commit>`, and `:latest`), so production runs the image CI
+tested. Once, give the server read access to the registry: `docker login ghcr.io` with a
+GitHub token that has the `read:packages` scope (the package is private, like the repo). Then:
+
 ```bash
 cd /opt/inbox-jev
-sudo systemctl stop inbox-jev-triage.timer        # no pass while you change things
-# wait for a running pass: the oneshot service is "activating" while it runs, not "active"
-while [ "$(systemctl show -p ActiveState --value inbox-jev-triage.service)" = activating ]; do
-  sleep 2
-done
-# SQLite only (the default DATABASE_URL). data/ belongs to APP_UID with mode 700: needs sudo.
-# The DB runs in WAL mode: sqlite3's .backup copies a consistent DB, WAL included.
-sudo sqlite3 data/inbox-jev.db ".backup 'data/inbox-jev.db.bak-$(date +%Y%m%d%H%M)'"
-git pull && docker compose build
-# one-off steps from the PR's deploy notes (reprocess, senders backfill, rules review…)
+scripts/deploy.sh            # or: scripts/deploy.sh --hold  when the PR has one-off steps
+# with --hold: run the PR's deploy notes (reprocess, senders backfill, rules review…), then
 sudo systemctl start inbox-jev-triage.timer
 ```
+
+The script stops the triage timer and waits for a running pass, backs up the SQLite DB
+(`data/inbox-jev.db.bak-<stamp>`), fetches and checks out `origin/main` (detached: the checkout
+only ever holds what is deployed), pulls the image for that commit and writes its tag to `.env`
+as `IMAGE_TAG` (the timers' `docker compose run` reads it), checks that `inbox-jev --version`
+inside the image reports the checkout's commit, and starts the timer. If a step fails after the
+timer was stopped, it says so and leaves the timer stopped for you to fix and start by hand.
+Without registry access, `scripts/deploy.sh --build` builds the image on the server instead.
+Rollback: `scripts/deploy.sh <previous sha>` (CI keeps an image for every commit on `main`
+whose CI passed;
+for a commit older than the registry, `scripts/deploy.sh --build <sha>`).
 
 New `act_categories` keys go into `accounts.yaml` only after the code that knows them is
 deployed (see [Rolling out a category change](#rolling-out-a-category-change)).

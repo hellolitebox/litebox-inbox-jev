@@ -6,8 +6,16 @@ x-logging: &logging
 
 services:
   app:
-    build: .
-    image: inbox-jev:latest
+    # The image CI built and pushed for the deployed commit: scripts/deploy.sh pulls
+    # ghcr.io/<repo>:sha-<short> and records IMAGE_TAG in .env, so the timers run that image.
+    # `docker compose build` still works without registry access and tags its build the same way.
+    image: ${IMAGE:-ghcr.io/hellolitebox/litebox-inbox-jev}:${IMAGE_TAG:-latest}
+    # A missing image is pulled, not rebuilt from the checkout (which would run GIT_SHA=unknown).
+    pull_policy: missing
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
     # Pick a uid/gid no host user owns: whoever has that uid on the host can read data/ and
     # secrets/ (Gmail tokens). Set APP_UID/APP_GID in .env.
     user: "${APP_UID:-1000}:${APP_GID:-1000}"

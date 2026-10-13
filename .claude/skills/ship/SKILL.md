@@ -15,7 +15,8 @@ verdict for an older commit.
 n=<n>
 gh pr view $n --json state,isDraft,author,baseRefName,headRefOid,title,mergeStateStatus
 head=$(gh pr view $n --json headRefOid -q .headRefOid)
-gh run watch --exit-status "$(gh run list --commit "$head" --workflow CI --json databaseId -q '.[0].databaseId')"
+until id=$(gh run list --commit "$head" --workflow CI --json databaseId -q '.[0].databaseId') && [ -n "$id" ]; do sleep 5; done
+gh run watch --exit-status "$id"     # the run appears a few seconds after the push
 ```
 
 Watch the CI run, never `gh pr checks --watch`: the `qa-verdict` status stays `pending` until
@@ -68,7 +69,8 @@ gh pr merge $n --squash --delete-branch
 gh pr view $n --json body -q .body | sed -n '/^## Deploy notes/,/^## /p'
 ```
 
-Print the deploy notes and point at README → "Updating a deployment".
+Print the deploy notes and point at README → "Updating a deployment": `scripts/deploy.sh` on the
+server, `scripts/deploy.sh --hold` when the notes have one-off steps.
 
 ## Dependabot lane
 
@@ -93,4 +95,6 @@ No `qa-reviewer` or `dev-fixer`; the session reviews the bump itself:
 
 4. Merge gates, then merge, as above. The gate's job is skipped on Dependabot's own pushes
    (their token is read-only), so `qa-verdict` appears only after this comment, set by the
-   comment-triggered run; until then `gh pr checks` doesn't list it at all.
+   comment-triggered run; until then `gh pr checks` doesn't list it at all. A Dependabot rebase
+   after the review (auto-rebase on a `main` push, or `@dependabot rebase`) moves the head and
+   leaves it with no status at all: post a new review for the new head.

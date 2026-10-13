@@ -26,3 +26,5 @@ weekly updates (uv, GitHub Actions, Docker), which go through the QA loop.
 ## Consequences
 - Dependency changes need `uv lock`, with both files committed.
 - `ruff` and `uv` are each pinned in two places and must be bumped together.
+- Since [0029](0029-deploy-the-image-ci-built.md), the image CI builds is the one deployed, and
+  the base images are pinned by digest as well.

@@ -46,11 +46,14 @@ small, follows this loop; `/ship <n>` (`.claude/skills/ship`) runs steps 4 and 5
    - The ruleset enforces all three. Then the orchestrating session runs
      `gh pr merge <n> --squash --delete-branch`. The user authorized this as the standing merge
      path; no human approval is needed.
-6. **Deploy**: follow README → "Updating a deployment". Stop the triage timer and wait for any
-   running pass (the oneshot service's `ActiveState` is `activating` while it runs, so
-   `systemctl is-active` doesn't wait), back up `data/inbox-jev.db`, then
-   `git pull && docker compose build`. Run the PR's one-off deploy steps (e.g. `reprocess`,
-   `senders backfill`, deleting rules that no longer fit), then start the timer again. Server
+6. **Deploy**: on the server, `scripts/deploy.sh` (README → "Updating a deployment"). It stops
+   the triage timer and waits for any running pass (the oneshot service's `ActiveState` is
+   `activating` while it runs, so `systemctl is-active` doesn't wait), backs up
+   `data/inbox-jev.db`, checks out `origin/main` (or the ref you pass: `scripts/deploy.sh
+   <previous sha>` rolls back), pulls the image CI built for that commit (ADR 0029), records its
+   tag in `.env` and checks `inbox-jev --version` against the checkout.
+   When the PR has one-off deploy steps (e.g. `reprocess`, `senders backfill`, deleting rules
+   that no longer fit), run `scripts/deploy.sh --hold`, the steps, then start the timer. Server
    config (`accounts.yaml`, `.env`) is not in git: back it up before editing it.
 
 **Dependabot PRs** take a lighter lane (see `/ship`, "Dependabot lane"): no `qa-reviewer` or
@@ -115,8 +118,11 @@ section (QA checks for it, see the reviewer's "Real-mail check"); never log or p
   PRs would be opened.
 - The base image's Python (`python:3.x-slim` in the `Dockerfile`) must equal `PYTHON_VERSION`
   in `ci.yml`. The `docker` job checks it, so a Dependabot base-image bump needs `PYTHON_VERSION`
-  bumped in the same PR. The `docker` job also builds the image and smoke-tests it as a non-root
-  uid, as production runs it.
+  bumped in the same PR. The `docker` job also builds the image, smoke-tests it as a non-root
+  uid, as production runs it, and on `main` pushes it to GHCR: that image is what
+  `scripts/deploy.sh` deploys (ADR 0029). Base images are pinned by tag **and** digest, and
+  GitHub Actions by commit SHA with the version as a comment; Dependabot bumps both halves, so
+  keep that shape when editing them by hand.
 - Python ≥ 3.11, ruff (line length 100), pytest. No network calls in tests: use fakes like
   `tests/test_triage.py`.
 - `policy.py` stays pure (no I/O). Gmail access goes in `gmail.py` and orchestration in `triage.py`.
