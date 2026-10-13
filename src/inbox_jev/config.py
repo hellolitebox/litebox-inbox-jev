@@ -151,8 +151,9 @@ class CategoriesConfig(BaseModel):
     archive_group_min_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     # needs_reply only blocks a group archive when the keep categories (important,
     # action_required) together reach this, unless I have written to the sender or their
-    # domain (then any reply signal blocks it). 0 = any reply signal blocks it. Must be at most
-    # 1 - archive_group_min_confidence: above that the keep categories can never reach it.
+    # domain and the email can be replied to (then any reply signal blocks it). 0 = any reply
+    # signal blocks it. Must be at most 1 - archive_group_min_confidence: above that the keep
+    # categories can never reach it.
     archive_group_reply_keep_probability: float = Field(default=0.05, ge=0.0, le=1.0)
 
     @model_validator(mode="after")

@@ -126,6 +126,8 @@ def main() -> None:
                 )
                 flags = [
                     f"src={decision.source}",
+                    f"contact={contact}",
+                    *(["no_reply"] if sig.no_reply else []),
                     *(["group"] if decision.archive_group else []),
                     *(["unsub"] if decision.unsubscribe else []),
                     *(["unverified"] if decision.downgraded_to_spam else []),

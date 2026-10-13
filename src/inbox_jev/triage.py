@@ -46,7 +46,7 @@ from .policy import (
     unsubscribe_gate,
     unsubscribes,
 )
-from .signals import ADDRESS, Signals, domain_of, resolve_relay
+from .signals import ADDRESS, Signals, domain_of, is_automated_address, resolve_relay
 from .system_labels import INBOX, SPAM, STARRED, TRASH
 from .unsubscribe import UnsubscribeStatus
 
@@ -815,15 +815,19 @@ def backfill_senders(session: Session, gmail: Gmail, account: Account) -> tuple[
 def previous_contact(gmail: Gmail, account: str, sender: str) -> str | None:
     """wrote_to_sender | wrote_to_their_domain | never, or None if it can't be checked.
 
-    The domain check is skipped for free mail providers (a gmail.com sender says nothing about
-    who else I wrote to) and for my own domain (colleagues are allowlisted, if at all).
+    Writing to a machine address isn't knowing someone: an automated sender
+    (`signals.is_automated_address`, e.g. a no-reply or bounce address) is never searched for
+    itself, and the domain search (`Gmail.has_written_to`) ignores emails sent only to machine
+    addresses on the domain. The domain check is skipped for free mail providers (a gmail.com
+    sender says nothing about who else I wrote to) and for my own domain (colleagues are
+    allowlisted, if at all).
     """
     sender = sender.lower()
     if not ADDRESS.match(sender):
         return None  # odd characters would change the Gmail search query
     domain = domain_of(sender)
     try:
-        if gmail.has_written_to(sender):
+        if not is_automated_address(sender) and gmail.has_written_to(sender):
             return "wrote_to_sender"
         own = domain_of(account.lower())
         if domain not in FREE_MAIL and domain != own and gmail.has_written_to(domain):

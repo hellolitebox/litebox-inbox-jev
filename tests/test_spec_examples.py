@@ -20,8 +20,10 @@ from fakes import (
     HttpError,
     JevDown,
     JevFails,
+    SentMailService,
     email,
     jev_http_error,
+    sent_mail_gmail,
 )
 from typesafe_sdk import (
     TypeSafeAPITimeoutError,
@@ -856,6 +858,74 @@ def test_ex23_jev_refuses_one_email(spec):
     gave_up = text.split("Sin más reintentos")[1]
     assert "#all/1|" in gave_up and "TypeSafeUnprocessableEntityError (HTTP 422" in gave_up
     assert "state.body" not in text
+
+
+# --- EX-24 / EX-25 ---------------------------------------------------------------------------
+
+
+def _lead_suggestions():
+    """The LinkedIn-style digest: archive categories 0.98 together, a reply signal of 0.75."""
+    return answer(
+        "notification", needs_reply=0.75, notification=0.62, newsletter=0.36, important=0.01
+    )
+
+
+def _sig(sender, **headers):
+    raw = {"from": [sender], "authentication-results": [GMAIL_PASS]}
+    raw |= {k.replace("_", "-"): [v] for k, v in headers.items()}
+    return extract(raw)
+
+
+def test_ex24_replies_to_notifications_make_no_known_contact(cfg, account, monkeypatch):
+    """EX-24 (docs/how-it-decides.md §5, §4.1 previous_contact, §4.8 machine addresses)."""
+    replies = {f"s{i}": {"To": f"m-a175x{i}@bounce.social.example"} for i in range(12)}
+    svc = SentMailService(replies)
+    gmail = sent_mail_gmail(monkeypatch, svc)
+    sender = "messages-noreply@social.example"
+    contact = triage.previous_contact(gmail, account.email, sender)
+    assert contact == "never"
+    assert svc.queries == ["in:sent to:social.example"]  # the machine sender isn't searched
+    assert len(svc.reads) == 12  # To/Cc/Bcc of each match, no body
+
+    d = decide(
+        cfg, account, _sig(f"Social <{sender}>"), _lead_suggestions(), previous_contact=contact
+    )
+    assert (d.category, d.archive, d.archive_group) == ("notification", True, True)
+    assert d.add_labels == ["Jev/Notifications"]  # no Review, no Needs Reply
+
+    # One email to a person there makes the domain known again.
+    svc = SentMailService({"p": {"To": "Jane <jane@social.example>"}, **replies})
+    gmail = sent_mail_gmail(monkeypatch, svc)
+    assert triage.previous_contact(gmail, account.email, sender) == "wrote_to_their_domain"
+    assert svc.reads == ["p"]
+
+
+def test_ex25_no_reply_sender_reply_signal_is_judged_like_a_strangers(cfg, account):
+    """EX-25 (docs/how-it-decides.md §5, §3.2 archive group, §4.8 machine addresses)."""
+    known = "wrote_to_their_domain"
+    sig = _sig("Vendor <noreply@vendor.example>")
+    assert sig.no_reply
+    d = decide(cfg, account, sig, _lead_suggestions(), previous_contact=known)
+    assert (d.archive, d.archive_group) == (True, True)
+    assert d.add_labels == ["Jev/Notifications"]
+
+    # A Reply-To to a person: replies reach Ana, so the known-contact veto applies (EX-10).
+    sig = _sig("Vendor <noreply@vendor.example>", reply_to="Ana <ana@vendor.example>")
+    d = decide(cfg, account, sig, _lead_suggestions(), previous_contact=known)
+    assert not d.archive and d.low_confidence
+    assert d.add_labels == ["Jev/Review", "Jev/Notifications", "Jev/Needs Reply"]
+
+    # A keep signal still vetoes: the email may need an action, not a reply.
+    action = answer(
+        "notification",
+        needs_reply=0.75,
+        notification=0.62,
+        transactional=0.32,
+        action_required=0.06,
+    )
+    d = decide(cfg, account, _sig("noreply@vendor.example"), action, previous_contact=known)
+    assert not d.archive and d.low_confidence
+    assert "Jev/Needs Reply" in d.add_labels
 
 
 # --- docs <-> tests ----------------------------------------------------------------------------

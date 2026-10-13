@@ -185,3 +185,65 @@ def jev_http_error(error_type, status, body=None, request_id="req-1"):
 
     headers = httpx2.Headers({"x-typesafe-request-id": request_id} if request_id else {})
     return error_type(status, body, headers, endpoint="POST https://api.typesafe.ai/v1/systemone")
+
+
+class SentMailService:
+    """googleapiclient's Gmail service for the sent-mail search: messages().list and metadata get.
+
+    `sent` maps a message id (newest first) to its recipient headers ({"To": "...", ...}). A
+    `in:sent to:X` search matches an email whose recipient headers contain X, as Gmail's loose
+    `to:` does; `get_errors` maps an id to the exception its read raises. Every `execute` must
+    pass `num_retries` (recorded in `retries`), as this path relies on googleapiclient's backoff.
+    """
+
+    def __init__(self, sent, get_errors=None):
+        self.sent = sent
+        self.get_errors = get_errors or {}
+        self.queries = []
+        self.reads = []
+        self.retries = []
+
+    def users(self):
+        return self
+
+    def messages(self):
+        return self
+
+    def list(self, userId, q, maxResults, **kw):
+        self.queries.append(q)
+        target = q.removeprefix("in:sent to:")
+        ids = [i for i, h in self.sent.items() if any(target in v for v in h.values())]
+        page = {"messages": [{"id": i} for i in ids[:maxResults]]}
+        if len(ids) > maxResults:
+            page["nextPageToken"] = "next"
+        svc = self
+
+        class Req:
+            def execute(self, *, num_retries):
+                svc.retries.append(num_retries)
+                return page
+
+        return Req()
+
+    def get(self, userId, id, format, metadataHeaders):
+        assert (userId, format, metadataHeaders) == ("me", "metadata", ["To", "Cc", "Bcc"])
+        self.reads.append(id)
+        svc = self
+
+        class Req:
+            def execute(self, *, num_retries):
+                svc.retries.append(num_retries)
+                if id in svc.get_errors:
+                    raise svc.get_errors[id]
+                headers = [{"name": k, "value": v} for k, v in svc.sent[id].items()]
+                return {"id": id, "threadId": "t" + id, "payload": {"headers": headers}}
+
+        return Req()
+
+
+def sent_mail_gmail(monkeypatch, svc):
+    """A real `gmail.Gmail` talking to `svc` (a SentMailService) instead of Google."""
+    from inbox_jev import gmail as gmail_module
+
+    monkeypatch.setattr(gmail_module, "build", lambda *args, **kwargs: svc)
+    return gmail_module.Gmail(creds=None)

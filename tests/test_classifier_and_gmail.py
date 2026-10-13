@@ -2,12 +2,13 @@ import base64
 import time
 
 import pytest
-from fakes import HttpError
+from fakes import HttpError, SentMailService, sent_mail_gmail
 
 from inbox_jev import gmail as gmail_module
 from inbox_jev.classifier import CATEGORY_Q, NEEDS_REPLY_Q, TAG_PREFIX, build_questions, build_state
 from inbox_jev.gmail import (
     BATCH_SIZE,
+    SENT_DOMAIN_SAMPLE,
     SINGLE_RETRIES,
     Email,
     Gmail,
@@ -393,3 +394,77 @@ def test_list_inbox_ids_and_list_ids_share_paging(monkeypatch):
     assert (first["labelIds"], first["q"], first["maxResults"]) == (["INBOX"], "newer_than:2d", 3)
     assert (second["pageToken"], second["maxResults"]) == ("t", 1)
     assert (third["labelIds"], third["q"]) == (None, "from:shop.com")
+
+
+LINKEDIN_REPLIES = {f"s{i}": {"To": f"m-a17{i}@bounce.linkedin.com"} for i in range(12)}
+
+
+def test_has_written_to_address_is_one_search_without_reads(monkeypatch):
+    svc = SentMailService({"s1": {"To": "Jane <jane@corp.com>"}})
+    gmail = sent_mail_gmail(monkeypatch, svc)
+    assert gmail.has_written_to("jane@corp.com")
+    assert not gmail.has_written_to("bob@corp.com")
+    assert svc.queries == ["in:sent to:jane@corp.com", "in:sent to:bob@corp.com"]
+    assert svc.reads == []
+    assert svc.retries == [SINGLE_RETRIES] * 2
+
+
+def test_has_written_to_domain_ignores_sends_to_machine_addresses(monkeypatch):
+    # The LinkedIn case: ~12 replies to notifications, all to bounce.linkedin.com.
+    svc = SentMailService(LINKEDIN_REPLIES)
+    gmail = sent_mail_gmail(monkeypatch, svc)
+    assert not gmail.has_written_to("linkedin.com")
+    assert svc.reads == list(LINKEDIN_REPLIES)  # each read once, metadata only
+    assert not gmail.has_written_to("linkedin.com")  # cached: no new calls
+    assert svc.queries == ["in:sent to:linkedin.com"]
+    # The list and every read rely on googleapiclient's backoff for 429/5xx.
+    assert svc.retries == [SINGLE_RETRIES] * (1 + len(LINKEDIN_REPLIES))
+
+
+def test_has_written_to_counts_a_person_at_a_company_named_reply_under_a_cc_tld(monkeypatch):
+    svc = SentMailService({"s0": {"To": "Ana <ana@reply.com.ar>"}})
+    assert sent_mail_gmail(monkeypatch, svc).has_written_to("reply.com.ar")
+
+
+def test_has_written_to_domain_stops_at_the_first_person(monkeypatch):
+    sent = {
+        "s0": {"To": "m-1@bounce.linkedin.com"},
+        "s1": {"To": "x@y.com", "Cc": "jane@linkedin.com"},
+    }
+    sent |= {f"s{i}": {"To": "jane@linkedin.com"} for i in range(2, 9)}
+    svc = SentMailService(sent)
+    assert sent_mail_gmail(monkeypatch, svc).has_written_to("linkedin.com")
+    assert svc.reads == ["s0", "s1"]
+
+
+def test_has_written_to_domain_with_more_machine_mail_than_the_sample_counts(monkeypatch, caplog):
+    # Only the newest SENT_DOMAIN_SAMPLE are read: an older one might be to a person, so the
+    # answer errs on "known contact".
+    caplog.set_level("INFO", logger="inbox_jev.gmail")
+    sent = {f"s{i}": {"To": f"reply+{i}@reply.github.com"} for i in range(SENT_DOMAIN_SAMPLE + 1)}
+    svc = SentMailService(sent)
+    assert sent_mail_gmail(monkeypatch, svc).has_written_to("github.com")
+    assert len(svc.reads) == SENT_DOMAIN_SAMPLE
+    assert "sent-mail sample inconclusive" in caplog.text
+
+
+def test_has_written_to_domain_skips_emails_deleted_since_the_search(monkeypatch):
+    svc = SentMailService(LINKEDIN_REPLIES, get_errors={"s0": HttpError(404)})
+    assert not sent_mail_gmail(monkeypatch, svc).has_written_to("linkedin.com")
+    assert len(svc.reads) == len(LINKEDIN_REPLIES)
+
+
+def test_has_written_to_domain_raises_other_read_errors_uncached(monkeypatch):
+    svc = SentMailService(LINKEDIN_REPLIES, get_errors={"s3": HttpError(500)})
+    gmail = sent_mail_gmail(monkeypatch, svc)
+    with pytest.raises(HttpError):
+        gmail.has_written_to("linkedin.com")
+    svc.get_errors = {}
+    assert not gmail.has_written_to("linkedin.com")  # asked again: a failure isn't cached
+    assert svc.queries == ["in:sent to:linkedin.com"] * 2
+
+
+def test_has_written_to_domain_without_sent_mail(monkeypatch):
+    svc = SentMailService({})
+    assert not sent_mail_gmail(monkeypatch, svc).has_written_to("corp.com")
+    assert svc.reads == []

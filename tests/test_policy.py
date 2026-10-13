@@ -317,6 +317,37 @@ def test_needs_reply_blocks_group_for_known_contact_without_keep_signal(cfg, acc
     assert {"Jev/Review", "Jev/Needs Reply"} <= set(d.add_labels)
 
 
+@pytest.mark.parametrize("contact", ["wrote_to_sender", "wrote_to_their_domain"])
+def test_needs_reply_from_a_no_reply_sender_ignores_the_known_contact(cfg, account, contact):
+    # Nobody reads a reply to messages-noreply@: a reply signal alone can't keep it.
+    sig = make_signals(sender="messages-noreply@linkedin.com", sender_domain="linkedin.com")
+    c = probs("notification", 0.62, newsletter=0.36, important=0.01)
+    c.needs_reply = 0.75
+    d = decide(cfg, account, sig, c, previous_contact=contact)
+    assert d.archive and d.archive_group and not d.low_confidence
+    assert "Jev/Needs Reply" not in d.add_labels
+
+
+def test_needs_reply_from_a_no_reply_sender_still_vetoed_by_the_keep_signal(cfg, account):
+    # "A reply or an action": with a keep signal the email may need an action, as for a stranger.
+    sig = make_signals(sender="noreply@bank.com", sender_domain="bank.com")
+    c = probs("notification", 0.62, transactional=0.32, action_required=0.06)
+    c.needs_reply = 0.75
+    d = decide(cfg, account, sig, c, previous_contact="wrote_to_their_domain")
+    assert d.low_confidence and not d.archive
+    assert {"Jev/Review", "Jev/Needs Reply"} <= set(d.add_labels)  # kept: the label stays
+
+
+def test_needs_reply_from_no_reply_with_a_human_reply_to_keeps_the_veto(cfg, account):
+    sig = make_signals(
+        sender="noreply@vendor.com", sender_domain="vendor.com", reply_to=("ana@vendor.com",)
+    )
+    c = probs("notification", 0.62, newsletter=0.36, important=0.01)
+    c.needs_reply = 0.75
+    d = decide(cfg, account, sig, c, previous_contact="wrote_to_their_domain")
+    assert d.low_confidence and not d.archive
+
+
 @pytest.mark.parametrize("contact", ["never", None])
 def test_needs_reply_relaxed_for_unknown_or_new_contact(cfg, account, contact):
     c = probs("cold_outreach", 0.60, marketing=0.36, important=0.0)

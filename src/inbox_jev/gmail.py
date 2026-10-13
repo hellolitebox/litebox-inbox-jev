@@ -33,6 +33,11 @@ SCOPES = [
 BATCH_SIZE = 50
 # Retries (exponential backoff with jitter) for a label check asked again outside its batch.
 SINGLE_RETRIES = 3
+# Sent emails to a domain whose recipients are read (newest first) to tell a person on it from
+# machine addresses only (signals.wrote_to_person_at). Bounds the domain check's cost.
+SENT_DOMAIN_SAMPLE = 25
+_RECIPIENT_HEADERS = ["To", "Cc", "Bcc"]
+_RECIPIENT_KEYS = tuple(h.lower() for h in _RECIPIENT_HEADERS)  # Email.headers keys
 
 
 def is_token_refresh_error(exc: BaseException) -> bool:
@@ -274,12 +279,15 @@ class Gmail:
             body=extract_body(msg.get("payload", {})),
         )
 
-    def get_headers(self, message_id: str, names: list[str]) -> Email:
-        """Only the named headers of a message (no body): format=metadata."""
+    def get_headers(self, message_id: str, names: list[str], num_retries: int = 0) -> Email:
+        """Only the named headers of a message (no body): format=metadata.
+
+        `num_retries`: googleapiclient's own retries (backoff) of a 429, 5xx or rate-limit 403.
+        """
         msg = (
             self._svc.messages()
             .get(userId="me", id=message_id, format="metadata", metadataHeaders=names)
-            .execute()
+            .execute(num_retries=num_retries)
         )
         return _to_email(msg, snippet="", body="")
 
@@ -359,15 +367,58 @@ class Gmail:
         return self._svc.messages().get(userId="me", id=message_id, format="minimal")
 
     def has_written_to(self, query: str) -> bool:
-        """Whether any sent email matches `to:<query>` (an address or a domain). Cached."""
+        """Whether I wrote to `query`, an address or a domain. Cached for this object's life.
+
+        An address: any sent email matching `to:<address>` (one search). A domain: a sent email
+        matching `to:<domain>` that went to a person on it (`_wrote_to_person_at_domain`).
+        """
         if query not in self._written:
-            resp = (
-                self._svc.messages()
-                .list(userId="me", q=f"in:sent to:{query}", maxResults=1)
-                .execute()
-            )
-            self._written[query] = bool(resp.get("messages"))
+            if "@" in query:
+                ids, _ = self._sent_ids(query, 1)
+                self._written[query] = bool(ids)
+            else:
+                self._written[query] = self._wrote_to_person_at_domain(query)
         return self._written[query]
+
+    def _sent_ids(self, query: str, limit: int) -> tuple[list[str], bool]:
+        """Up to `limit` ids of sent emails matching `to:<query>` (newest first), and whether
+        Gmail has more."""
+        resp = (
+            self._svc.messages()
+            .list(userId="me", q=f"in:sent to:{query}", maxResults=limit)
+            .execute(num_retries=SINGLE_RETRIES)
+        )
+        return [m["id"] for m in resp.get("messages", [])], bool(resp.get("nextPageToken"))
+
+    def _wrote_to_person_at_domain(self, domain: str) -> bool:
+        """Whether a sent email to `domain` had a recipient on it that isn't a machine address.
+
+        Reads the To/Cc/Bcc headers (format=metadata, no body) of the newest
+        SENT_DOMAIN_SAMPLE matches, one at a time, and stops at the first that counts
+        (signals.wrote_to_person_at), so a real contact's domain costs one list call and
+        usually one read. A domain written to only at machine addresses (replies to
+        notifications) costs the list call and one read per match, at most SENT_DOMAIN_SAMPLE.
+        When that many all went to machines and Gmail has more, the answer is yes: an older
+        email might be to a person, and a missed contact is the dangerous side. An email deleted
+        between the search and the read (HTTP 404) is skipped; any other error is raised once
+        googleapiclient's retries (SINGLE_RETRIES, on 429, 5xx and rate-limit 403) run out, for
+        the list call and each read: a transient error would make previous_contact unknown.
+        """
+        ids, more = self._sent_ids(domain, SENT_DOMAIN_SAMPLE)
+        for message_id in ids:
+            try:
+                sent = self.get_headers(message_id, _RECIPIENT_HEADERS, SINGLE_RETRIES)
+            except Exception as exc:
+                if is_not_found(exc):
+                    continue
+                raise
+            recipients = [v for name in _RECIPIENT_KEYS for v in sent.headers.get(name, [])]
+            if signals.wrote_to_person_at(recipients, domain):
+                return True
+        if ids and more:
+            log.info("sent-mail sample inconclusive: counted as written", extra={"read": len(ids)})
+            return True
+        return False
 
     def labels(self) -> dict[str, str]:
         """Label name -> id (user and system labels)."""

@@ -65,6 +65,24 @@ class ContactGmail:
         ({"gmail.com"}, "x@gmail.com", "never", ["x@gmail.com"]),  # free mail: no domain check
         ({"acme.com"}, "y@acme.com", "never", ["y@acme.com"]),  # my own domain
         ((), "x@corp.com OR from:me", None, []),  # never builds a query from odd input
+        # A machine sender is never searched for itself, only its domain.
+        (
+            {"messages-noreply@linkedin.com"},
+            "messages-noreply@linkedin.com",
+            "never",
+            ["linkedin.com"],
+        ),
+        (
+            {"linkedin.com"},
+            "messages-noreply@linkedin.com",
+            "wrote_to_their_domain",
+            ["linkedin.com"],
+        ),
+        ({"bounce@shop.com"}, "bounce@shop.com", "never", ["shop.com"]),
+        ({"noreply@gmail.com"}, "noreply@gmail.com", "never", []),  # free mail: nothing to ask
+        ({"reply@corp.com"}, "reply@corp.com", "wrote_to_sender", ["reply@corp.com"]),  # human
+        # A company called Reply under a two-level public suffix is a person, searched for itself.
+        ({"ana@reply.com.ar"}, "ana@reply.com.ar", "wrote_to_sender", ["ana@reply.com.ar"]),
     ],
 )
 def test_previous_contact(written, sender, expected, queries):

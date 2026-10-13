@@ -231,7 +231,7 @@ With the shipped thresholds (0.0), a keep answer is always applied and never goe
 |---|---|---|
 | 1 | `archive_group_min_confidence` is set (remove it to disable the group) | 0.90 |
 | 2 | Jev's top category has action `archive` or `archive_unsubscribe` (spam and keep categories never use the group) | |
-| 3 | Needs-reply veto doesn't apply. It applies when `needs_reply ≥ 0.7` **and** either `previous_contact` is `wrote_to_sender` / `wrote_to_their_domain`, or the keep categories (`important` + `action_required`) together reach `archive_group_reply_keep_probability` | 0.05 |
+| 3 | Needs-reply veto doesn't apply. It applies when `needs_reply ≥ 0.7` **and** either `previous_contact` is `wrote_to_sender` / `wrote_to_their_domain` and the email can be replied to (not [`no_reply`](#48-machine-and-no-reply-addresses)), or the keep categories (`important` + `action_required`) together reach `archive_group_reply_keep_probability` | 0.05 |
 | 4 | Floor = max(`archive_group_min_confidence`, the top category's `threshold`): the group never lowers a bar | 0.90 |
 | 5 | The probabilities of the counted categories add up to the floor or more. A category counts when its action is `archive`/`archive_unsubscribe`, it is in `act_categories` (when the account sets it), and it is the top category or its threshold (the account's `min_confidence`, else the category's own) is at most the floor | 0.80 / 0.90 ≤ 0.90: every archive category counts |
 
@@ -242,6 +242,14 @@ signal blocks the group.
 
 When the veto applies, the email falls through to Review, and since it isn't archived it also
 gets `Jev/Needs Reply`.
+
+For a **no-reply** email (the sender is a no-reply address and so is every `Reply-To`, see
+[4.8](#48-machine-and-no-reply-addresses)) the known contact doesn't count: nobody reads a reply,
+so the reply signal is judged as for a stranger, by the keep categories alone. Jev's question
+asks for "a reply or an action", so the keep-signal half of the veto still applies, and a kept
+no-reply email still gets `Jev/Needs Reply` (the action may be real)
+([EX-25](#ex-25--a-no-reply-sender-from-a-domain-you-write-to),
+[ADR 0032](decisions/0032-machine-addresses-make-no-known-contact.md)).
 
 ### 3.3 Unsubscribe conditions
 
@@ -450,15 +458,32 @@ restored). See [EX-20](#ex-20--restore-with-an-email-deleted-in-gmail).
 1. The sender (resolved: a trusted group's author) is lowercased and must match
    `^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$`. Otherwise `None` with no query (odd characters would
    change the search).
-2. Gmail search `in:sent to:<sender>` (`maxResults=1`). A hit → `wrote_to_sender`.
+2. Unless the sender is a [machine address](#48-machine-and-no-reply-addresses) (writing to
+   `noreply@` or a bounce address doesn't make anyone a contact, so it isn't searched): Gmail
+   search `in:sent to:<sender>` (`maxResults=1`). A hit → `wrote_to_sender`.
 3. Unless the sender's domain is a free-mail provider (`gmail.com`, `googlemail.com`,
    `outlook.com`, `hotmail.com`, `live.com`, `msn.com`, `yahoo.com`, `icloud.com`, `me.com`,
    `aol.com`, `proton.me`, `protonmail.com`, `gmx.com`) or the account's own domain: search
-   `in:sent to:<domain>`. A hit → `wrote_to_their_domain`.
-4. Otherwise `never`.
+   `in:sent to:<domain>` (`maxResults=25`, `gmail.SENT_DOMAIN_SAMPLE`), then read the `To`, `Cc`
+   and `Bcc` headers (`format=metadata`, no body) of the matches, newest first, one at a time.
+   The first email with a recipient on the domain (or a subdomain) that isn't a machine address
+   → `wrote_to_their_domain` (`signals.wrote_to_person_at`). An email with no recipient on the
+   domain at all (Gmail's `to:` matched something the headers don't show) also counts, as
+   before. When all 25 went only to machine addresses and Gmail has more, it counts too (an
+   older one might be to a person; logged as `sent-mail sample inconclusive`). An email deleted
+   between the search and the read (404) is skipped. The `list` and each read retry a 429, 5xx or
+   rate-limit 403 with backoff (googleapiclient, `gmail.SINGLE_RETRIES` = 3) before failing.
+4. Otherwise `never`. So replies to LinkedIn notifications (`m-…@bounce.linkedin.com`) no
+   longer make every LinkedIn email a known contact
+   ([EX-24](#ex-24--replies-to-notifications-dont-make-a-contact)).
 
 Each query's answer is cached in the `Gmail` object, so per account per run. Any exception →
 `None` (logged as a warning, not cached).
+
+**Cost** (Gmail quota units: `messages.list` and `messages.get` cost 5 each), per new sender and
+run: the address search is one `list`. The domain search is one `list` plus one metadata `get`
+per match read, stopping at the first person: usually one read for a real contact's domain, and
+at most 25 (130 units) for a domain written to only at machine addresses.
 
 When it runs: on the Jev path for every email (in every mode, including `dry_run`), and on the
 rule path only when `triage.rule_needs_contact` says it can change an unsubscribe. Never for
@@ -468,7 +493,7 @@ Consequences of each value:
 
 | Value | Jev state | Needs-reply veto on the archive group | `cold_outreach` unsubscribe (`run`) | `unsubscribe-retry` | Auto rule |
 |---|---|---|---|---|---|
-| `wrote_to_sender` / `wrote_to_their_domain` | sent | any reply signal vetoes | no (`known_contact_kept` when verified and not a group) | `skipped` | doesn't count in a category that spares known contacts, verified or not, group or not |
+| `wrote_to_sender` / `wrote_to_their_domain` | sent | any reply signal vetoes (a no-reply email: only with keep probability ≥ 0.05) | no (`known_contact_kept` when verified and not a group) | `skipped` | doesn't count in a category that spares known contacts, verified or not, group or not |
 | `never` | sent | only with keep probability ≥ 0.05 | yes | proceeds | normal |
 | `None` | key left out | only with keep probability ≥ 0.05 | **yes** (other checks still apply) | **held** | normal |
 
@@ -572,6 +597,31 @@ and the instruction to judge by who wrote it and why, explaining `previous_conta
 personal-looking pitch from a sender I never wrote to is usually cold outreach"); one `Noul` for
 `needs_reply`; one `Noul` per tag. The answer gives the category, its confidence, every
 category's probability, `needs_reply` and the tag probabilities.
+
+### 4.8 Machine and no-reply addresses
+
+One set of pure helpers in `signals.py`, used by both guards. When unsure, an address is **not**
+a machine: a false "machine" hides a real contact, which archives (and unsubscribes) more, the
+dangerous direction ([ADR 0032](decisions/0032-machine-addresses-make-no-known-contact.md)).
+
+| Helper | Yes | No (examples) |
+|---|---|---|
+| `is_no_reply_address` | Local part `noreply`, `no-reply`, `no_reply`, `donotreply`, `do-not-reply`, `do_not_reply`, alone or as one piece of a local part split on `.` `_` `+` `-` (`messages-noreply@`, `noreply-billing@`, `alerts.no-reply@`) | `norah@`, `noreplies@`, `reply@`, `notifications@`, `info@`, `jane@noreply.com` |
+| `is_automated_address` | Any no-reply address; local part `bounce`/`bounces` alone, followed by `+` or `=`, or followed by `.` `_` `-` and a token with 3+ digits (`bounce-12345-67@`); `reply+<token>`; `reply-<token with 3+ digits>`; `mailer-daemon`, `postmaster`; a host with a `bounce`, `bounces` or `reply` label left of its registrable domain (`m-a175…@bounce.linkedin.com`, `reply+…@reply.github.com`, `x@bounce.linkedin.co.uk`) | `reply@company.com`, `reply-team@`, `reply-all2@`, `replies@`, `bouncer@`, `bounce.house@`, `bounce-rentals@`, `sam@reply.io`, `ana@reply.com.ar`, `jane@reply.co.uk`, `notifications@github.com` |
+| `Signals.no_reply` | The (resolved) sender is a no-reply address **and** every `Reply-To` address is too (or there is none) | A `Reply-To` to anything else (a person, a help desk, a reply-by-email token) |
+
+- **Registrable domain** (no public suffix list): the last two labels (`acme.com`, `reply.io`),
+  or the last three when the TLD has two letters and the label before it has at most 4
+  characters, so it can be a ccTLD's public suffix (`reply.com.ar`, `reply.co.uk`,
+  `bounces.com.br`, `x.gob.ar`, `x.adv.br`, `x.gouv.fr`). Erring long only makes fewer machine
+  hosts: a short name under a ccTLD (`bounce.sap.de`) isn't recognised, the safe side.
+- `is_automated_address` is used by `previous_contact`: a machine sender isn't searched for itself,
+  and the domain search ignores sent emails whose recipients on the domain are all machines. In
+  the domain search the labels of the searched domain (the sender's) never count either, so a
+  person at `reply.com.ar` counts for `reply.com.ar` whatever the suffix rule says.
+- `no_reply` is used by the archive group's needs-reply veto ([3.2](#32-confidence-outcomes-jev-path)).
+  `Jev/Needs Reply` itself is unchanged: Jev's question covers "a reply or an action", and a
+  no-reply email can still ask for an action.
 
 ## 5. Worked examples
 
@@ -886,6 +936,38 @@ the probabilities that matter are shown; the rest are ~0.
   its message can echo the email, which must never be stored or logged
   ([ADR 0030](decisions/0030-stop-asking-jev-when-it-is-down.md)).
 
+### EX-24 — Replies to notifications don't make a contact
+
+- **Test**: `test_ex24_replies_to_notifications_make_no_known_contact`
+- **Input**: "Guillermo, you have 107 new lead suggestions" from
+  `messages-noreply@social.example` (the real case was LinkedIn). Your sent mail has 12 emails
+  from 2021 to `m-a175…@bounce.social.example` (replies to notifications), none to a person at
+  `social.example`. Jev: notification 0.62, newsletter 0.36, important 0.01; `needs_reply` 0.75.
+- **Outcome**: `previous_contact` = `never`: the sender isn't searched (a machine address), and
+  the domain search reads the `To`/`Cc`/`Bcc` of the 12 matches and finds only machine
+  addresses. The email is archived as `notification` through the archive group, without Review
+  or `Jev/Needs Reply`. With one more sent email to `jane@social.example` it would be
+  `wrote_to_their_domain` again (one read: the newest match).
+- **Why**: before, any sent email matching `to:social.example` made every email from that
+  domain a known contact, so a reply signal of 0.75 kept a routine digest in Review. Writing to
+  a bounce address is replying to a machine, not knowing someone
+  ([ADR 0032](decisions/0032-machine-addresses-make-no-known-contact.md)).
+
+### EX-25 — A no-reply sender from a domain you write to
+
+- **Test**: `test_ex25_no_reply_sender_reply_signal_is_judged_like_a_strangers`
+- **Input**: `noreply@vendor.example`, a domain you have written to (`previous_contact` =
+  `wrote_to_their_domain`), no `Reply-To`. Jev as EX-24: notification 0.62, newsletter 0.36,
+  important 0.01; `needs_reply` 0.75.
+- **Outcome**: archived as `notification` through the archive group. The same email with
+  `Reply-To: Ana <ana@vendor.example>` stays in Review with `Jev/Notifications` and
+  `Jev/Needs Reply`, as EX-10. With action_required 0.06 (transactional 0.32) instead it also
+  stays in Review, with `Jev/Needs Reply`.
+- **Why**: a reply to a no-reply address reaches no one, so knowing the domain says nothing
+  about whether this email needs one; its reply signal is judged like a stranger's, by the keep
+  categories (an action may still be needed). A `Reply-To` elsewhere makes it replyable again
+  ([ADR 0032](decisions/0032-machine-addresses-make-no-known-contact.md)).
+
 ## 6. Glossary
 
 - **Action**: what a category does: `keep`, `archive`, `archive_unsubscribe`, `spam`.
@@ -911,10 +993,15 @@ the probabilities that matter are shown; the rest are ~0.
 - **Group author / relayed_by**: the person who wrote to a Google Group, and the group address,
   when the group is trusted (`group_domains`).
 - **Hands off**: an email you edited is left as it is and not revisited in that mode.
+- **Machine address**: an address no person reads (`signals.is_automated_address`, [4.8](#48-machine-and-no-reply-addresses)):
+  writing to one doesn't make a known contact.
+- **No-reply email**: the sender is a no-reply address and so is every `Reply-To`
+  (`Signals.no_reply`); its known contact doesn't count for the needs-reply veto.
 - **Keep categories**: `action: keep` (`important`, `action_required`). Their summed probability
   is the **keep probability**; ≥ 0.02 (other than the decided one) is the auto-rule **keep
   signal**, ≥ 0.05 enables the needs-reply veto on the group.
-- **Known contact**: `previous_contact` is `wrote_to_sender` or `wrote_to_their_domain`.
+- **Known contact**: `previous_contact` is `wrote_to_sender` or `wrote_to_their_domain`, from
+  sent mail to a person (not a machine address).
   `known_contact_kept`: an unsubscribe was skipped because of one (verified, non-group sender).
 - **`list_key`**: identity of a list for "once per list": `List-Id`, else the sender domain.
 - **Low confidence / Review**: below the threshold and no archive group: `Jev/Review` + the
@@ -938,6 +1025,18 @@ Behaviour found while writing this spec, documented as it is today:
 - If Jev refuses every request the same way (e.g. a change on its side rejects our state with
   400/422), each run gives up on the 3 emails that hit it before the pass stops asking Jev.
   After the fix, `inbox-jev retry-errors` plus `run --lookback` recovers them.
+- The address search (`to:<sender>`) trusts any hit, so Gmail's loose `to:` matching could
+  still count an email to a similar address; only the domain search reads recipients.
+- A domain you wrote to only at machine addresses more than 25 times (e.g. many replies to
+  GitHub notifications at `reply.github.com`) still counts as known: only the newest 25 matches
+  are read, and the rest is assumed to hold a person.
+- The registrable domain is a heuristic, not the public suffix list: under a deeper or longer
+  public suffix (`wa.gov.au`, `kommune.no`, `blogspot.com`), a company whose own name is `reply`,
+  `bounce` or `bounces` (`kim@reply.wa.gov.au`) is taken as a machine sender and isn't searched
+  for itself (its domain search is unaffected). Rare enough not to need a dependency.
+- Machine addresses that need context to recognise (`notifications@`, `updates@`, opaque VERP
+  tokens on a normal host, a ticketing system's `support+123@`) are not detected: they still
+  make a known contact. Being wrong there keeps more mail, the safe side.
 - An email processed again in a stronger mode (`label`, then `act`, or after `reprocess`) is
   sent to Jev again, and that answer counts toward an auto rule a second time: one email can
   give a sender two of the three hits.

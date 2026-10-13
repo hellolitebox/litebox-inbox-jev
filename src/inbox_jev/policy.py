@@ -132,7 +132,7 @@ def decide(
     if decision.confidence >= threshold:
         _apply(cfg, decision)
         _check_unsubscribe(cfg, account, sig, decision, previous_contact)
-    elif _archive_group_confident(cfg, account, classification, threshold, previous_contact):
+    elif _archive_group_confident(cfg, account, sig, classification, threshold, previous_contact):
         # Jev is sure the email gets archived, just not which archive category fits best
         # (e.g. notification 0.55 / newsletter 0.45). Archive it under the top category, but
         # never unsubscribe: that still needs the category's own confidence.
@@ -287,6 +287,7 @@ def _group_list(sig: Signals, account: Account) -> bool:
 def _archive_group_confident(
     cfg: CategoriesConfig,
     account: Account,
+    sig: Signals,
     classification: Classification,
     threshold: float,
     previous_contact: str | None = None,
@@ -306,14 +307,16 @@ def _archive_group_confident(
       categories (important, action_required) together reach
       `archive_group_reply_keep_probability`: every pitch "expects a reply", so the reply
       signal only matters when the email might be from someone who actually needs one. For a
-      known contact (I wrote to the sender or their domain) any reply signal blocks the group.
+      known contact (I wrote to the sender or their domain) any reply signal blocks the group,
+      unless the email can't be replied to (`Signals.no_reply`: a no-reply sender and no
+      Reply-To elsewhere); then it is judged like a stranger's, by the keep categories alone.
     """
     floor = cfg.archive_group_min_confidence
     top = classification.category
     if floor is None or cfg.by_key[top].action not in ARCHIVE_ACTIONS:
         return False
     if classification.needs_reply >= cfg.needs_reply.threshold:
-        if previous_contact in KNOWN_CONTACT:
+        if previous_contact in KNOWN_CONTACT and not sig.no_reply:
             return False
         keep = cfg.keep_probability(classification.probabilities)
         if keep >= cfg.archive_group_reply_keep_probability:
