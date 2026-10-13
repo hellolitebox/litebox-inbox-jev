@@ -101,9 +101,10 @@ scripts/check_branch.sh <branch> --account you@example.com --ids ID …   # --ig
 ```
 
 The compose service still mounts `data/` read-write; the script must never write it (no
-`make_session_factory`, which runs `create_all`). A branch that changes `pyproject.toml` or
-`uv.lock` is refused: build a separate image instead. Put the output in the PR's "Verification"
-section (QA checks for it, see the reviewer's "Real-mail check"); never log or post email bodies.
+`db.make_engine` or `db.open_sessions`, which run `create_all`). A branch that changes
+`pyproject.toml` or `uv.lock` is refused: build a separate image instead. Put the output in the
+PR's "Verification" section (QA checks for it, see the reviewer's "Real-mail check"); never log
+or post email bodies.
 
 ## Conventions
 - Dependencies are locked in `uv.lock`: after changing `pyproject.toml`, run `uv lock` and commit
@@ -111,11 +112,11 @@ section (QA checks for it, see the reviewer's "Real-mail check"); never log or p
   Dependabot opens weekly update PRs, which take the Dependabot lane (see the workflow above).
 - `ruff` is pinned twice: in the `dev` extra of `pyproject.toml` and as `rev` in
   `.pre-commit-config.yaml`. Bump both together (Dependabot only updates `pyproject.toml`).
-- `uv` is pinned twice: the `ghcr.io/astral-sh/uv` stage tag in the `Dockerfile` and the
-  `setup-uv` `version` in `.github/workflows/ci.yml`. Bump both together: Dependabot only updates
-  the Dockerfile tag, and CI's `test` job fails when the two differ. Don't add
-  `[tool.uv] required-version`: Dependabot's bundled uv would refuse to lock and no dependency
-  PRs would be opened.
+- `uv` is pinned twice: the `ghcr.io/astral-sh/uv` stage tag in the `Dockerfile` and
+  `UV_VERSION` in `.github/workflows/ci.yml` (every job's `setup-uv`). Bump both together:
+  Dependabot only updates the Dockerfile tag, and CI's `test` job fails when the two differ. Don't
+  add `[tool.uv] required-version`: Dependabot's bundled uv would refuse to lock and no
+  dependency PRs would be opened.
 - The base image's Python (`python:3.x-slim` in the `Dockerfile`) must equal `PYTHON_VERSION`
   in `ci.yml`. The `docker` job checks it, so a Dependabot base-image bump needs `PYTHON_VERSION`
   bumped in the same PR. The `docker` job also builds the image, smoke-tests it as a non-root
@@ -123,9 +124,21 @@ section (QA checks for it, see the reviewer's "Real-mail check"); never log or p
   `scripts/deploy.sh` deploys (ADR 0029). Base images are pinned by tag **and** digest, and
   GitHub Actions by commit SHA with the version as a comment; Dependabot bumps both halves, so
   keep that shape when editing them by hand.
-- Python ≥ 3.11, ruff (line length 100), mypy (`[tool.mypy]` in `pyproject.toml`: `src` and
-  `scripts`; only `yaml`, `googleapiclient` and `google_auth_oauthlib` are untyped, their objects
-  are `Any`), pytest. No network calls in tests: use the fakes in `tests/fakes.py`.
+- Python ≥ 3.11 (`requires-python`; CI's `test-min-python` job runs the tests on
+  `MIN_PYTHON_VERSION` and checks it equals `requires-python`, so bump them together), ruff (line
+  length 100), mypy (`[tool.mypy]` in `pyproject.toml`: `src`, `scripts` and `tests/fakes.py`,
+  so the fakes are checked against the protocols they stand in for, e.g. `triage.GmailApi`; only
+  `yaml`, `googleapiclient` and `google_auth_oauthlib` are untyped, their objects are `Any`),
+  pytest. No network calls in tests: use the fakes in `tests/fakes.py`, injected (`Context(…,
+  gmail=…, classifier=…)`), not monkeypatched into modules.
+- pytest turns `ResourceWarning` (and the unraisable-exception warning a finalizer's
+  `ResourceWarning` becomes) into errors, so an engine, file or client left open fails the
+  tests: open the DB with `db.open_sessions` (a context manager that disposes the engine), and
+  in tests with the `make_sessions` fixture.
+- Coverage: CI's `test` job runs `pytest --cov` (report in the log and the job summary) and
+  fails under `[tool.coverage.report] fail_under` in `pyproject.toml`. Locally,
+  `uv run pytest --cov` does the same. Raise `fail_under` when coverage grows; never lower it to
+  get a PR through.
 - `policy.py` stays pure (no I/O). Gmail access goes in `gmail.py` and orchestration in `triage.py`.
 - New categories or labels go in `categories.yaml`, not in code.
 - Anything keyed on the sender (rules, corrections, `previous_contact`, allowlist) uses

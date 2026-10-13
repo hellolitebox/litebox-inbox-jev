@@ -75,7 +75,7 @@ def test_stale_exact_rule_sends_sender_to_jev_not_to_the_domain_rule(setup, capl
 
 def test_flags_only_jev_failure_still_labels_allowlist_and_keep_rule(setup, caplog):
     ctx, gmail, account = setup
-    ctx = triage.Context(ctx.settings, ctx.cfg, ctx.sessions, classifier=JevDown({}))
+    ctx = triage.Context(ctx.settings, ctx.cfg, ctx.sessions, ctx.gmail, classifier=JevDown({}))
     with ctx.sessions() as s:
         rules.set_rule(s, account.email, "promo@shop.com", "important", RuleSource.CORRECTION)
         s.commit()

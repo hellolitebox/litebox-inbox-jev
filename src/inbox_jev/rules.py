@@ -8,7 +8,7 @@ from enum import StrEnum
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .classifier import Classification
+from .classification import Classification
 from .config import Action, CategoriesConfig
 from .db import SenderRule
 from .policy import KNOWN_CONTACT, Decision, rule_keys, spares_known_contacts

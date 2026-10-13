@@ -22,6 +22,7 @@ from fakes import (
     JevFails,
     SentMailService,
     email,
+    gmail_factory,
     jev_http_error,
     sent_mail_gmail,
 )
@@ -33,7 +34,8 @@ from typesafe_sdk import (
 
 from inbox_jev import digest, rules, triage
 from inbox_jev import unsubscribe as unsub
-from inbox_jev.classifier import Classification, build_state
+from inbox_jev.classification import Classification
+from inbox_jev.classifier import build_state
 from inbox_jev.config import Account, DigestLanguage, Mode, Settings
 from inbox_jev.db import (
     MAX_ERROR_ATTEMPTS,
@@ -41,7 +43,6 @@ from inbox_jev.db import (
     Run,
     SenderRule,
     Unsubscribe,
-    make_session_factory,
 )
 from inbox_jev.gmail import Email, extract_body
 from inbox_jev.policy import decide, plan
@@ -68,15 +69,15 @@ def account():
 
 
 @pytest.fixture
-def spec(cfg, account, monkeypatch):
+def spec(cfg, account, make_sessions):
     """End-to-end triage with fake Gmail and a fake Jev, as the `setup` fixture (conftest.py)."""
     gmail = FakeGmail([])
     gmail.written = frozenset()
-    monkeypatch.setattr(triage, "Gmail", lambda creds: gmail)
-    monkeypatch.setattr(triage, "load_credentials", lambda d, e: None)
     settings = Settings(_env_file=None, typesafe_api_key="x", database_url="sqlite:///:memory:")
-    sessions = make_session_factory(settings.database_url)
-    ctx = triage.Context(settings, cfg, sessions, classifier=FakeClassifier({}))
+    sessions = make_sessions(settings.database_url)
+    ctx = triage.Context(
+        settings, cfg, sessions, gmail_factory(gmail), classifier=FakeClassifier({})
+    )
     return ctx, gmail, account
 
 
@@ -109,7 +110,7 @@ def _one_click_posts(monkeypatch):
 # --- EX-01 -----------------------------------------------------------------------------------
 
 
-def test_ex01_tool_digest_split_is_archived_by_the_group(cfg, account):
+def test_ex01_tool_digest_split_is_archived_by_the_group(cfg, account, make_sessions):
     """EX-01 (docs/how-it-decides.md §5, §3.2 archive group)."""
     sig = make_signals(sender="digest@analytics.example", sender_domain="analytics.example")
     jev = answer("notification", notification=0.55, newsletter=0.42, marketing=0.02, important=0.01)
@@ -127,7 +128,7 @@ def test_ex01_tool_digest_split_is_archived_by_the_group(cfg, account):
     sure = answer("notification", notification=0.96, newsletter=0.035)
     d_sure = decide(cfg, strict, sig, sure, previous_contact="never")
     assert d_sure.archive_group and sure.confidence >= cfg.auto_rule.min_confidence
-    sessions = make_session_factory("sqlite:///:memory:")
+    sessions = make_sessions("sqlite:///:memory:")
     with sessions() as s:
         rules.record_auto(s, cfg, account.email, sig.sender, jev, d)
         rules.record_auto(s, cfg, account.email, sig.sender, sure, d_sure)
@@ -426,7 +427,9 @@ def test_ex10_known_vendor_follow_up_stays_in_review(cfg, account):
 @pytest.mark.parametrize(
     "signals_kw", [{"unsubscribe_https": [], "unsubscribe_mailto": []}, {"dmarc_pass": False}]
 )
-def test_ex11_unverified_cold_outreach_is_archived_never_unsubscribed(cfg, account, signals_kw):
+def test_ex11_unverified_cold_outreach_is_archived_never_unsubscribed(
+    cfg, account, signals_kw, make_sessions
+):
     """EX-11 (docs/how-it-decides.md §5, §3.3 condition 3, §3.5 auto rules)."""
     sig = make_signals(
         sender="founder@devshop.example", sender_domain="devshop.example", **signals_kw
@@ -438,7 +441,7 @@ def test_ex11_unverified_cold_outreach_is_archived_never_unsubscribed(cfg, accou
     p = plan(cfg, d, Mode.ACT)
     assert p.archived and not p.spammed and "SPAM" not in p.add_labels
 
-    sessions = make_session_factory("sqlite:///:memory:")
+    sessions = make_sessions("sqlite:///:memory:")
     with sessions() as s:
         rules.record_auto(s, cfg, account.email, sig.sender, jev, d)
         assert s.query(SenderRule).one().hits == 1  # still counts toward an auto rule
@@ -621,7 +624,7 @@ def test_ex19_flags_only_jev_failure_still_labels(spec, caplog):
         "1": email("1", "Lea <lea@acme.example>", "Budget review"),
         "2": email("2", "Ana <ana@client.example>", "Signed contract by Friday?"),
     }
-    ctx = triage.Context(ctx.settings, ctx.cfg, ctx.sessions, classifier=JevDown({}))
+    ctx = triage.Context(ctx.settings, ctx.cfg, ctx.sessions, ctx.gmail, classifier=JevDown({}))
     with ctx.sessions() as s:
         rules.set_rule(s, account.email, "ana@client.example", "important", RuleSource.CORRECTION)
         s.commit()
@@ -757,7 +760,7 @@ def test_ex21_revoked_jev_key_stops_jev_but_not_rules(spec):
         "4": email("4", "Ana <ana@client.example>", "Signed contract by Friday?"),
     }
     jev = JevFails(jev_http_error(TypeSafeAuthenticationError, 401, {"error": "invalid key"}))
-    ctx = triage.Context(ctx.settings, ctx.cfg, ctx.sessions, classifier=jev)
+    ctx = triage.Context(ctx.settings, ctx.cfg, ctx.sessions, ctx.gmail, classifier=jev)
     with ctx.sessions() as s:
         rules.set_rule(s, account.email, "news@weekly.example", "newsletter", RuleSource.MANUAL)
         s.commit()
@@ -800,7 +803,7 @@ def test_ex22_jev_down_stops_after_three_failures(spec):
         for i in range(1, 6)
     }
     jev = JevFails(TypeSafeAPITimeoutError(30.0))
-    ctx = triage.Context(ctx.settings, ctx.cfg, ctx.sessions, classifier=jev)
+    ctx = triage.Context(ctx.settings, ctx.cfg, ctx.sessions, ctx.gmail, classifier=jev)
     with pytest.raises(triage.JevUnavailable):
         triage.run_account(ctx, account, Mode.ACT)
 
@@ -843,7 +846,7 @@ def test_ex23_jev_refuses_one_email(spec):
             return super().classify(state)
 
     jev = RefusesInvoice({"Issue 41": answer("newsletter", newsletter=0.97)})
-    ctx = triage.Context(ctx.settings, ctx.cfg, ctx.sessions, classifier=jev)
+    ctx = triage.Context(ctx.settings, ctx.cfg, ctx.sessions, ctx.gmail, classifier=jev)
     run = triage.run_account(ctx, account, Mode.ACT)
 
     assert (run.processed, run.errors, run.error) == (1, 1, None)

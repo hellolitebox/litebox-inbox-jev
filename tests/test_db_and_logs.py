@@ -19,8 +19,22 @@ from inbox_jev.rules import RuleSource
 from inbox_jev.unsubscribe import UnsubscribeMethod, UnsubscribeStatus
 
 
-def test_sqlite_file_database_uses_wal_and_busy_timeout(tmp_path):
-    engine = make_engine(f"sqlite:///{tmp_path / 'app.db'}")
+@pytest.fixture
+def engines():
+    """`make_engine` for a test: every engine it made is disposed when the test ends."""
+    made = []
+
+    def make(url):
+        made.append(make_engine(url))
+        return made[-1]
+
+    yield make
+    for engine in made:
+        engine.dispose()
+
+
+def test_sqlite_file_database_uses_wal_and_busy_timeout(tmp_path, engines):
+    engine = engines(f"sqlite:///{tmp_path / 'app.db'}")
     for _ in range(2):  # every pooled connection, not just the first
         with engine.connect() as conn:
             assert conn.exec_driver_sql("PRAGMA journal_mode").scalar() == "wal"
@@ -28,13 +42,13 @@ def test_sqlite_file_database_uses_wal_and_busy_timeout(tmp_path):
         engine.dispose()
 
 
-def test_in_memory_sqlite_still_works():
-    engine = make_engine("sqlite:///:memory:")
+def test_in_memory_sqlite_still_works(engines):
+    engine = engines("sqlite:///:memory:")
     with engine.connect() as conn:
         assert conn.exec_driver_sql("PRAGMA journal_mode").scalar() == "memory"
 
 
-def test_make_engine_adds_error_attempts_to_existing_rows(tmp_path):
+def test_make_engine_adds_error_attempts_to_existing_rows(tmp_path, engines):
     """Deploy story for `messages.error_attempts`: old rows get 0, so they are retried as before."""
     url = f"sqlite:///{tmp_path / 'old.db'}"
     old = create_engine(url)
@@ -51,12 +65,12 @@ def test_make_engine_adds_error_attempts_to_existing_rows(tmp_path):
         )
     old.dispose()
 
-    engine = make_engine(url)
+    engine = engines(url)
     with Session(engine) as s:
         assert s.scalars(select(Message)).one().error_attempts == 0
 
 
-def test_make_engine_adds_missing_columns(tmp_path):
+def test_make_engine_adds_missing_columns(tmp_path, engines):
     url = f"sqlite:///{tmp_path / 'old.db'}"
     old = create_engine(url)
     Base.metadata.create_all(old)
@@ -73,8 +87,8 @@ def test_make_engine_adds_missing_columns(tmp_path):
         )
     old.dispose()
 
-    engine = make_engine(url)
-    make_engine(url)  # idempotent
+    engine = engines(url)
+    engines(url)  # idempotent
     with Session(engine) as s:
         msg = s.scalars(select(Message)).one()
         assert msg.decided_labels is None
@@ -84,7 +98,7 @@ def test_make_engine_adds_missing_columns(tmp_path):
     assert "Piden respuesta (1)" in out and "Old proposal" in out
 
 
-def test_make_engine_adds_not_null_column_with_default(tmp_path):
+def test_make_engine_adds_not_null_column_with_default(tmp_path, engines):
     url = f"sqlite:///{tmp_path / 'old.db'}"
     old = create_engine(url)
     Base.metadata.create_all(old)
@@ -100,8 +114,8 @@ def test_make_engine_adds_not_null_column_with_default(tmp_path):
         )
     old.dispose()
 
-    engine = make_engine(url)
-    make_engine(url)  # idempotent
+    engine = engines(url)
+    engines(url)  # idempotent
     with Session(engine) as s:
         assert s.scalars(select(Message)).one().restored is False
 
@@ -195,8 +209,8 @@ def test_stored_enum_values_never_change(enum, stored):
     assert {member.value for member in enum} == stored
 
 
-def test_enum_members_are_stored_as_their_plain_value():
-    engine = make_engine("sqlite:///:memory:")
+def test_enum_members_are_stored_as_their_plain_value(engines):
+    engine = engines("sqlite:///:memory:")
     with Session(engine) as session:
         session.add(
             Message(

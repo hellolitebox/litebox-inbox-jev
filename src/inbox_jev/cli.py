@@ -7,6 +7,7 @@ import os
 import re
 from collections.abc import Callable
 from datetime import timedelta
+from functools import partial
 from typing import Annotated
 
 import typer
@@ -16,7 +17,7 @@ from . import __version__, labels, logs, rules, triage
 from . import digest as digest_mod
 from . import gmail as gmail_mod
 from .config import Account, Mode, Settings, check_lookback, load_accounts, load_categories
-from .db import Message, MessageStatus, SenderRule, make_session_factory, now
+from .db import Message, MessageStatus, SenderRule, now, open_sessions
 
 app = typer.Typer(no_args_is_help=True, help="Triage Gmail with TypeSafe Jev.")
 auth_app = typer.Typer(no_args_is_help=True, help="Manage Gmail OAuth tokens.")
@@ -142,17 +143,17 @@ def run(
     including a missing TYPESAFE_API_KEY, which fails every pass before Gmail is touched.
     """
     s = _settings(announce=True)
-    ctx = triage.Context(
-        s, load_categories(s.categories_file), make_session_factory(s.database_url)
-    )
+    cfg = load_categories(s.categories_file)
+    connect = partial(gmail_mod.connect, s.google_tokens_dir)
+    with (
+        open_sessions(s.database_url) as sessions,
+        triage.Context(s, cfg, sessions, connect) as ctx,
+    ):
 
-    def run_one(acc: Account) -> None:
-        triage.run_account(ctx, acc, mode, limit, lookback)
+        def run_one(acc: Account) -> None:
+            triage.run_account(ctx, acc, mode, limit, lookback)
 
-    try:
         _each_account(_accounts(s, account), "account run", run_one)
-    finally:
-        ctx.close()
 
 
 @app.command()
@@ -164,18 +165,20 @@ def digest(
     """Send the daily digest to each account's Slack user (exits 1 if any account failed)."""
     s = _settings(announce=not dry_print)  # the timer case announces; a preview doesn't
     cfg = load_categories(s.categories_file)
-    sessions = make_session_factory(s.database_url)
+    with open_sessions(s.database_url) as sessions:
 
-    def send(acc: Account) -> None:
-        with sessions() as session:
-            text = digest_mod.build(session, cfg, acc.email, hours, language=acc.digest_language)
-        if dry_print or not (s.slack_bot_token and acc.slack_user_id):
-            typer.echo(text + "\n")
-            return
-        digest_mod.send_slack(s.slack_bot_token, acc.slack_user_id, text)
-        log.info("digest sent", extra={"account": acc.email})
+        def send(acc: Account) -> None:
+            with sessions() as session:
+                text = digest_mod.build(
+                    session, cfg, acc.email, hours, language=acc.digest_language
+                )
+            if dry_print or not (s.slack_bot_token and acc.slack_user_id):
+                typer.echo(text + "\n")
+                return
+            digest_mod.send_slack(s.slack_bot_token, acc.slack_user_id, text)
+            log.info("digest sent", extra={"account": acc.email})
 
-    _each_account(_accounts(s, account), "digest", send)
+        _each_account(_accounts(s, account), "digest", send)
 
 
 @app.command()
@@ -187,8 +190,8 @@ def restore(
     """Undo: move processed emails back to the inbox and remove Jev labels."""
     s = _settings()
     window = _parse_since(since)
-    gmail = gmail_mod.Gmail(gmail_mod.load_credentials(s.google_tokens_dir, account))
-    with make_session_factory(s.database_url)() as session:
+    gmail = gmail_mod.connect(s.google_tokens_dir, account)
+    with open_sessions(s.database_url) as sessions, sessions() as session:
         result = triage.restore(session, gmail, account, window, category)
     deleted = f" Skipped {result.deleted} deleted in Gmail." if result.deleted else ""
     typer.echo(f"Restored {result.restored} emails.{deleted} Unsubscribes cannot be undone.")
@@ -205,7 +208,7 @@ def reprocess(
     """Have the next act run redo CATEGORY emails Jev left in the inbox."""
     s = _settings()
     cfg = load_categories(s.categories_file)
-    with make_session_factory(s.database_url)() as session:
+    with open_sessions(s.database_url) as sessions, sessions() as session:
         try:
             count = triage.mark_for_reprocess(session, cfg, account, category, low_confidence_only)
         except ValueError as exc:
@@ -220,7 +223,7 @@ def reprocess(
 def retry_errors(account: Annotated[str, typer.Option("--account", "-a")]) -> None:
     """Have the next run retry emails that failed, including those that stopped retrying."""
     s = _settings()
-    with make_session_factory(s.database_url)() as session:
+    with open_sessions(s.database_url) as sessions, sessions() as session:
         count = triage.reset_error_attempts(session, account)
     typer.echo(
         f"Reset {count} failed emails. The next `run` retries those still inside its window: use "
@@ -236,18 +239,19 @@ def unsubscribe_retry(account: AccountOpt = None) -> None:
     """
     s = _settings()
     cfg = load_categories(s.categories_file)
-    ctx = triage.Context(s, cfg, make_session_factory(s.database_url))
+    connect = partial(gmail_mod.connect, s.google_tokens_dir)
+    with (
+        open_sessions(s.database_url) as sessions,
+        triage.Context(s, cfg, sessions, connect) as ctx,
+    ):
 
-    def retry(acc: Account) -> None:
-        gmail = gmail_mod.Gmail(gmail_mod.load_credentials(s.google_tokens_dir, acc.email))
-        with ctx.sessions() as session:
-            for list_key, outcome in triage.retry_unsubscribes(ctx, session, gmail, acc):
-                typer.echo(f"{acc.email} {list_key}: {outcome}")
+        def retry(acc: Account) -> None:
+            gmail = ctx.gmail(acc.email)
+            with ctx.sessions() as session:
+                for list_key, outcome in triage.retry_unsubscribes(ctx, session, gmail, acc):
+                    typer.echo(f"{acc.email} {list_key}: {outcome}")
 
-    try:
         _each_account(_accounts(s, account), "unsubscribe retry", retry)
-    finally:
-        ctx.close()
 
 
 @senders_app.command("backfill")
@@ -259,26 +263,25 @@ def senders_backfill(account: AccountOpt = None) -> None:
     and the command exits 1.
     """
     s = _settings()
-    sessions = make_session_factory(s.database_url)
+    with open_sessions(s.database_url) as sessions:
 
-    def backfill(acc: Account) -> None:
-        gmail = gmail_mod.Gmail(gmail_mod.load_credentials(s.google_tokens_dir, acc.email))
-        with sessions() as session:
-            checked, updated, skipped = triage.backfill_senders(session, gmail, acc)
-        typer.echo(
-            f"{acc.email}: {checked} group emails checked, {updated} senders updated, "
-            f"{skipped} skipped (deleted in Gmail)"
-        )
+        def backfill(acc: Account) -> None:
+            gmail = gmail_mod.connect(s.google_tokens_dir, acc.email)
+            with sessions() as session:
+                checked, updated, skipped = triage.backfill_senders(session, gmail, acc)
+            typer.echo(
+                f"{acc.email}: {checked} group emails checked, {updated} senders updated, "
+                f"{skipped} skipped (deleted in Gmail)"
+            )
 
-    _each_account(_accounts(s, account), "senders backfill", backfill)
+        _each_account(_accounts(s, account), "senders backfill", backfill)
 
 
 @app.command()
 def stats(account: AccountOpt = None, days: int = 7) -> None:
     """Counts per category for the last N days."""
     s = _settings()
-    sessions = make_session_factory(s.database_url)
-    with sessions() as session:
+    with open_sessions(s.database_url) as sessions, sessions() as session:
         query = (
             select(Message.account, Message.category, Message.low_confidence, func.count())
             .where(
@@ -298,7 +301,7 @@ def stats(account: AccountOpt = None, days: int = 7) -> None:
 def rules_list(account: AccountOpt = None, all_rules: bool = typer.Option(False, "--all")) -> None:
     """Show active rules (--all includes auto rules still learning)."""
     s = _settings()
-    with make_session_factory(s.database_url)() as session:
+    with open_sessions(s.database_url) as sessions, sessions() as session:
         query = select(SenderRule).order_by(SenderRule.account, SenderRule.sender_key)
         if account:
             query = query.where(SenderRule.account == account)
@@ -320,7 +323,7 @@ def rules_set(
     cfg = load_categories(s.categories_file)
     if category not in cfg.by_key:
         raise typer.BadParameter(f"unknown category; one of {', '.join(cfg.by_key)}")
-    with make_session_factory(s.database_url)() as session:
+    with open_sessions(s.database_url) as sessions, sessions() as session:
         rules.set_rule(session, account, sender.lower(), category, source=rules.RuleSource.MANUAL)
         session.commit()
     typer.echo(f"{sender} → {category}")
@@ -333,7 +336,7 @@ def rules_delete(
 ) -> None:
     """Remove the rule for SENDER (Jev decides again)."""
     s = _settings()
-    with make_session_factory(s.database_url)() as session:
+    with open_sessions(s.database_url) as sessions, sessions() as session:
         rule = session.scalar(
             select(SenderRule).where(
                 SenderRule.account == account, SenderRule.sender_key == sender.lower()
@@ -354,24 +357,24 @@ def labels_rename(old: str, new: str, account: AccountOpt = None) -> None:
     s = _settings()
     if new not in load_categories(s.categories_file).all_labels():
         typer.echo(f"warning: {new!r} is not a label in {s.categories_file}", err=True)
-    sessions = make_session_factory(s.database_url)
     failed = False
-    for acc in _accounts(s, account):
-        # One account failing (refusal, missing token, Gmail error) doesn't stop the others.
-        try:
-            gmail = gmail_mod.Gmail(gmail_mod.load_credentials(s.google_tokens_dir, acc.email))
-            with sessions() as session:
-                outcome = labels.rename(gmail, session, acc.email, old, new)
-        except ValueError as exc:
-            failed = True
-            typer.echo(f"{acc.email}: refused: {exc}", err=True)
-            continue
-        except Exception as exc:
-            failed = True
-            log.exception("label rename failed", extra={"account": acc.email})
-            typer.echo(f"{acc.email}: failed: {exc}", err=True)
-            continue
-        typer.echo(f"{acc.email}: {old} -> {new}: {outcome}")
+    with open_sessions(s.database_url) as sessions:
+        for acc in _accounts(s, account):
+            # One account failing (refusal, missing token, Gmail error) doesn't stop the others.
+            try:
+                gmail = gmail_mod.connect(s.google_tokens_dir, acc.email)
+                with sessions() as session:
+                    outcome = labels.rename(gmail, session, acc.email, old, new)
+            except labels.LabelRenameRefused as exc:
+                failed = True
+                typer.echo(f"{acc.email}: refused: {exc}", err=True)
+                continue
+            except Exception as exc:
+                failed = True
+                log.exception("label rename failed", extra={"account": acc.email})
+                typer.echo(f"{acc.email}: failed: {exc}", err=True)
+                continue
+            typer.echo(f"{acc.email}: {old} -> {new}: {outcome}")
     if failed:
         raise typer.Exit(1)
 

@@ -2,7 +2,7 @@ import pytest
 
 from inbox_jev import labels
 from inbox_jev.config import Mode
-from inbox_jev.db import Message, make_session_factory
+from inbox_jev.db import Message
 
 SYSTEM = {"INBOX", "SPAM"}
 
@@ -48,9 +48,9 @@ def _msg(account, gmail_id, added, decided):
 
 
 @pytest.fixture
-def factory(tmp_path):
+def factory(tmp_path, make_sessions):
     # File-backed so _rows can read through a fresh session and really check persistence.
-    return make_session_factory(f"sqlite:///{tmp_path}/t.db")
+    return make_sessions(f"sqlite:///{tmp_path}/t.db")
 
 
 @pytest.fixture
@@ -103,7 +103,7 @@ def test_rename_without_gmail_label_still_updates_db(session, rows):
 
 def test_rename_refuses_when_both_exist_and_new_has_emails(session, rows):
     gmail = FakeLabels(["Jev/Revisar", "Jev/Review"], counts={"Jev/Review": 3})
-    with pytest.raises(ValueError, match="has emails"):
+    with pytest.raises(labels.LabelRenameRefused, match="has emails"):
         labels.rename(gmail, session, "me@x.com", "Jev/Revisar", "Jev/Review")
     assert gmail.renamed == [] and gmail.deleted == []
     assert rows()["1"].labels_added[0] == "Jev/Revisar"
@@ -131,7 +131,7 @@ def test_rename_replaces_empty_new_label(session, rows):
 )
 def test_rename_refuses_conflicts(session, rows, existing, old, new, match):
     gmail = FakeLabels(existing)
-    with pytest.raises(ValueError, match=match):
+    with pytest.raises(labels.LabelRenameRefused, match=match):
         labels.rename(gmail, session, "me@x.com", old, new)
     assert gmail.renamed == [] and gmail.deleted == []
     assert rows()["1"].labels_added[0] == "Jev/Revisar"
@@ -144,5 +144,5 @@ def test_rename_allows_case_only_change(session):
 
 
 def test_rename_refuses_same_name(session):
-    with pytest.raises(ValueError):
+    with pytest.raises(labels.LabelRenameRefused):
         labels.rename(FakeLabels([]), session, "me@x.com", "Jev/Spam", "Jev/Spam")

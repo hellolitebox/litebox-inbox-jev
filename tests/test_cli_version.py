@@ -2,6 +2,7 @@
 from."""
 
 import logging
+from contextlib import nullcontext
 from importlib.metadata import version
 
 from typer.testing import CliRunner
@@ -54,7 +55,7 @@ def _stub_digest(monkeypatch):
     settings = Settings(_env_file=None, typesafe_api_key="x", database_url="sqlite:///:memory:")
     monkeypatch.setattr(cli, "Settings", lambda: settings)
     monkeypatch.setattr(cli, "load_categories", lambda path: None)
-    monkeypatch.setattr(cli, "make_session_factory", lambda url: None)
+    monkeypatch.setattr(cli, "open_sessions", lambda url: nullcontext())
     monkeypatch.setattr(cli, "_accounts", lambda s, only: [])
 
 

@@ -1,5 +1,6 @@
 """End-to-end triage passes: what each mode labels, archives, spams and unsubscribes."""
 
+import logging
 import re
 
 import pytest
@@ -221,3 +222,14 @@ def test_corrections_check_reads_labels_in_one_gmail_call(setup):
         s.commit()
     triage.run_account(ctx, account, Mode.LABEL)
     assert sorted(gmail.label_batches[-1]) == ["1", "2", "3", "4"]
+
+
+def test_processed_log_line_times_each_stage(setup, caplog):
+    ctx, gmail, account = setup
+    with caplog.at_level(logging.INFO, logger="inbox_jev.triage"):
+        triage.run_account(ctx, account, Mode.ACT)
+    lines = [r for r in caplog.records if r.getMessage() == "message processed"]
+    assert len(lines) == 4
+    for record in lines:
+        assert set(record.timings_ms) == {"fetch", "lookup", "jev", "apply"}
+        assert all(isinstance(ms, int) and ms >= 0 for ms in record.timings_ms.values())

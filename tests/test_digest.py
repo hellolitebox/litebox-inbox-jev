@@ -15,7 +15,7 @@ from inbox_jev.db import (
     MessageStatus,
     Run,
     Unsubscribe,
-    make_session_factory,
+    open_sessions,
 )
 from inbox_jev.unsubscribe import UnsubscribeMethod, UnsubscribeStatus
 
@@ -133,8 +133,7 @@ def _seed(session: Session, cfg) -> None:
     ],
 )
 def test_digest_renders_in_the_account_language(tmp_path, cfg, language, expected):
-    sessions = make_session_factory(f"sqlite:///{tmp_path / 'digest.db'}")
-    with sessions() as s:
+    with open_sessions(f"sqlite:///{tmp_path / 'digest.db'}") as sessions, sessions() as s:
         _seed(s, cfg)
         text = digest.build(s, cfg, ACCOUNT, language=language)
     for fragment in expected:
@@ -206,8 +205,7 @@ def _seed_counts(session: Session, n: int) -> None:
 def test_counts_are_singular_for_one_and_plural_otherwise(
     tmp_path, cfg, language, n, expected, wrong
 ):
-    sessions = make_session_factory(f"sqlite:///{tmp_path / 'digest.db'}")
-    with sessions() as s:
+    with open_sessions(f"sqlite:///{tmp_path / 'digest.db'}") as sessions, sessions() as s:
         _seed_counts(s, n)
         text = digest.build(s, cfg, ACCOUNT, language=language)
     for fragment in expected:

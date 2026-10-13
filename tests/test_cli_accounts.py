@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from inbox_jev import cli, triage
-from inbox_jev.db import Run, make_session_factory
+from inbox_jev import cli, labels, triage
+from inbox_jev.db import Run, open_sessions
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,9 +31,10 @@ def env(monkeypatch, tmp_path):
     return db
 
 
-def _credentials_failing_for_a(tokens_dir, email):
+def _gmail_failing_for_a(tokens_dir, email):
     if email == "a@acme.com":
         raise OSError("token file unreadable")
+    return object()
 
 
 def test_digest_goes_on_after_a_failed_account(env, monkeypatch):
@@ -61,8 +62,7 @@ def test_digest_needs_no_jev_key(env, monkeypatch):
 
 
 def test_unsubscribe_retry_goes_on_after_a_failed_account_and_closes_jev(env, monkeypatch):
-    monkeypatch.setattr(cli.gmail_mod, "load_credentials", _credentials_failing_for_a)
-    monkeypatch.setattr(cli.gmail_mod, "Gmail", lambda creds: object())
+    monkeypatch.setattr(cli.gmail_mod, "connect", _gmail_failing_for_a)
     monkeypatch.setattr(triage, "retry_unsubscribes", lambda ctx, s, g, acc: [("news.x", "ok")])
     closed = []
     monkeypatch.setattr(triage.Context, "close", lambda self: closed.append(True))
@@ -73,8 +73,7 @@ def test_unsubscribe_retry_goes_on_after_a_failed_account_and_closes_jev(env, mo
 
 
 def test_senders_backfill_goes_on_after_a_failed_account(env, monkeypatch):
-    monkeypatch.setattr(cli.gmail_mod, "load_credentials", _credentials_failing_for_a)
-    monkeypatch.setattr(cli.gmail_mod, "Gmail", lambda creds: object())
+    monkeypatch.setattr(cli.gmail_mod, "connect", _gmail_failing_for_a)
     monkeypatch.setattr(triage, "backfill_senders", lambda s, g, acc: (2, 1, 0))
     result = CliRunner().invoke(cli.app, ["senders", "backfill"])
     assert "b@acme.com: 2 group emails checked, 1 senders updated" in result.output
@@ -86,13 +85,30 @@ def test_run_without_jev_key_fails_every_account_before_gmail(env, monkeypatch):
     def no_gmail(tokens_dir, email):
         raise AssertionError("Gmail must not be touched")
 
-    monkeypatch.setattr(triage, "load_credentials", no_gmail)
+    monkeypatch.setattr(cli.gmail_mod, "connect", no_gmail)
     result = CliRunner().invoke(cli.app, ["run"])
     assert result.exit_code == 1
     assert result.output.count("TYPESAFE_API_KEY is not set") == 2
-    with make_session_factory(env)() as s:
+    with open_sessions(env) as sessions, sessions() as s:
         runs = s.query(Run).order_by(Run.account).all()
         assert [(r.account, r.error) for r in runs] == [
             (acc, "TYPESAFE_API_KEY is not set: add it to .env; nothing was processed")
             for acc in ("a@acme.com", "b@acme.com")
         ]
+
+
+def test_labels_rename_tells_refusals_from_failures(env, monkeypatch):
+    """Only `LabelRenameRefused` is reported as refused; any other error (even a ValueError from
+    a library) is a failure, logged with its traceback."""
+    monkeypatch.setattr(cli.gmail_mod, "connect", lambda tokens_dir, email: object())
+
+    def rename(gmail, session, account, old, new):
+        if account == "a@acme.com":
+            raise labels.LabelRenameRefused("'INBOX' is a system label and can't be renamed")
+        raise ValueError("unparseable Gmail answer")
+
+    monkeypatch.setattr(labels, "rename", rename)
+    result = CliRunner().invoke(cli.app, ["labels", "rename", "INBOX", "Jev/Inbox"])
+    assert "a@acme.com: refused: 'INBOX' is a system label" in result.output
+    assert "b@acme.com: failed: unparseable Gmail answer" in result.output
+    assert result.exit_code == 1

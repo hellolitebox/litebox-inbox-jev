@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<10", "ruff==0.17.0", "mypy>=2.4", "pre-commit>=3"]
+dev = ["pytest>=8,<10", "pytest-cov>=7", "ruff==0.17.0", "mypy>=2.4", "pre-commit>=3"]
 
 [project.scripts]
 inbox-jev = "inbox_jev.cli:app"
@@ -34,6 +34,13 @@ packages = ["src/inbox_jev"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "scripts"]
+# An unclosed resource fails the test run. SQLite reports a connection that is never closed
+# (an engine not disposed) as `ResourceWarning: unclosed database` from its finalizer (Python
+# 3.13+), which pytest turns into PytestUnraisableExceptionWarning.
+filterwarnings = [
+    "error::ResourceWarning",
+    "error::pytest.PytestUnraisableExceptionWarning",
+]
 
 [tool.ruff]
 line-length = 100
@@ -43,7 +50,8 @@ target-version = "py311"
 select = ["E", "F", "I", "B", "UP", "SIM"]
 
 [tool.mypy]
-files = ["src", "scripts"]
+# tests/fakes.py: so the fakes are checked against the protocols they stand in for.
+files = ["src", "scripts", "tests/fakes.py"]
 python_version = "3.11"
 check_untyped_defs = true
 warn_unused_ignores = true
@@ -57,3 +65,14 @@ strict_equality = true
 [[tool.mypy.overrides]]
 module = ["yaml", "googleapiclient.*", "google_auth_oauthlib.*"]
 ignore_missing_imports = true
+
+# CI runs `pytest --cov` (the test job); a plain `pytest` measures nothing, so running a few
+# tests locally never trips fail_under.
+[tool.coverage.run]
+source = ["src/inbox_jev", "scripts"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 90  # total was 90.8% when set; raise it as coverage grows, never lower it

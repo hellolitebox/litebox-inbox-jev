@@ -16,17 +16,25 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
-from sqlalchemy import create_engine, make_url, select
+from sqlalchemy import Engine, create_engine, make_url, select
 from sqlalchemy.orm import Session
 
 from inbox_jev import rules, triage
-from inbox_jev.classifier import Classifier, build_state
-from inbox_jev.config import Settings, load_accounts, load_categories
+from inbox_jev.classifier import Classifier, JevError, build_state, describe_jev_error
+from inbox_jev.config import (
+    Account,
+    CategoriesConfig,
+    Mode,
+    Settings,
+    load_accounts,
+    load_categories,
+)
 from inbox_jev.db import Message
-from inbox_jev.gmail import Gmail, load_credentials
-from inbox_jev.policy import decide, flags_only, is_allowed
+from inbox_jev.gmail import connect
+from inbox_jev.policy import Decision, decide, flags_only, is_allowed
 
 
 def _short(text: str, n: int) -> str:
@@ -34,7 +42,7 @@ def _short(text: str, n: int) -> str:
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
-def _read_only_engine(url: str):
+def _read_only_engine(url: str) -> Engine:
     parsed = make_url(url)
     if parsed.get_backend_name() == "sqlite" and parsed.database not in (None, "", ":memory:"):
         path = Path(parsed.database).resolve()
@@ -44,7 +52,7 @@ def _read_only_engine(url: str):
     return create_engine(url)  # no create_all / migrations: nothing is written
 
 
-def _outcome(decision) -> str:
+def _outcome(decision: Decision) -> str:
     if decision.spam:
         return "SPAM"
     if decision.archive:
@@ -52,8 +60,109 @@ def _outcome(decision) -> str:
     return "REVIEW" if decision.low_confidence else "KEEP"
 
 
+@dataclass
+class Checker:
+    """Decides emails as this checkout's code would, read-only, and prints one report each."""
+
+    session: Session
+    gmail: triage.GmailApi
+    classifier: triage.Classifies
+    cfg: CategoriesConfig
+    account: Account
+    mode: Mode  # the sent-mail search on rules depends on it
+    body_chars: int
+    ignore_rules: bool = False
+    jev_calls: int = 0
+
+    def run(self, ids: list[str]) -> None:
+        """Print each email's report, then the totals.
+
+        A failed Jev call prints only `describe_jev_error` (type, status, request id: never the
+        SDK's text, which can echo the email) and the next email goes on.
+        """
+        for message_id in ids:
+            try:
+                report = self.report(message_id)
+            except JevError as exc:
+                self.jev_calls += 1
+                report = f"{message_id}  JEV FAILED: {describe_jev_error(exc)}"
+            print(report)
+        print(f"emails={len(ids)} jev_calls={self.jev_calls}")
+
+    def report(self, message_id: str) -> str:
+        """One email's lines: stored and new decision, flags, top-3, From and Subject truncated.
+
+        Raises `JevError` when Jev decides the email and the call fails.
+        """
+        cfg, account, session = self.cfg, self.account, self.session
+        flags_failed = False
+        email = self.gmail.get(message_id)
+        sig = triage.signals_for(email, account)
+        old = session.scalar(
+            select(Message).where(Message.account == account.email, Message.gmail_id == message_id)
+        )
+        rule, stale = (
+            (None, None)
+            if self.ignore_rules
+            else rules.match(session, account.email, sig.sender, cfg.by_key)
+        )
+        # Same calls as `run` (triage._gather_inputs): Jev with the sent-mail search when no rule
+        # or allowlist decides, Jev for the flags only on keep rules and the allowlist, and the
+        # sent-mail search on a rule only when it could unsubscribe.
+        classification, contact = None, None
+        if not is_allowed(account, sig) and rule is None:
+            contact = triage.previous_contact(self.gmail, account.email, sig.sender)
+            classification = self.classifier.classify(
+                build_state(email, account.email, self.body_chars, contact, sig)
+            )
+        elif flags_only(cfg, account, sig, rule.category if rule else None):
+            classification = triage.flags_classification(
+                self.classifier, email, account, self.body_chars, sig
+            )
+            flags_failed = classification is None
+        elif rule and triage.rule_needs_contact(
+            cfg, session, account, sig, rule.category, self.mode
+        ):
+            contact = triage.previous_contact(self.gmail, account.email, sig.sender)
+        self.jev_calls += classification is not None or flags_failed
+        decision = decide(
+            cfg,
+            account,
+            sig,
+            classification,
+            rule.category if rule else None,
+            previous_contact=contact,
+        )
+        flags = [
+            f"src={decision.source}",
+            f"contact={contact}",
+            *(["no_reply"] if sig.no_reply else []),
+            *(["group"] if decision.archive_group else []),
+            *(["unsub"] if decision.unsubscribe else []),
+            *(["unverified"] if decision.downgraded_to_spam else []),
+            *(["known_contact"] if decision.known_contact_kept else []),
+            *(["needs_reply"] if cfg.needs_reply.label in decision.add_labels else []),
+            *(["stale_rule"] if stale else []),
+            *(["flags_failed"] if flags_failed else []),
+        ]
+        acts = account.act_categories
+        if acts is not None and decision.category not in acts:
+            flags.append("not_in_act_categories")
+        top = ""
+        if classification:
+            best = sorted(classification.probabilities.items(), key=lambda kv: -kv[1])
+            top = " ".join(f"{k}={v:.2f}" for k, v in best[:3])
+        was = f"{old.category}@{old.confidence or 0:.2f}" if old else "-"
+        return (
+            f"{message_id}  was={was}  now={decision.category}@{decision.confidence:.2f}"
+            f"  {_outcome(decision)} [{' '.join(flags)}]  {top}\n"
+            f"    from={_short(email.header('From'), 60)!r}"
+            f"  subject={_short(email.header('Subject'), 70)!r}"
+        )
+
+
 def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     p.add_argument("--account", required=True)
     p.add_argument("--query", help="Gmail search, e.g. 'in:inbox newer_than:7d'")
     p.add_argument("--ids", nargs="*", default=[], help="Gmail message ids")
@@ -73,86 +182,28 @@ def main() -> None:
         sys.exit(f"{args.account} is not in {s.accounts_file}")
     account = accounts[0]
 
-    gmail = Gmail(load_credentials(s.google_tokens_dir, account.email))
+    gmail = connect(s.google_tokens_dir, account.email)
     ids = list(args.ids)
     if args.query:
         ids += [i for i in gmail.list_ids(args.query, args.limit) if i not in ids]
 
-    mode = triage.effective_mode(s, account, None)  # the sent-mail search on rules depends on it
     classifier = Classifier(s.typesafe_api_key, s.typesafe_model, cfg)
-    jev_calls = 0
+    engine = _read_only_engine(s.database_url)
     try:
-        with Session(_read_only_engine(s.database_url)) as session:
-            for message_id in ids:
-                flags_failed = False
-                email = gmail.get(message_id)
-                sig = triage.signals_for(email, account)
-                old = session.scalar(
-                    select(Message).where(
-                        Message.account == account.email, Message.gmail_id == message_id
-                    )
-                )
-                rule, stale = (
-                    (None, None)
-                    if args.ignore_rules
-                    else rules.match(session, account.email, sig.sender, cfg.by_key)
-                )
-                # Same calls as `run` (triage._gather_inputs): Jev with the sent-mail search when no
-                # rule or allowlist decides, Jev for the flags only on keep rules and the
-                # allowlist, and the sent-mail search on a rule only when it could unsubscribe.
-                classification, contact = None, None
-                if not is_allowed(account, sig) and rule is None:
-                    contact = triage.previous_contact(gmail, account.email, sig.sender)
-                    classification = classifier.classify(
-                        build_state(email, account.email, s.body_chars, contact, sig)
-                    )
-                elif flags_only(cfg, account, sig, rule.category if rule else None):
-                    classification = triage.flags_classification(
-                        classifier, email, account, s.body_chars, sig
-                    )
-                    flags_failed = classification is None
-                elif rule and triage.rule_needs_contact(
-                    cfg, session, account, sig, rule.category, mode
-                ):
-                    contact = triage.previous_contact(gmail, account.email, sig.sender)
-                jev_calls += classification is not None or flags_failed
-                decision = decide(
-                    cfg,
-                    account,
-                    sig,
-                    classification,
-                    rule.category if rule else None,
-                    previous_contact=contact,
-                )
-                flags = [
-                    f"src={decision.source}",
-                    f"contact={contact}",
-                    *(["no_reply"] if sig.no_reply else []),
-                    *(["group"] if decision.archive_group else []),
-                    *(["unsub"] if decision.unsubscribe else []),
-                    *(["unverified"] if decision.downgraded_to_spam else []),
-                    *(["known_contact"] if decision.known_contact_kept else []),
-                    *(["needs_reply"] if cfg.needs_reply.label in decision.add_labels else []),
-                    *(["stale_rule"] if stale else []),
-                    *(["flags_failed"] if flags_failed else []),
-                ]
-                acts = account.act_categories
-                if acts is not None and decision.category not in acts:
-                    flags.append("not_in_act_categories")
-                top = ""
-                if classification:
-                    best = sorted(classification.probabilities.items(), key=lambda kv: -kv[1])
-                    top = " ".join(f"{k}={v:.2f}" for k, v in best[:3])
-                was = f"{old.category}@{old.confidence or 0:.2f}" if old else "-"
-                print(
-                    f"{message_id}  was={was}  now={decision.category}@{decision.confidence:.2f}"
-                    f"  {_outcome(decision)} [{' '.join(flags)}]  {top}\n"
-                    f"    from={_short(email.header('From'), 60)!r}"
-                    f"  subject={_short(email.header('Subject'), 70)!r}"
-                )
+        with Session(engine) as session:
+            Checker(
+                session,
+                gmail,
+                classifier,
+                cfg,
+                account,
+                triage.effective_mode(s, account, None),
+                s.body_chars,
+                args.ignore_rules,
+            ).run(ids)
             session.rollback()
-        print(f"emails={len(ids)} jev_calls={jev_calls}")
     finally:
+        engine.dispose()
         classifier.close()
 
 

@@ -167,7 +167,7 @@ def test_failing_to_record_a_jev_error_does_not_chain_its_text(setup, cfg, monke
     for e in gmail.emails.values():
         e.body = BODY
     ctx = triage.Context(
-        ctx.settings, cfg, ctx.sessions, classifier=_sdk_classifier(cfg, _echoing(422))
+        ctx.settings, cfg, ctx.sessions, ctx.gmail, classifier=_sdk_classifier(cfg, _echoing(422))
     )
 
     def locked(*args, **kwargs):
@@ -191,7 +191,7 @@ def test_failing_to_handle_a_jev_error_in_the_guard_does_not_chain_its_text(
     for e in gmail.emails.values():
         e.body = BODY
     ctx = triage.Context(
-        ctx.settings, cfg, ctx.sessions, classifier=_sdk_classifier(cfg, _echoing(422))
+        ctx.settings, cfg, ctx.sessions, ctx.gmail, classifier=_sdk_classifier(cfg, _echoing(422))
     )
 
     def broken(*args, **kwargs):
@@ -213,7 +213,7 @@ def test_422_echoing_the_email_is_never_stored_or_logged(setup, cfg, caplog):
     for e in gmail.emails.values():
         e.body = BODY
     ctx = triage.Context(
-        ctx.settings, cfg, ctx.sessions, classifier=_sdk_classifier(cfg, _echoing(422))
+        ctx.settings, cfg, ctx.sessions, ctx.gmail, classifier=_sdk_classifier(cfg, _echoing(422))
     )
     caplog.set_level(logging.DEBUG)
     # logs.setup keeps the SDK at INFO (its DEBUG lines are the raw request: see the test below).
@@ -242,7 +242,7 @@ def test_auth_failure_stops_jev_without_blaming_the_email(setup, cfg, caplog):
     """401 on the first call: no email is charged, rule and allowlist emails still go through."""
     ctx, gmail, account = setup
     jev = JevFails(jev_http_error(TypeSafeAuthenticationError, 401, {"error": "bad key"}))
-    ctx = triage.Context(ctx.settings, cfg, ctx.sessions, classifier=jev)
+    ctx = triage.Context(ctx.settings, cfg, ctx.sessions, ctx.gmail, classifier=jev)
     with ctx.sessions() as s:
         rules.set_rule(s, account.email, "w@weird.biz", "marketing", RuleSource.MANUAL)
         s.add(  # failed twice before, due again now
@@ -287,7 +287,7 @@ def test_transient_failures_stop_jev_after_three_in_a_row(setup, cfg):
     ctx, gmail, account = setup
     gmail.emails.update({e.id: e for e in [email("5", "Ann <ann@other.org>", "Lunch?")]})
     jev = JevFails(TypeSafeAPITimeoutError(30.0))
-    ctx = triage.Context(ctx.settings, cfg, ctx.sessions, classifier=jev)
+    ctx = triage.Context(ctx.settings, cfg, ctx.sessions, ctx.gmail, classifier=jev)
     with pytest.raises(triage.JevUnavailable):
         triage.run_account(ctx, account, Mode.ACT)
 
@@ -309,20 +309,19 @@ def test_a_success_resets_the_count(setup, cfg):
             return super().classify(state)
 
     jev = Flaky(None, answers)
-    ctx = triage.Context(ctx.settings, cfg, ctx.sessions, classifier=jev)
+    ctx = triage.Context(ctx.settings, cfg, ctx.sessions, ctx.gmail, classifier=jev)
     run = triage.run_account(ctx, account, Mode.ACT)  # 2 fails, a success, 1 fail: no stop
     assert (run.processed, run.errors, run.error) == (1, 3, None) and jev.calls == 4
 
 
-def test_missing_api_key_fails_the_run_before_gmail(setup, monkeypatch):
+def test_missing_api_key_fails_the_run_before_gmail(setup):
     ctx, gmail, account = setup
     settings = Settings(_env_file=None, typesafe_api_key="", database_url="sqlite:///:memory:")
-    ctx = triage.Context(settings, ctx.cfg, ctx.sessions)  # no injected Jev: built from settings
 
-    def no_gmail(tokens_dir, email):
+    def no_gmail(email):
         raise AssertionError("Gmail must not be touched")
 
-    monkeypatch.setattr(triage, "load_credentials", no_gmail)
+    ctx = triage.Context(settings, ctx.cfg, ctx.sessions, no_gmail)  # Jev built from settings
     with pytest.raises(JevNotConfigured):
         triage.run_account(ctx, account, Mode.ACT)
     run = _run(ctx)

@@ -1,5 +1,8 @@
+import subprocess
+import sys
+
 import pytest
-from conftest import make_classification, make_signals
+from conftest import ROOT, make_classification, make_signals
 from fakes import GMAIL_PASS
 
 from inbox_jev.config import Mode
@@ -630,3 +633,17 @@ def test_known_contact_flag_set_after_the_verified_and_group_checks(cfg, account
             assert d.archive and not d.unsubscribe and not d.known_contact_kept
     d = decide(cfg, account, make_signals(), c, previous_contact="wrote_to_sender")
     assert d.known_contact_kept and not d.unsubscribe and not d.downgraded_to_spam
+
+
+def test_policy_and_rules_load_no_io_library():
+    """`policy` stays pure: importing it, or `rules`, loads neither the Jev SDK nor Gmail's
+    client (`Classification` lives in the dependency-free `classification` module)."""
+    io_modules = ["typesafe_sdk", "googleapiclient", "google.oauth2", "inbox_jev.gmail"]
+    code = (
+        "import sys, inbox_jev.policy, inbox_jev.rules; "
+        f"print([m for m in {io_modules!r} if m in sys.modules])"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True, cwd=ROOT
+    )
+    assert out.stdout.strip() == "[]"

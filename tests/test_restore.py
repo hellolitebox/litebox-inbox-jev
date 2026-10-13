@@ -128,8 +128,7 @@ def test_restored_emails_are_not_reprocessed_or_learned_as_corrections(acted):
 def test_cli_restore_is_a_thin_wrapper(monkeypatch, tmp_path):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'db.sqlite'}")
     monkeypatch.setattr(cli.logs, "setup", lambda level: None)
-    monkeypatch.setattr(cli.gmail_mod, "load_credentials", lambda d, e: None)
-    monkeypatch.setattr(cli.gmail_mod, "Gmail", lambda creds: "gmail")
+    monkeypatch.setattr(cli.gmail_mod, "connect", lambda d, e: "gmail")
     seen = []
 
     def restore(session, gmail, account, since, category):
@@ -182,8 +181,7 @@ def test_restore_raises_other_gmail_errors(acted, monkeypatch, error):
 def test_cli_restore_reports_deleted_emails(monkeypatch, tmp_path):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'db.sqlite'}")
     monkeypatch.setattr(cli.logs, "setup", lambda level: None)
-    monkeypatch.setattr(cli.gmail_mod, "load_credentials", lambda d, e: None)
-    monkeypatch.setattr(cli.gmail_mod, "Gmail", lambda creds: "gmail")
+    monkeypatch.setattr(cli.gmail_mod, "connect", lambda d, e: "gmail")
     monkeypatch.setattr(triage, "restore", lambda *a: triage.RestoreResult(restored=2, deleted=1))
     result = CliRunner().invoke(cli.app, ["restore", "-a", "me@acme.com"])
     assert result.exit_code == 0, result.output

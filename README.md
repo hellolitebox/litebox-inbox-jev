@@ -349,7 +349,9 @@ Email headers and the first `BODY_CHARS` characters of each body are sent to the
 Email bodies are not stored in the database or logged, only sender, subject and the
 classification. `previous_contact` runs Gmail searches over your sent mail and, for a domain, reads
 the To/Cc/Bcc headers (never the body) of up to 25 matching sent emails; its result is logged on
-each "message processed" line but not stored in the DB.
+each "message processed" line but not stored in the DB. That line also carries `timings_ms`, the
+milliseconds each stage took (Gmail fetch, sender rule and sent-mail search, Jev, applying the
+decision): numbers only, no email content.
 
 ## License
 

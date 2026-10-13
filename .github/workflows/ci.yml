@@ -13,6 +13,12 @@ env:
   # Python the tests run on. The docker job checks the image's base Python against it, so a
   # Dependabot python:3.x-slim bump fails until this is bumped too.
   PYTHON_VERSION: "3.14"
+  # The oldest Python the package supports (requires-python in pyproject.toml, which the
+  # test-min-python job checks): the tests also run on it.
+  MIN_PYTHON_VERSION: "3.11"
+  # uv for every job; bump together with the ghcr.io/astral-sh/uv tag in the Dockerfile (the test
+  # job checks they match).
+  UV_VERSION: "0.13.0"
 
 concurrency:
   # A newer push to a PR supersedes its run. Each push to main gets its own group, so main runs
@@ -33,14 +39,14 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
-          version: "0.13.0"   # bump together with the ghcr.io/astral-sh/uv tag in the Dockerfile
+          version: ${{ env.UV_VERSION }}
           enable-cache: true
       - name: Dockerfile uv stage matches CI uv
         run: |
           docker_uv=$(sed -n 's#^FROM ghcr.io/astral-sh/uv:\([^ @]*\).* AS uv$#\1#p' Dockerfile)
           ci_uv=$(uv --version | cut -d' ' -f2)
           if [ -z "$docker_uv" ] || [ "$docker_uv" != "$ci_uv" ]; then
-            echo "::error file=Dockerfile::Dockerfile uv stage is '${docker_uv:-<not found>}' but CI uses uv $ci_uv. Bump the setup-uv 'version' in .github/workflows/ci.yml and the ghcr.io/astral-sh/uv tag in the Dockerfile together."
+            echo "::error file=Dockerfile::Dockerfile uv stage is '${docker_uv:-<not found>}' but CI uses uv $ci_uv. Bump UV_VERSION in .github/workflows/ci.yml and the ghcr.io/astral-sh/uv tag in the Dockerfile together."
             exit 1
           fi
           echo "uv $ci_uv in both CI and Dockerfile"
@@ -49,6 +55,35 @@ jobs:
       - run: uv run --frozen ruff format --check src tests scripts
       - run: uv run --frozen ruff check src tests scripts
       - run: uv run --frozen mypy
+      # Coverage report in the log and the job summary; fails under [tool.coverage.report]
+      # fail_under in pyproject.toml.
+      - run: >-
+          uv run --frozen pytest -q --cov --cov-report=term-missing:skip-covered
+          --cov-report=markdown-append:"$GITHUB_STEP_SUMMARY"
+
+  # The tests on the oldest supported Python, so code that needs a newer one (syntax, stdlib)
+  # fails here rather than for someone installing on it. Not a required check: the runtime
+  # Python is PYTHON_VERSION (the test job).
+  test-min-python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: MIN_PYTHON_VERSION matches requires-python
+        run: |
+          declared=$(sed -n 's/^requires-python = ">=\([0-9.]*\)"$/\1/p' pyproject.toml)
+          if [ "$declared" != "$MIN_PYTHON_VERSION" ]; then
+            echo "::error file=pyproject.toml::requires-python is '>=${declared:-<not found>}' but CI tests the minimum as $MIN_PYTHON_VERSION. Bump MIN_PYTHON_VERSION in .github/workflows/ci.yml with requires-python."
+            exit 1
+          fi
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.MIN_PYTHON_VERSION }}
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --frozen --extra dev --python "$MIN_PYTHON_VERSION"
       - run: uv run --frozen pytest -q
 
   # Builds the image once, smoke-tests it, and on main pushes that same image to GHCR as

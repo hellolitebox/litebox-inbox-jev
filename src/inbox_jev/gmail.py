@@ -5,7 +5,9 @@ from __future__ import annotations
 import base64
 import html
 import logging
+import os
 import re
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from email.message import EmailMessage as MimeMessage
@@ -90,20 +92,58 @@ def authorize(client_secrets: Path, tokens_dir: Path, email: str) -> Path:
         raise RuntimeError(f"Authorized {profile['emailAddress']}, expected {email}")
     tokens_dir.mkdir(parents=True, exist_ok=True)
     path = token_path(tokens_dir, email)
-    path.write_text(creds.to_json())
-    path.chmod(0o600)
+    save_token(path, creds.to_json())
     return path
 
 
+def save_token(path: Path, data: str) -> None:
+    """Write an OAuth token file atomically, readable by its owner only from the start.
+
+    The text goes to a temporary file in the same directory, created with mode 0600
+    (`tempfile.mkstemp`), is flushed to disk and then renamed over `path`. A crash or a full
+    disk leaves the previous token whole (never a truncated file), and the token is never
+    readable by others, not even briefly. The temporary file is removed if anything fails.
+    """
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    _fsync_dir(path.parent)
+
+
+def _fsync_dir(directory: Path) -> None:
+    """Persist a rename in `directory` (POSIX); a no-op where directories can't be opened."""
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def load_credentials(tokens_dir: Path, email: str) -> Credentials:
+    """The stored token for `email`, refreshed (and saved, `save_token`) if it has expired."""
     path = token_path(tokens_dir, email)
     if not path.exists():
         raise FileNotFoundError(f"No token for {email}; run `inbox-jev auth add {email}`")
     creds = Credentials.from_authorized_user_file(str(path), SCOPES)
     if not creds.valid:
         creds.refresh(Request())
-        path.write_text(creds.to_json())
+        save_token(path, creds.to_json())
     return creds
+
+
+def connect(tokens_dir: Path, email: str) -> Gmail:
+    """A Gmail client for `email` from its stored token (`load_credentials`)."""
+    return Gmail(load_credentials(tokens_dir, email))
 
 
 @dataclass

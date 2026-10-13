@@ -7,14 +7,14 @@ from fakes import HttpError
 from inbox_jev import corrections, rules
 from inbox_jev.config import Account, Mode
 from inbox_jev.corrections import detect
-from inbox_jev.db import Message, MessageStatus, SenderRule, make_session_factory, now
+from inbox_jev.db import Message, MessageStatus, SenderRule, now, open_sessions
 from inbox_jev.policy import Decision, DecisionSource, decide
 from inbox_jev.rules import RuleSource
 
 
 @pytest.fixture
 def session():
-    with make_session_factory("sqlite:///:memory:")() as s:
+    with open_sessions("sqlite:///:memory:") as sessions, sessions() as s:
         yield s
 
 

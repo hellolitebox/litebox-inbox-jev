@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 
@@ -17,6 +16,7 @@ from typesafe_sdk import (
     TypeSafeError,
 )
 
+from .classification import Classification
 from .config import CategoriesConfig
 from .gmail import Email
 from .signals import Signals
@@ -122,16 +122,6 @@ CATEGORY_INSTRUCTIONS = (
     "missing when unknown. A personal-looking pitch from a sender I never wrote to is usually "
     "cold outreach, not important."
 )
-
-
-@dataclass
-class Classification:
-    category: str
-    confidence: float
-    probabilities: dict[str, float]
-    needs_reply: float
-    tags: dict[str, float] = field(default_factory=dict)
-    request_id: str | None = None
 
 
 def build_state(

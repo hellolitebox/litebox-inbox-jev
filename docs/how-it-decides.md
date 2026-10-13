@@ -135,7 +135,7 @@ flowchart TD
     AR2 --> U{"plan.unsubscribe and run budget left?"}
     U -- yes --> U2["Unsubscribe once per list<br/>(see the unsubscribe flow)"]
     U -- no --> LOG
-    U2 --> LOG["Commit and log 'message processed'<br/>(incl. previous_contact, archive_group)"]
+    U2 --> LOG["Commit and log 'message processed'<br/>(incl. previous_contact, archive_group,<br/>timings_ms per stage)"]
 ```
 
 The unsubscribe decision, across `policy.decide`, `policy.unsubscribe_gate`, `policy.plan`

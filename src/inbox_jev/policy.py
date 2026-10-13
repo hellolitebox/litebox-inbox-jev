@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from urllib.parse import urlparse
 
-from .classifier import Classification
+from .classification import Classification
 from .config import PUBLIC_GROUP_HOSTS, Account, Action, CategoriesConfig, Mode
 from .signals import Signals, domain_of, on_domain
 from .system_labels import INBOX, SPAM

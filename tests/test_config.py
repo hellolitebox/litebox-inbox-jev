@@ -1,5 +1,8 @@
+import re
+
 import pytest
 import yaml
+from conftest import ROOT
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
@@ -116,3 +119,11 @@ def test_group_domains_rejects_public_suffixes(domain):
 def test_group_domains_rejects_non_domains(domain):
     with pytest.raises(ValidationError, match="isn't a domain"):
         account(f"group_domains: ['{domain}']\n")
+
+
+def test_env_example_lists_every_setting():
+    """Each `Settings` field appears in .env.example (set or commented out), so a new setting
+    can't ship undocumented."""
+    text = (ROOT / ".env.example").read_text()
+    listed = set(re.findall(r"^#?([A-Z][A-Z0-9_]*)=", text, re.MULTILINE))
+    assert {name.upper() for name in Settings.model_fields} - listed == set()

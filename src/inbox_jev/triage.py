@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import logging
+import time
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol, cast
+from types import TracebackType
+from typing import Any, Literal, Protocol, Self, cast, get_args
 
 from sqlalchemy import Update, and_, or_, select, update
 from sqlalchemy.engine import CursorResult
@@ -13,8 +17,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from . import corrections, rules
 from . import unsubscribe as unsub
+from .classification import Classification
 from .classifier import (
-    Classification,
     Classifier,
     JevError,
     JevFailure,
@@ -25,14 +29,7 @@ from .classifier import (
 )
 from .config import FREE_MAIL, Account, CategoriesConfig, Mode, Settings
 from .db import MAX_ERROR_ATTEMPTS, Message, MessageStatus, Run, SenderRule, Unsubscribe, now
-from .gmail import (
-    Email,
-    Gmail,
-    is_not_found,
-    is_token_refresh_error,
-    load_credentials,
-    token_error_detail,
-)
+from .gmail import Email, is_not_found, is_token_refresh_error, token_error_detail
 from .policy import (
     Decision,
     DecisionSource,
@@ -97,6 +94,25 @@ class JevClient(Classifies, Protocol):
     def close(self) -> None: ...
 
 
+class GmailApi(Protocol):
+    """What triage needs from Gmail: a `gmail.Gmail`, or `tests/fakes.FakeGmail` (mypy checks
+    the fake against this)."""
+
+    def list_inbox_ids(self, lookback: str, limit: int) -> list[str]: ...
+    def get(self, message_id: str) -> Email: ...
+    def get_headers(self, message_id: str, names: list[str]) -> Email: ...
+    def get_label_ids(self, message_ids: Sequence[str]) -> dict[str, list[str] | None]: ...
+    def labels(self) -> dict[str, str]: ...
+    def ensure_labels(self, names: list[str]) -> dict[str, str]: ...
+    def modify(self, message_id: str, add: list[str], remove: list[str]) -> None: ...
+    def send(self, to: str, subject: str, body: str) -> None: ...
+    def has_written_to(self, query: str) -> bool: ...
+
+
+# An account's address -> a Gmail client for it (`gmail.connect` in the CLI, a fake in tests).
+GmailFactory = Callable[[str], GmailApi]
+
+
 class JevUnavailable(Exception):
     """A pass stopped asking Jev (`JevGuard`); the message is the run's `runs.error`."""
 
@@ -159,11 +175,14 @@ class JevGuard:
 
 
 class Context:
-    """What one CLI invocation shares across its accounts: settings, categories, DB, Jev.
+    """What one CLI invocation shares across its accounts: settings, categories, DB, Gmail, Jev.
 
+    `gmail` opens an account's Gmail client (`gmail.connect` in the CLI, a fake in tests).
     `classifier` injects the Jev client (tests pass a fake). Without one, a `Classifier` is
     created from the settings when a `run` pass starts, which fails it (`JevNotConfigured`)
     when TYPESAFE_API_KEY is missing; commands that never ask Jev don't need the key.
+    Use it as a context manager (or call `close`) to close the Jev client; the caller that
+    created `sessions` disposes of its engine.
     """
 
     def __init__(
@@ -171,11 +190,13 @@ class Context:
         settings: Settings,
         cfg: CategoriesConfig,
         sessions: sessionmaker,
+        gmail: GmailFactory,
         classifier: JevClient | None = None,
     ) -> None:
         self.settings = settings
         self.cfg = cfg
         self.sessions = sessions
+        self.gmail = gmail
         self._classifier = classifier
         # (account, sender_key) of rules to removed categories already logged in this invocation.
         self.stale_rules_logged: set[tuple[str, str]] = set()
@@ -190,6 +211,17 @@ class Context:
     def close(self) -> None:
         if self._classifier:
             self._classifier.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        self.close()
 
 
 def effective_mode(settings: Settings, account: Account, override: Mode | None) -> Mode:
@@ -253,7 +285,7 @@ def _run_pass(
     if unknown:
         raise ValueError(f"{account.email}: unknown act_categories {sorted(unknown)}")
     jev = JevGuard(ctx.classifier, account.email)  # no API key: fails before touching Gmail
-    gmail = Gmail(load_credentials(ctx.settings.google_tokens_dir, account.email))
+    gmail = ctx.gmail(account.email)
     label_ids = gmail.ensure_labels(ctx.cfg.all_labels()) if mode != Mode.DRY_RUN else {}
     if mode != Mode.DRY_RUN:
         corrections.check(session, gmail, account.email, ctx.cfg)
@@ -263,6 +295,7 @@ def _run_pass(
     )
     skip = _not_due(session, account.email, mode, ids)
     budget = UnsubscribeBudget(ctx.settings.max_unsubscribes_per_run)
+    account_pass = AccountPass(ctx, session, gmail, account, mode, label_ids, budget, jev)
     for message_id in ids:
         if message_id in skip:
             continue
@@ -270,7 +303,7 @@ def _run_pass(
         # handling it (the rollback, `_record_error`'s commit) would otherwise chain a Jev error,
         # whose text can echo the email, into the traceback the caller logs.
         try:
-            process(ctx, session, gmail, account, mode, label_ids, message_id, budget, jev)
+            process(account_pass, message_id)
         except Exception as exc:
             failure = exc
         else:
@@ -421,7 +454,7 @@ class RestoreResult:
 
 def restore(
     session: Session,
-    gmail: Gmail,
+    gmail: GmailApi,
     account: str,
     since: timedelta,
     category: str | None = None,
@@ -487,37 +520,72 @@ def reset_error_attempts(session: Session, account: str) -> int:
     return count
 
 
-def process(
-    ctx: Context,
-    session: Session,
-    gmail: Gmail,
-    account: Account,
-    mode: Mode,
-    label_ids: dict[str, str],
-    message_id: str,
-    unsub_budget: UnsubscribeBudget,
-    jev: JevGuard,
-) -> Message:
+@dataclass
+class AccountPass:
+    """One account's `run` pass: what each of its emails is processed with (`process`)."""
+
+    ctx: Context
+    session: Session
+    gmail: GmailApi
+    account: Account
+    mode: Mode
+    label_ids: dict[str, str]  # Gmail label name -> id; empty in dry_run
+    unsub_budget: UnsubscribeBudget
+    jev: JevGuard
+
+
+# The stages of `process` timed on the "message processed" log line, in milliseconds: reading
+# the email from Gmail; the sender rule and the sent-mail search; Jev (state included); applying
+# the decision (labels, DB row, auto rule, unsubscribe, commit).
+Stage = Literal["fetch", "lookup", "jev", "apply"]
+
+
+class _StageTimer:
+    """Milliseconds spent in each `Stage` while one email is processed. A stage entered more
+    than once adds up; one never entered stays 0."""
+
+    def __init__(self) -> None:
+        self._ms: dict[Stage, float] = dict.fromkeys(get_args(Stage), 0.0)
+
+    @contextmanager
+    def stage(self, name: Stage) -> Iterator[None]:
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            self._ms[name] += (time.perf_counter() - start) * 1000
+
+    def as_ms(self) -> dict[Stage, int]:
+        return {name: round(ms) for name, ms in self._ms.items()}
+
+
+def process(p: AccountPass, message_id: str) -> Message:
     """Decide one inbox email, apply the decision in Gmail and store it (committed).
 
-    The steps: hand off an email the user edited since an earlier pass (`_user_touched`);
-    gather the sender rule, Jev's answer and the sent-mail search (`_gather_inputs`); decide
-    and plan (`policy`, pure); apply the labels in Gmail and store the outcome; learn an auto
-    rule; unsubscribe within the run cap. Raises `_JevStopped`, before changing anything, when
-    the email needs Jev's decision and `jev` has stopped.
+    The steps: learn a correction the user made in Gmail since an earlier pass
+    (`_learn_correction`) and hand off an email the user edited (`_user_edited`); gather the
+    sender rule, Jev's answer and the sent-mail search (`_gather_inputs`); decide and plan
+    (`policy`, pure); apply the labels in Gmail and store the outcome; learn an auto rule;
+    unsubscribe within the run cap. Raises `_JevStopped`, before changing anything, when the
+    email needs Jev's decision and `p.jev` has stopped.
     """
-    email = gmail.get(message_id)
+    ctx, session, account, mode = p.ctx, p.session, p.account, p.mode
+    timer = _StageTimer()
+    with timer.stage("fetch"):
+        email = p.gmail.get(message_id)
     sig = signals_for(email, account)
     prev = _find_message(session, account.email, message_id)
     if prev is not None:
         prev.sender = sig.sender  # rows stored before group authors were recovered
-        if mode != Mode.DRY_RUN and _user_touched(
-            ctx.cfg, session, account, prev, email, label_ids
-        ):
-            return _leave_alone(session, prev, mode)
+        # In dry_run, or before any label of ours is in Gmail (labels_added), nothing to compare.
+        if mode != Mode.DRY_RUN and prev.labels_added:
+            current = _current_label_names(email, p.label_ids)
+            _learn_correction(ctx.cfg, session, account, prev, current)
+            if _user_edited(ctx.cfg, account, prev, current):
+                return _leave_alone(session, prev, mode)
 
     list_row = _ListRow(session, account.email, sig.list_key)
-    inputs = _gather_inputs(ctx, session, gmail, account, mode, email, sig, list_row, jev)
+    inputs = _gather_inputs(p, email, sig, list_row, timer)
     decision = decide(
         ctx.cfg,
         account,
@@ -528,19 +596,19 @@ def process(
     )
     actions = plan(ctx.cfg, decision, mode, account.act_categories)
 
-    msg = _upsert_message(session, account.email, email, sig, prev)
-    _apply_labels(gmail, message_id, msg, label_ids, actions)
-    _store_outcome(msg, mode, inputs.classification, decision, actions)
-    _learn_auto_rule(ctx, session, account, mode, sig, inputs, decision)
-    if (
-        actions.unsubscribe
-        and not unsub_budget.exhausted
-        and _unsubscribe(session, gmail, account, email, sig, list_row)
-    ):
-        unsub_budget.spend()
-
-    session.commit()
-    _log_processed(account, message_id, sig, inputs, decision, actions)
+    with timer.stage("apply"):
+        msg = _upsert_message(session, account.email, email, sig, prev)
+        _apply_labels(p.gmail, message_id, msg, p.label_ids, actions)
+        _store_outcome(msg, mode, inputs.classification, decision, actions)
+        _learn_auto_rule(p, sig, inputs, decision)
+        if (
+            actions.unsubscribe
+            and not p.unsub_budget.exhausted
+            and _unsubscribe(session, p.gmail, account, email, sig, list_row)
+        ):
+            p.unsub_budget.spend()
+        session.commit()
+    _log_processed(account, message_id, sig, inputs, decision, actions, timer)
     return msg
 
 
@@ -588,43 +656,40 @@ def _leave_alone(session: Session, msg: Message, mode: Mode) -> Message:
 
 
 def _gather_inputs(
-    ctx: Context,
-    session: Session,
-    gmail: Gmail,
-    account: Account,
-    mode: Mode,
-    email: Email,
-    sig: Signals,
-    list_row: _ListRow,
-    jev: JevGuard,
+    p: AccountPass, email: Email, sig: Signals, list_row: _ListRow, timer: _StageTimer
 ) -> _Inputs:
     """The sender rule, Jev's answer and the sent-mail search, each only where it can matter.
 
     No allowlist entry and no rule: Jev decides, told whether I wrote to the sender (neither is
-    asked once `jev` has stopped: `_JevStopped`). The allowlist or a rule to a keep category
+    asked once `p.jev` has stopped: `_JevStopped`). The allowlist or a rule to a keep category
     (`policy.flags_only`): Jev only for the flags, no search. Any other rule: the search only if
     it could stop an unsubscribe (`_rule_needs_contact`).
     """
-    rule = rule_for(ctx, session, account, sig.sender)
+    ctx, account, body_chars = p.ctx, p.account, p.ctx.settings.body_chars
+    with timer.stage("lookup"):
+        rule = rule_for(ctx, p.session, account, sig.sender)
     if not is_allowed(account, sig) and rule is None:
-        jev.check()
-        contact = previous_contact(gmail, account.email, sig.sender)
-        classification = jev.classify(
-            build_state(email, account.email, ctx.settings.body_chars, contact, sig)
-        )
+        p.jev.check()
+        with timer.stage("lookup"):
+            contact = previous_contact(p.gmail, account.email, sig.sender)
+        with timer.stage("jev"):
+            classification = p.jev.classify(
+                build_state(email, account.email, body_chars, contact, sig)
+            )
         return _Inputs(rule, classification, contact)
     if flags_only(ctx.cfg, account, sig, rule.category if rule else None):
-        flags = flags_classification(jev, email, account, ctx.settings.body_chars, sig)
+        with timer.stage("jev"):
+            flags = flags_classification(p.jev, email, account, body_chars, sig)
         return _Inputs(rule, flags, None)
-    if rule is not None and _rule_needs_contact(
-        ctx.cfg, account, sig, rule.category, mode, list_row
-    ):
-        return _Inputs(rule, None, previous_contact(gmail, account.email, sig.sender))
+    if rule is not None:
+        with timer.stage("lookup"):
+            if _rule_needs_contact(ctx.cfg, account, sig, rule.category, p.mode, list_row):
+                return _Inputs(rule, None, previous_contact(p.gmail, account.email, sig.sender))
     return _Inputs(rule, None, None)
 
 
 def _apply_labels(
-    gmail: Gmail, message_id: str, msg: Message, label_ids: dict[str, str], actions: Plan
+    gmail: GmailApi, message_id: str, msg: Message, label_ids: dict[str, str], actions: Plan
 ) -> None:
     """Apply the plan in Gmail (labels, INBOX, SPAM), from `msg`'s state before this pass.
 
@@ -669,24 +734,22 @@ def _store_outcome(
     msg.processed_at = now()
 
 
-def _learn_auto_rule(
-    ctx: Context,
-    session: Session,
-    account: Account,
-    mode: Mode,
-    sig: Signals,
-    inputs: _Inputs,
-    decision: Decision,
-) -> None:
+def _learn_auto_rule(p: AccountPass, sig: Signals, inputs: _Inputs, decision: Decision) -> None:
     """Count Jev's decision toward an auto rule for the sender (`rules.record_auto`).
 
     Only Jev's own decisions count, and not in dry_run: a rule learned there would apply
     without Jev (and act) as soon as the mode is label or act.
     """
     classification = inputs.classification
-    if classification and decision.source == DecisionSource.JEV and mode != Mode.DRY_RUN:
+    if classification and decision.source == DecisionSource.JEV and p.mode != Mode.DRY_RUN:
         rules.record_auto(
-            session, ctx.cfg, account.email, sig.sender, classification, decision, inputs.contact
+            p.session,
+            p.ctx.cfg,
+            p.account.email,
+            sig.sender,
+            classification,
+            decision,
+            inputs.contact,
         )
 
 
@@ -697,7 +760,10 @@ def _log_processed(
     inputs: _Inputs,
     decision: Decision,
     actions: Plan,
+    timer: _StageTimer,
 ) -> None:
+    """The "message processed" line: what was decided and applied, and how long each stage took
+    (`timings_ms`). Metadata only, never the email's content."""
     classification = inputs.classification
     log.info(
         "message processed",
@@ -715,6 +781,7 @@ def _log_processed(
             "archived": actions.archived,
             "spammed": actions.spammed,
             "request_id": classification.request_id if classification else None,
+            "timings_ms": timer.as_ms(),
         },
     )
 
@@ -782,7 +849,7 @@ def signals_for(email: Email, account: Account) -> Signals:
 _SENDER_HEADERS = ["From", "Authentication-Results", "Mailing-list", "X-Original-Sender"]
 
 
-def backfill_senders(session: Session, gmail: Gmail, account: Account) -> tuple[int, int, int]:
+def backfill_senders(session: Session, gmail: GmailApi, account: Account) -> tuple[int, int, int]:
     """Re-read headers of stored group mail ("… via …" in From) and store its author as sender.
 
     For rows saved before group authors were recovered, so corrections on them create rules on
@@ -812,7 +879,7 @@ def backfill_senders(session: Session, gmail: Gmail, account: Account) -> tuple[
     return len(rows), updated, skipped
 
 
-def previous_contact(gmail: Gmail, account: str, sender: str) -> str | None:
+def previous_contact(gmail: GmailApi, account: str, sender: str) -> str | None:
     """wrote_to_sender | wrote_to_their_domain | never, or None if it can't be checked.
 
     Writing to a machine address isn't knowing someone: an automated sender
@@ -838,26 +905,27 @@ def previous_contact(gmail: Gmail, account: str, sender: str) -> str | None:
     return "never"
 
 
-def _user_touched(
-    cfg: CategoriesConfig,
-    session: Session,
-    account: Account,
-    msg: Message,
-    email: Email,
-    label_ids: dict[str, str],
-) -> bool:
-    """Check an email labeled by an earlier pass against its current Gmail labels.
+def _learn_correction(
+    cfg: CategoriesConfig, session: Session, account: Account, msg: Message, current: set[str]
+) -> None:
+    """Record a changed category label on an email labeled by an earlier pass as a correction
+    (`corrections.record`: the sender rule then decides the category). Not committed.
 
-    A changed category label is recorded as a correction (the sender rule then decides the
-    category). Otherwise, hands off (returns True) if `_user_edit` finds an edit.
+    Only the first correction counts: an email already corrected is left as it is.
     """
-    if not msg.labels_added:
-        return False  # nothing of ours in Gmail yet (dry_run)
-    current = _current_label_names(email, label_ids)
-    if msg.corrected_category is None:
-        category = corrections.detect(msg, current, cfg)
-        if category:
-            corrections.record(session, account.email, msg, category)
+    if msg.corrected_category is not None:
+        return
+    category = corrections.detect(msg, current, cfg)
+    if category:
+        corrections.record(session, account.email, msg, category)
+
+
+def _user_edited(cfg: CategoriesConfig, account: Account, msg: Message, current: set[str]) -> bool:
+    """Whether the user edited an email labeled by an earlier pass (`_user_edit`), logged.
+
+    Read-only: `process` records any correction first (`_learn_correction`), so a corrected
+    email is only handed off when starred.
+    """
     edit = _user_edit(cfg, msg, current)
     if edit is None:
         return False
@@ -937,7 +1005,7 @@ def _rule_needs_contact(
 
 
 def retry_unsubscribes(
-    ctx: Context, session: Session, gmail: Gmail, account: Account
+    ctx: Context, session: Session, gmail: GmailApi, account: Account
 ) -> list[tuple[str, str]]:
     """Retry `failed` unsubscribes with the checks `run` applies. Returns (list, outcome) pairs.
 
@@ -980,7 +1048,7 @@ def retry_unsubscribes(
 def _retry_one(
     ctx: Context,
     session: Session,
-    gmail: Gmail,
+    gmail: GmailApi,
     account: Account,
     mode: Mode,
     row: Unsubscribe,
@@ -1115,7 +1183,7 @@ def _unsub_settled(row: Unsubscribe | None) -> bool:
 
 def _unsubscribe(
     session: Session,
-    gmail: Gmail,
+    gmail: GmailApi,
     account: Account,
     email: Email,
     sig: Signals,

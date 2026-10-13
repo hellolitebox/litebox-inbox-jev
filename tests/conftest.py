@@ -1,17 +1,17 @@
 import re
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 import pytest
-from fakes import FakeClassifier, FakeGmail, email
+from fakes import FakeClassifier, FakeGmail, email, gmail_factory
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 
 from inbox_jev import triage
-from inbox_jev.classifier import Classification
+from inbox_jev.classification import Classification
 from inbox_jev.config import Account, Settings, load_categories
-from inbox_jev.db import make_session_factory
+from inbox_jev.db import open_sessions
 from inbox_jev.signals import Signals
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,7 +74,14 @@ def selects_from(engine: Engine, table: str) -> Iterator[list[str]]:
 
 
 @pytest.fixture
-def setup(cfg, account, monkeypatch):
+def make_sessions():
+    """`db.open_sessions` for a test: every engine it opened is disposed when the test ends."""
+    with ExitStack() as stack:
+        yield lambda url: stack.enter_context(open_sessions(url))
+
+
+@pytest.fixture
+def setup(cfg, account, make_sessions):
     """Four inbox emails on a fake Gmail, a fake Jev and an in-memory DB: (ctx, gmail, account)."""
     emails = [
         email(
@@ -99,9 +106,9 @@ def setup(cfg, account, monkeypatch):
         "Internal": make_classification("notification", 0.99),
     }
     gmail = FakeGmail(emails)
-    monkeypatch.setattr(triage, "Gmail", lambda creds: gmail)
-    monkeypatch.setattr(triage, "load_credentials", lambda d, e: None)
     settings = Settings(_env_file=None, typesafe_api_key="x", database_url="sqlite:///:memory:")
-    sessions = make_session_factory(settings.database_url)
-    ctx = triage.Context(settings, cfg, sessions, classifier=FakeClassifier(answers))
+    sessions = make_sessions(settings.database_url)
+    ctx = triage.Context(
+        settings, cfg, sessions, gmail_factory(gmail), classifier=FakeClassifier(answers)
+    )
     return ctx, gmail, account

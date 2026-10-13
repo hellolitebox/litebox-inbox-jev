@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import timedelta
+from typing import Protocol
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
@@ -11,7 +13,6 @@ from sqlalchemy.orm import Session
 from . import rules
 from .config import CategoriesConfig, Mode
 from .db import Message, MessageStatus, now
-from .gmail import Gmail
 from .system_labels import INBOX
 
 log = logging.getLogger(__name__)
@@ -19,6 +20,13 @@ log = logging.getLogger(__name__)
 WINDOW = timedelta(days=7)
 RECHECK_EVERY = timedelta(hours=1)
 MAX_PER_RUN = 100
+
+
+class LabelReader(Protocol):
+    """What `check` reads from Gmail: a `gmail.Gmail`, or a fake in tests."""
+
+    def labels(self) -> dict[str, str]: ...
+    def get_label_ids(self, message_ids: Sequence[str]) -> dict[str, list[str] | None]: ...
 
 
 def detect(msg: Message, current_labels: set[str], cfg: CategoriesConfig) -> str | None:
@@ -35,7 +43,7 @@ def detect(msg: Message, current_labels: set[str], cfg: CategoriesConfig) -> str
     return None
 
 
-def check(session: Session, gmail: Gmail, account: str, cfg: CategoriesConfig) -> int:
+def check(session: Session, gmail: LabelReader, account: str, cfg: CategoriesConfig) -> int:
     cutoff = now()
     candidates = session.scalars(
         select(Message)

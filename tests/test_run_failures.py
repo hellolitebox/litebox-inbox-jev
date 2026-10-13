@@ -39,13 +39,13 @@ def _digest(ctx, account, hours=24):
 def test_expired_token_is_recorded_on_the_run_and_raised(triage_setup, monkeypatch):
     ctx, gmail, account = triage_setup
 
-    def expired(tokens_dir, email):
+    def expired(email):
         raise RefreshError(
             "invalid_grant: Token has been expired or revoked.",
             {"error": "invalid_grant", "error_description": "Token has been expired or revoked."},
         )
 
-    monkeypatch.setattr(triage, "load_credentials", expired)
+    monkeypatch.setattr(ctx, "gmail", expired)
     with pytest.raises(RefreshError):
         triage.run_account(ctx, account, Mode.ACT)
     [run] = _runs(ctx)
@@ -132,9 +132,7 @@ def test_token_refresh_failure_outcomes_from_google_auth(
     )
     monkeypatch.setattr(google.auth._exponential_backoff.time, "sleep", lambda s: None)
     monkeypatch.setattr(inbox_gmail, "Request", lambda: _TokenEndpoint(status, body))
-    monkeypatch.setattr(
-        triage, "load_credentials", lambda d, e: inbox_gmail.load_credentials(tmp_path, e)
-    )
+    monkeypatch.setattr(ctx, "gmail", lambda e: inbox_gmail.connect(tmp_path, e))
     with pytest.raises(RefreshError):
         triage.run_account(ctx, account, Mode.ACT)
     [run] = _runs(ctx)
@@ -211,10 +209,10 @@ def test_unknown_act_category_is_recorded_on_the_run(triage_setup):
 def test_digest_groups_identical_run_failures(triage_setup, monkeypatch):
     ctx, gmail, account = triage_setup
 
-    def broken(tokens_dir, email):
+    def broken(email):
         raise OSError("disk <full> & co")
 
-    monkeypatch.setattr(triage, "load_credentials", broken)
+    monkeypatch.setattr(ctx, "gmail", broken)
     for _ in range(3):
         with pytest.raises(OSError):
             triage.run_account(ctx, account, Mode.ACT)

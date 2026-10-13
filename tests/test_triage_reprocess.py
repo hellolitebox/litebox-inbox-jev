@@ -166,6 +166,26 @@ def test_reprocess_leaves_alone_starred_email(setup):
     _assert_left_alone_and_not_revisited(ctx, gmail, account, "2")
 
 
+def test_starred_email_with_a_correction_teaches_the_rule_and_is_left_alone(setup):
+    """Learning the correction is its own step in `process`, before the hands-off check: an
+    email both relabeled and starred teaches the sender rule and is still left alone."""
+    ctx, gmail, account = setup
+    triage.run_account(ctx, account, Mode.LABEL)
+    with ctx.sessions() as s:
+        # corrections.check already looked at it this hour: process's own step catches it.
+        s.query(Message).update({Message.correction_checked_at: now()})
+        s.commit()
+    relabeled = ["INBOX", "Label_Jev/Newsletters", "Label_Jev/Processed", "STARRED"]
+    gmail.emails["2"].label_ids = relabeled
+    gmail.modified.clear()
+    triage.run_account(ctx, account, Mode.ACT)
+    with ctx.sessions() as s:
+        rule = s.query(SenderRule).filter_by(source="correction").one()
+        assert (rule.sender_key, rule.category) == ("promo@shop.com", "newsletter")
+        assert s.query(Message).filter_by(gmail_id="2").one().corrected_category == "newsletter"
+    _assert_left_alone_and_not_revisited(ctx, gmail, account, "2")
+
+
 def test_starred_new_email_is_processed(setup):
     ctx, gmail, account = setup
     ctx.classifier.answers["50% off"] = make_classification("newsletter", 0.97)

@@ -1,12 +1,19 @@
-"""Fakes and builders shared by the triage tests: no network, no Gmail, no Jev."""
+"""Fakes and builders shared by the triage tests: no network, no Gmail, no Jev.
 
+mypy checks this module (`[tool.mypy] files`): `gmail_factory` makes it check `FakeGmail`
+against `triage.GmailApi`, so the fake can't drift from what triage calls.
+"""
+
+from collections.abc import Sequence
 from datetime import timedelta
+from typing import Any
 
 from inbox_jev.classifier import JevError
 from inbox_jev.config import Mode
 from inbox_jev.db import Message, MessageStatus, Unsubscribe
 from inbox_jev.gmail import Email
 from inbox_jev.policy import DecisionSource
+from inbox_jev.triage import GmailFactory
 from inbox_jev.unsubscribe import UnsubscribeMethod, UnsubscribeStatus
 
 GMAIL_PASS = (
@@ -17,30 +24,30 @@ GMAIL_PASS = (
 class FakeGmail:
     """`gmail.Gmail` in memory: records label changes, sends and sent-mail searches."""
 
-    def __init__(self, emails):
+    def __init__(self, emails: Sequence[Email]) -> None:
         self.emails = {e.id: e for e in emails}
-        self.modified = []
-        self.sent = []
-        self.written_queries = []
-        self.header_errors = {}
-        self.label_batches = []
+        self.modified: list[tuple[str, list[str], list[str]]] = []
+        self.sent: list[str] = []
+        self.written_queries: list[str] = []
+        self.header_errors: dict[str, Exception] = {}
+        self.label_batches: list[list[str]] = []
         self._labels = {"INBOX": "INBOX", "SPAM": "SPAM"}
 
-    def ensure_labels(self, names):
+    def ensure_labels(self, names: list[str]) -> dict[str, str]:
         for n in names:
             self._labels.setdefault(n, f"Label_{n}")
         return self._labels
 
-    def labels(self):
+    def labels(self) -> dict[str, str]:
         return self._labels
 
-    def list_inbox_ids(self, lookback, limit):
+    def list_inbox_ids(self, lookback: str, limit: int) -> list[str]:
         return list(self.emails)[:limit]
 
-    def get(self, message_id):
+    def get(self, message_id: str) -> Email:
         return self.emails[message_id]
 
-    def get_headers(self, message_id, names):
+    def get_headers(self, message_id: str, names: list[str]) -> Email:
         if message_id in self.header_errors:
             raise self.header_errors[message_id]
         e = self.emails[message_id]
@@ -48,24 +55,29 @@ class FakeGmail:
         headers = {k: v for k, v in e.headers.items() if k in wanted}
         return Email(e.id, e.thread_id, e.label_ids, headers, "", "", e.internal_date_ms)
 
-    def get_label_ids(self, message_ids):
+    def get_label_ids(self, message_ids: Sequence[str]) -> dict[str, list[str] | None]:
         self.label_batches.append(list(message_ids))
         return {i: self.emails[i].label_ids if i in self.emails else None for i in message_ids}
 
-    def modify(self, message_id, add, remove):
+    def modify(self, message_id: str, add: list[str], remove: list[str]) -> None:
         self.modified.append((message_id, add, remove))
         e = self.emails[message_id]
         kept = [i for i in e.label_ids if i not in remove]
         e.label_ids = kept + [i for i in add if i not in kept]
 
-    def send(self, to, subject, body):
+    def send(self, to: str, subject: str, body: str) -> None:
         self.sent.append(to)
 
     written = frozenset({"c@client.com"})
 
-    def has_written_to(self, query):
+    def has_written_to(self, query: str) -> bool:
         self.written_queries.append(query)
         return query in self.written
+
+
+def gmail_factory(gmail: FakeGmail) -> GmailFactory:
+    """A `triage.Context` Gmail factory that hands out `gmail` for every account."""
+    return lambda account: gmail
 
 
 class FakeClassifier:
@@ -213,7 +225,7 @@ class SentMailService:
         self.queries.append(q)
         target = q.removeprefix("in:sent to:")
         ids = [i for i, h in self.sent.items() if any(target in v for v in h.values())]
-        page = {"messages": [{"id": i} for i in ids[:maxResults]]}
+        page: dict[str, Any] = {"messages": [{"id": i} for i in ids[:maxResults]]}
         if len(ids) > maxResults:
             page["nextPageToken"] = "next"
         svc = self
@@ -246,4 +258,4 @@ def sent_mail_gmail(monkeypatch, svc):
     from inbox_jev import gmail as gmail_module
 
     monkeypatch.setattr(gmail_module, "build", lambda *args, **kwargs: svc)
-    return gmail_module.Gmail(creds=None)
+    return gmail_module.Gmail(creds=None)  # type: ignore[arg-type]  # build() is replaced

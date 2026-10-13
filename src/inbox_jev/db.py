@@ -7,6 +7,8 @@ back are plain strings.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -157,10 +159,14 @@ def make_engine(url: str) -> Engine:
     if sqlite and parsed.database not in (None, "", ":memory:"):
         Path(parsed.database).parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(url)
-    if sqlite:
-        event.listen(engine, "connect", _sqlite_pragmas)
-    Base.metadata.create_all(engine)
-    _add_missing_columns(engine)
+    try:
+        if sqlite:
+            event.listen(engine, "connect", _sqlite_pragmas)
+        Base.metadata.create_all(engine)
+        _add_missing_columns(engine)
+    except BaseException:
+        engine.dispose()  # a failed upgrade must not leave its connections open
+        raise
     return engine
 
 
@@ -207,5 +213,15 @@ def _add_missing_columns(engine: Engine) -> None:
                     raise
 
 
-def make_session_factory(url: str) -> sessionmaker:
-    return sessionmaker(make_engine(url), expire_on_commit=False)
+@contextmanager
+def open_sessions(url: str) -> Iterator[sessionmaker]:
+    """A session factory on `make_engine(url)`, whose engine is disposed on exit.
+
+    Disposing closes the pooled connections, which would otherwise stay open until the
+    interpreter exits (SQLite warns `ResourceWarning: unclosed database` on Python 3.13+).
+    """
+    engine = make_engine(url)
+    try:
+        yield sessionmaker(engine, expire_on_commit=False)
+    finally:
+        engine.dispose()
