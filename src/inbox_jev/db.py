@@ -1,4 +1,9 @@
-"""SQLAlchemy models. Works with any DATABASE_URL (SQLite by default)."""
+"""SQLAlchemy models. Works with any DATABASE_URL (SQLite by default).
+
+String columns that hold a StrEnum's values (commented with the enum, e.g. `mode`): assign the
+members (a StrEnum is a str, so the stored text is the value) and compare against them; rows read
+back are plain strings.
+"""
 
 from __future__ import annotations
 
@@ -41,10 +46,6 @@ class MessageStatus(StrEnum):
 
     DONE = "done"
     ERROR = "error"
-
-
-# String columns that hold a StrEnum's values: assign the members (a StrEnum is a str, so the
-# stored text is the value) and compare against them; rows read back are plain strings.
 
 
 class Base(DeclarativeBase):

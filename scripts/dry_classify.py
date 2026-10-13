@@ -4,7 +4,7 @@ For each email: the category stored in the DB (if any), then what this checkout'
 categories.yaml decide now (category, confidence, outcome, flags, top-3 probabilities), with
 From and Subject truncated, and a final count of Jev calls. Never prints bodies.
 
-It never writes Gmail or the DB: Gmail is only read (messages.list/get, the sent-mail search),
+It never writes Gmail or the DB: Gmail is only read (`Gmail.list_ids`/`get`, the sent-mail search),
 `gmail.modify`/`send` are never called, a SQLite DB is opened with mode=ro and nothing is
 committed. Calls Jev (TYPESAFE_API_KEY) as `run` would: once per email, except for rules to
 archive or spam categories (allowlisted and keep-rule emails are asked for the flags only), and
@@ -18,7 +18,6 @@ import argparse
 import sys
 from pathlib import Path
 
-from googleapiclient.discovery import build
 from sqlalchemy import create_engine, make_url, select
 from sqlalchemy.orm import Session
 
@@ -53,22 +52,6 @@ def _outcome(decision) -> str:
     return "REVIEW" if decision.low_confidence else "KEEP"
 
 
-def _ids(svc, query: str, limit: int) -> list[str]:
-    ids: list[str] = []
-    token = None
-    while len(ids) < limit:
-        resp = (
-            svc.messages()
-            .list(userId="me", q=query, maxResults=min(500, limit - len(ids)), pageToken=token)
-            .execute()
-        )
-        ids += [m["id"] for m in resp.get("messages", [])]
-        token = resp.get("nextPageToken")
-        if not token:
-            break
-    return ids
-
-
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--account", required=True)
@@ -90,12 +73,10 @@ def main() -> None:
         sys.exit(f"{args.account} is not in {s.accounts_file}")
     account = accounts[0]
 
-    creds = load_credentials(s.google_tokens_dir, account.email)
-    gmail = Gmail(creds)
+    gmail = Gmail(load_credentials(s.google_tokens_dir, account.email))
     ids = list(args.ids)
     if args.query:
-        svc = build("gmail", "v1", credentials=creds, cache_discovery=False).users()
-        ids += [i for i in _ids(svc, args.query, args.limit) if i not in ids]
+        ids += [i for i in gmail.list_ids(args.query, args.limit) if i not in ids]
 
     mode = triage.effective_mode(s, account, None)  # the sent-mail search on rules depends on it
     classifier = Classifier(s.typesafe_api_key, s.typesafe_model, cfg)

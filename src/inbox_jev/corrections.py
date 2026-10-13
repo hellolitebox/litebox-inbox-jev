@@ -60,9 +60,12 @@ def check(session: Session, gmail: Gmail, account: str, cfg: CategoriesConfig) -
     ).all()
 
     names = {v: k for k, v in gmail.labels().items()}
+    # One batched Gmail call for all candidates. An error other than a 404 is raised before any
+    # row changes: the run fails and every candidate is checked again by the next one.
+    current = gmail.get_label_ids([msg.gmail_id for msg in candidates])
     corrected = 0
     for msg in candidates:
-        label_ids = gmail.get_label_ids(msg.gmail_id)
+        label_ids = current[msg.gmail_id]
         msg.correction_checked_at = cutoff
         if label_ids is None:
             continue

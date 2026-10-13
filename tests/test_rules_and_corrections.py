@@ -1,7 +1,8 @@
 from datetime import timedelta
 
 import pytest
-from conftest import make_classification, make_signals
+from conftest import make_classification, make_signals, selects_from
+from test_triage import _HttpError
 
 from inbox_jev import corrections, rules
 from inbox_jev.config import Account, Mode
@@ -202,15 +203,22 @@ def test_known_contact_cold_outreach_does_not_earn_rule(cfg, session, account):
 class _LabelGmail:
     """Gmail that only answers label lookups, recording which emails were checked."""
 
-    def __init__(self):
+    def __init__(self, current=None, error=None):
         self.checked = []
+        self.calls = 0
+        self.current = current or {}
+        self.error = error
 
     def labels(self):
         return {}
 
-    def get_label_ids(self, gmail_id):
-        self.checked.append(gmail_id)
-        return ["Jev/Marketing"]  # untouched
+    def get_label_ids(self, gmail_ids):
+        self.calls += 1
+        if self.error:
+            raise self.error
+        self.checked += gmail_ids
+        # untouched unless `current` says otherwise; None: deleted in Gmail
+        return {i: self.current.get(i, ["Jev/Marketing"]) for i in gmail_ids}
 
 
 def test_check_puts_never_and_longest_unchecked_rows_first(cfg, session, monkeypatch):
@@ -288,3 +296,58 @@ def test_known_contact_never_earns_cold_outreach_rule_even_unverified(cfg, sessi
         d = decide(cfg, account, make_signals(), m, previous_contact="wrote_to_sender")
         rules.record_auto(session, cfg, "me@acme.com", "rep@vendor.com", m, d, "wrote_to_sender")
     assert rules.lookup(session, "me@acme.com", "rep@vendor.com").category == "marketing"
+
+
+def _checkable(session, *gmail_ids):
+    for gmail_id in gmail_ids:
+        session.add(
+            msg(
+                account="me@acme.com",
+                gmail_id=gmail_id,
+                thread_id="t",
+                sender=f"{gmail_id}@shop.com",
+                status=MessageStatus.DONE,
+                mode=Mode.ACT,
+                processed_at=now() - timedelta(hours=2),
+            )
+        )
+    session.commit()
+
+
+def test_check_reads_every_candidate_in_one_gmail_call(cfg, session):
+    _checkable(session, "pulled_back", "deleted", "untouched")
+    gmail = _LabelGmail(current={"pulled_back": ["INBOX", "Jev/Marketing"], "deleted": None})
+    assert corrections.check(session, gmail, "me@acme.com", cfg) == 1
+    assert gmail.calls == 1
+    assert sorted(gmail.checked) == ["deleted", "pulled_back", "untouched"]
+    rows = {m.gmail_id: m for m in session.query(Message)}
+    assert rows["pulled_back"].corrected_category == "important"
+    assert rows["deleted"].corrected_category is None
+    assert all(m.correction_checked_at is not None for m in rows.values())
+    rule = session.query(SenderRule).one()
+    assert (rule.sender_key, rule.category) == ("pulled_back@shop.com", "important")
+
+
+def test_check_without_candidates_learns_nothing(cfg, session):
+    gmail = _LabelGmail()
+    assert corrections.check(session, gmail, "me@acme.com", cfg) == 0
+    assert gmail.checked == []
+
+
+def test_check_gmail_failure_is_raised_and_changes_no_row(cfg, session):
+    _checkable(session, "a", "b")
+    gmail = _LabelGmail(current={"a": ["INBOX"]}, error=_HttpError(503))
+    with pytest.raises(_HttpError):
+        corrections.check(session, gmail, "me@acme.com", cfg)
+    assert all(m.correction_checked_at is None for m in session.query(Message))
+    assert session.query(SenderRule).count() == 0
+
+
+def test_match_reads_address_and_domain_rules_in_one_query(cfg, session):
+    rules.set_rule(session, "me@acme.com", "news@shop.com", "promotions", RuleSource.MANUAL)
+    rules.set_rule(session, "me@acme.com", "@shop.com", "newsletter", RuleSource.MANUAL)
+    session.commit()
+    with selects_from(session.get_bind(), "sender_rules") as queries:
+        rule, stale = rules.match(session, "me@acme.com", "other@shop.com", cfg.by_key)
+    assert rule.sender_key == "@shop.com" and stale is None
+    assert len(queries) == 1

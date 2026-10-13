@@ -6,10 +6,12 @@ import base64
 import html
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from email.message import EmailMessage as MimeMessage
 from html.parser import HTMLParser
 from pathlib import Path
+from typing import Any
 
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
@@ -26,6 +28,11 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
 ]
 INBOX, SPAM = "INBOX", "SPAM"
+# Calls per batch HTTP request: Gmail accepts up to 100 but advises at most 50, since larger
+# batches are likely to trigger rate limiting.
+BATCH_SIZE = 50
+# Retries (exponential backoff with jitter) for a label check asked again outside its batch.
+SINGLE_RETRIES = 3
 
 
 def is_token_refresh_error(exc: BaseException) -> bool:
@@ -227,12 +234,18 @@ def _to_email(msg: dict, snippet: str, body: str) -> Email:
 
 class Gmail:
     def __init__(self, creds: Credentials):
-        self._svc = build("gmail", "v1", credentials=creds, cache_discovery=False).users()
+        self._service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+        self._svc = self._service.users()
         self._label_ids: dict[str, str] | None = None
         self._user_labels: set[str] = set()
         self._written: dict[str, bool] = {}
 
     def list_inbox_ids(self, lookback: str, limit: int) -> list[str]:
+        """Ids of inbox emails newer than `lookback` (a Gmail `newer_than` value), newest first."""
+        return self.list_ids(f"newer_than:{lookback}", limit, label_ids=[INBOX])
+
+    def list_ids(self, query: str, limit: int, label_ids: list[str] | None = None) -> list[str]:
+        """Ids of up to `limit` emails matching the Gmail search `query` (and all `label_ids`)."""
         ids: list[str] = []
         token = None
         while len(ids) < limit:
@@ -240,8 +253,8 @@ class Gmail:
                 self._svc.messages()
                 .list(
                     userId="me",
-                    labelIds=[INBOX],
-                    q=f"newer_than:{lookback}",
+                    labelIds=label_ids,
+                    q=query,
                     maxResults=min(500, limit - len(ids)),
                     pageToken=token,
                 )
@@ -270,15 +283,80 @@ class Gmail:
         )
         return _to_email(msg, snippet="", body="")
 
-    def get_label_ids(self, message_id: str) -> list[str] | None:
-        """Current labels of a message, or None if it no longer exists."""
+    def get_label_ids(self, message_ids: Sequence[str]) -> dict[str, list[str] | None]:
+        """Current labels of each message, or None for one that no longer exists (HTTP 404).
+
+        One batch HTTP request per BATCH_SIZE messages instead of one request each. A message
+        whose call fails otherwise (e.g. rate limited), alone in the batch or because the whole
+        batch request failed, is logged and asked again on its own, with backoff; if that fails
+        too, the error is raised and no later batch is sent.
+        """
+        found: dict[str, list[str] | None] = {}
+        unique = list(dict.fromkeys(message_ids))  # a batch rejects duplicate request ids
+        for start in range(0, len(unique), BATCH_SIZE):
+            chunk = unique[start : start + BATCH_SIZE]
+            answers, failed = self._get_label_ids_batch(chunk)
+            found.update(answers)
+            if failed:
+                log.warning(
+                    "batched label check failed: retrying one by one",
+                    extra={
+                        "failed": len(failed),
+                        "error_types": sorted({type(exc).__name__ for exc in failed.values()}),
+                    },
+                )
+            for message_id in chunk:
+                if message_id in failed:
+                    found[message_id] = self._get_label_ids_one(message_id)
+        return found
+
+    def _get_label_ids_batch(
+        self, message_ids: list[str]
+    ) -> tuple[dict[str, list[str] | None], dict[str, Exception]]:
+        """One batch request for `message_ids`: (answers, failures to ask again one by one).
+
+        If the batch request itself fails (HTTP error on the batch, transport error, malformed
+        reply), every message without an answer yet counts as failed with that error.
+        """
+        answers: dict[str, list[str] | None] = {}
+        failed: dict[str, Exception] = {}
+
+        def collect(request_id: str, response: dict | None, exc: Exception | None) -> None:
+            if exc is None:
+                answers[request_id] = (response or {}).get("labelIds", [])
+            elif is_not_found(exc):
+                answers[request_id] = None
+            else:
+                failed[request_id] = exc
+
+        batch = self._service.new_batch_http_request(callback=collect)
+        for message_id in message_ids:
+            batch.add(self._minimal_get(message_id), request_id=message_id)
         try:
-            msg = self._svc.messages().get(userId="me", id=message_id, format="minimal").execute()
+            batch.execute()
+        except Exception as exc:
+            for message_id in message_ids:
+                if message_id not in answers:
+                    failed.setdefault(message_id, exc)
+        return answers, failed
+
+    def _get_label_ids_one(self, message_id: str) -> list[str] | None:
+        """Current labels of one message, or None if it no longer exists.
+
+        googleapiclient retries a 429, a 5xx or a rate-limit 403 up to SINGLE_RETRIES times with
+        exponential backoff; any other error, or one that outlasts the retries, is raised.
+        """
+        try:
+            msg = self._minimal_get(message_id).execute(num_retries=SINGLE_RETRIES)
         except Exception as exc:
             if is_not_found(exc):
                 return None
             raise
         return msg.get("labelIds", [])
+
+    def _minimal_get(self, message_id: str) -> Any:
+        """The messages.get request for a message's id and labels only (not yet executed)."""
+        return self._svc.messages().get(userId="me", id=message_id, format="minimal")
 
     def has_written_to(self, query: str) -> bool:
         """Whether any sent email matches `to:<query>` (an address or a domain). Cached."""

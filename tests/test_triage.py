@@ -1,9 +1,10 @@
 """End-to-end triage with fake Gmail and a fake Jev classifier."""
 
+import re
 from datetime import timedelta
 
 import pytest
-from conftest import GMAIL_PASS, make_classification
+from conftest import GMAIL_PASS, make_classification, selects_from
 
 from inbox_jev import digest, rules, triage
 from inbox_jev.classifier import JevError
@@ -22,6 +23,7 @@ class FakeGmail:
         self.sent = []
         self.written_queries = []
         self.header_errors = {}
+        self.label_batches = []
         self._labels = {"INBOX": "INBOX", "SPAM": "SPAM"}
 
     def ensure_labels(self, names):
@@ -46,8 +48,9 @@ class FakeGmail:
         headers = {k: v for k, v in e.headers.items() if k in wanted}
         return Email(e.id, e.thread_id, e.label_ids, headers, "", "", e.internal_date_ms)
 
-    def get_label_ids(self, message_id):
-        return self.emails[message_id].label_ids
+    def get_label_ids(self, message_ids):
+        self.label_batches.append(list(message_ids))
+        return {i: self.emails[i].label_ids if i in self.emails else None for i in message_ids}
 
     def modify(self, message_id, add, remove):
         self.modified.append((message_id, add, remove))
@@ -1307,3 +1310,25 @@ def test_unsubscribe_budget_counts_down_to_exhausted():
     budget.spend()
     assert budget.exhausted and budget.remaining == 0
     assert triage.UnsubscribeBudget(0).exhausted  # MAX_UNSUBSCRIBES_PER_RUN=0 never unsubscribes
+
+
+def test_process_looks_up_the_stored_row_once_per_email(setup):
+    ctx, gmail, account = setup
+    engine = ctx.sessions.kw["bind"]
+    by_id = re.compile(r"WHERE messages\.account = \S+ AND messages\.gmail_id = \S+$")
+    with selects_from(engine, "messages") as first:
+        triage.run_account(ctx, account, Mode.LABEL)  # new rows
+    with selects_from(engine, "messages") as again:
+        triage.run_account(ctx, account, Mode.ACT)  # the same rows, reprocessed
+    assert len([q for q in first if by_id.search(q)]) == 4
+    assert len([q for q in again if by_id.search(q)]) == 4
+
+
+def test_corrections_check_reads_labels_in_one_gmail_call(setup):
+    ctx, gmail, account = setup
+    triage.run_account(ctx, account, Mode.LABEL)
+    with ctx.sessions() as s:
+        s.query(Message).update({Message.correction_checked_at: None})
+        s.commit()
+    triage.run_account(ctx, account, Mode.LABEL)
+    assert sorted(gmail.label_batches[-1]) == ["1", "2", "3", "4"]

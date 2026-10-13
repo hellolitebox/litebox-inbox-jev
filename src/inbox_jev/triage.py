@@ -388,7 +388,7 @@ def process(
     )
     actions = plan(ctx.cfg, decision, mode, account.act_categories)
 
-    msg = _upsert_message(session, account.email, email, sig)
+    msg = _upsert_message(session, account.email, email, sig, prev)
     # Reprocessing (e.g. label -> act): drop labels from the previous pass that no longer apply.
     stale = [
         label_ids[name]
@@ -834,8 +834,10 @@ def _find_message(session: Session, account: str, gmail_id: str) -> Message | No
     )
 
 
-def _upsert_message(session: Session, account: str, email: Email, sig: Signals) -> Message:
-    msg = _find_message(session, account, email.id)
+def _upsert_message(
+    session: Session, account: str, email: Email, sig: Signals, msg: Message | None
+) -> Message:
+    """Store the email's metadata on its row `msg` (already looked up), or on a new row."""
     if msg is None:
         msg = Message(account=account, gmail_id=email.id)
         session.add(msg)
