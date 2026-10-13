@@ -1,5 +1,6 @@
 import pytest
-from conftest import GMAIL_PASS, make_classification, make_signals
+from conftest import make_classification, make_signals
+from fakes import GMAIL_PASS
 
 from inbox_jev.config import Mode
 from inbox_jev.policy import decide, flags_only, plan, rule_keys

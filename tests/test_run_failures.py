@@ -6,9 +6,9 @@ from unittest import mock
 import google.auth._exponential_backoff
 import google.auth.transport
 import pytest
+from fakes import age_errors
 from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
-from test_triage import _age_errors, setup  # noqa: F401 (pytest fixture)
 from typer.testing import CliRunner
 
 from inbox_jev import cli, digest, triage
@@ -19,8 +19,8 @@ from inbox_jev.unsubscribe import UnsubscribeMethod, UnsubscribeStatus
 
 
 @pytest.fixture
-def triage_setup(setup):  # noqa: F811
-    """tests/test_triage.py's fake Gmail, fake Jev and in-memory DB."""
+def triage_setup(setup):
+    """The `setup` fixture (conftest.py): fake Gmail, fake Jev and in-memory DB."""
     return setup
 
 
@@ -245,7 +245,7 @@ def test_token_dying_mid_run_fails_the_run_without_counting_against_emails(
 
 def test_run_counts_survive_a_failed_email(triage_setup):
     ctx, gmail, account = triage_setup
-    ctx._classifier.answers.pop("50% off")  # email 2 fails between successful ones
+    ctx.classifier.answers.pop("50% off")  # email 2 fails between successful ones
     run = triage.run_account(ctx, account, Mode.ACT)
     [stored] = _runs(ctx)
     assert (run.processed, run.errors) == (stored.processed, stored.errors) == (3, 1)
@@ -258,25 +258,25 @@ def _attempts(ctx, gmail_id="1"):
 
 def test_failed_email_backs_off_then_gives_up_and_shows_in_digest(triage_setup):
     ctx, gmail, account = triage_setup
-    ctx._classifier.answers.pop("Proposal")
+    ctx.classifier.answers.pop("Proposal")
 
     triage.run_account(ctx, account, Mode.ACT)
-    calls = ctx._classifier.calls
+    calls = ctx.classifier.calls
     triage.run_account(ctx, account, Mode.ACT)  # within the 5-minute backoff: not retried
-    assert _attempts(ctx) == 1 and ctx._classifier.calls == calls
+    assert _attempts(ctx) == 1 and ctx.classifier.calls == calls
 
     for n in range(2, MAX_ERROR_ATTEMPTS + 1):
-        _age_errors(ctx, 5 * 2 ** (n - 2) - 1)  # one minute short of this attempt's backoff
+        age_errors(ctx, 5 * 2 ** (n - 2) - 1)  # one minute short of this attempt's backoff
         triage.run_account(ctx, account, Mode.ACT)
         assert _attempts(ctx) == n - 1
-        _age_errors(ctx, 1)
+        age_errors(ctx, 1)
         triage.run_account(ctx, account, Mode.ACT)
         assert _attempts(ctx) == n
 
-    _age_errors(ctx, 60 * 24)  # gave up: never retried again, however long it waits
-    calls = ctx._classifier.calls
+    age_errors(ctx, 60 * 24)  # gave up: never retried again, however long it waits
+    calls = ctx.classifier.calls
     run = triage.run_account(ctx, account, Mode.ACT)
-    assert (run.processed, run.errors) == (0, 0) and ctx._classifier.calls == calls
+    assert (run.processed, run.errors) == (0, 0) and ctx.classifier.calls == calls
 
     text = _digest(ctx, account, hours=48)
     assert "1 mail (1 sin más reintentos)" in text
@@ -285,27 +285,27 @@ def test_failed_email_backs_off_then_gives_up_and_shows_in_digest(triage_setup):
 
 def test_success_resets_the_error_count(triage_setup):
     ctx, gmail, account = triage_setup
-    answers = ctx._classifier.answers
+    answers = ctx.classifier.answers
     good = answers.pop("Proposal")
     triage.run_account(ctx, account, Mode.ACT)
-    _age_errors(ctx, 5)
+    age_errors(ctx, 5)
     triage.run_account(ctx, account, Mode.ACT)
     assert _attempts(ctx) == 2
     answers["Proposal"] = good
-    _age_errors(ctx, 10)
+    age_errors(ctx, 10)
     triage.run_account(ctx, account, Mode.ACT)
     assert _attempts(ctx) == 0
 
 
 def test_retry_errors_resets_given_up_emails(triage_setup):
     ctx, gmail, account = triage_setup
-    answers = ctx._classifier.answers
+    answers = ctx.classifier.answers
     good = answers.pop("Proposal")
     triage.run_account(ctx, account, Mode.ACT)
     with ctx.sessions() as s:
         s.query(Message).filter_by(gmail_id="1").one().error_attempts = MAX_ERROR_ATTEMPTS
         s.commit()
-    _age_errors(ctx, 60 * 24)
+    age_errors(ctx, 60 * 24)
     assert triage.run_account(ctx, account, Mode.ACT).processed == 0
 
     with ctx.sessions() as s:
@@ -338,9 +338,9 @@ def test_digest_escapes_email_text_for_slack(triage_setup):
     ctx, gmail, account = triage_setup
     gmail.emails["1"].headers["subject"] = ["Q&A <!channel> <https://evil.example|click>"]
     gmail.emails["1"].headers["from"] = ["Eve <eve@client.com>"]
-    ctx._classifier.answers["Q&A <!channel> <https://evil.example|click>"] = (
-        ctx._classifier.answers["Proposal"]
-    )
+    ctx.classifier.answers["Q&A <!channel> <https://evil.example|click>"] = ctx.classifier.answers[
+        "Proposal"
+    ]
     triage.run_account(ctx, account, Mode.ACT)
     with ctx.sessions() as s:
         s.add(

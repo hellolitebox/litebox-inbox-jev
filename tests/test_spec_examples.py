@@ -12,8 +12,8 @@ from pathlib import Path
 
 import httpx
 import pytest
-from conftest import GMAIL_PASS, make_signals
-from test_triage import FakeClassifier, FakeGmail, _HttpError, _JevDown, email
+from conftest import make_signals
+from fakes import GMAIL_PASS, FakeClassifier, FakeGmail, HttpError, JevDown, email
 
 from inbox_jev import digest, rules, triage
 from inbox_jev import unsubscribe as unsub
@@ -46,14 +46,14 @@ def account():
 
 @pytest.fixture
 def spec(cfg, account, monkeypatch):
-    """End-to-end triage with fake Gmail and a fake Jev, as in tests/test_triage.py."""
+    """End-to-end triage with fake Gmail and a fake Jev, as the `setup` fixture (conftest.py)."""
     gmail = FakeGmail([])
     gmail.written = frozenset()
     monkeypatch.setattr(triage, "Gmail", lambda creds: gmail)
     monkeypatch.setattr(triage, "load_credentials", lambda d, e: None)
     settings = Settings(_env_file=None, typesafe_api_key="x", database_url="sqlite:///:memory:")
-    ctx = triage.Context(settings, cfg, make_session_factory(settings.database_url))
-    ctx._classifier = FakeClassifier({})
+    sessions = make_session_factory(settings.database_url)
+    ctx = triage.Context(settings, cfg, sessions, classifier=FakeClassifier({}))
     return ctx, gmail, account
 
 
@@ -122,7 +122,7 @@ def test_ex02_payment_approval_stays_with_action_label(spec):
     """EX-02 (docs/how-it-decides.md §5, §3.1 keep categories)."""
     ctx, gmail, account = spec
     gmail.emails = {"1": email("1", "Bank <alerts@bank.example>", "Approve payment to Acme")}
-    ctx._classifier.answers["Approve payment to Acme"] = answer(
+    ctx.classifier.answers["Approve payment to Acme"] = answer(
         "action_required",
         needs_reply=0.85,
         action_required=0.93,
@@ -223,7 +223,7 @@ def _run_sequence(spec, monkeypatch, written=frozenset()):
     ctx, gmail, account = spec
     gmail.written = written
     gmail.emails = {"1": _sequence_email()}
-    ctx._classifier.answers["Re: quick question about your pipeline"] = answer(
+    ctx.classifier.answers["Re: quick question about your pipeline"] = answer(
         "cold_outreach", cold_outreach=0.96, marketing=0.04
     )
     posts = _one_click_posts(monkeypatch)
@@ -235,7 +235,7 @@ def test_ex04_stranger_sequence_is_archived_and_unsubscribed(spec, monkeypatch):
     """EX-04 (docs/how-it-decides.md §5, §3.3 unsubscribe conditions, §4.3 one-click)."""
     ctx, gmail, posts = _run_sequence(spec, monkeypatch)
     assert gmail.written_queries == ["sam@growthagency.example", "growthagency.example"]
-    assert ctx._classifier.states[0]["previous_contact"] == "never"
+    assert ctx.classifier.states[0]["previous_contact"] == "never"
     assert gmail.modified[-1][2] == ["INBOX"]
     assert "Label_Jev/Outreach" in gmail.modified[-1][1]
     assert posts == [("https://unsub.sequencer.example/u/abc", "List-Unsubscribe=One-Click")]
@@ -254,7 +254,7 @@ def test_ex05_known_contact_sequence_is_archived_only(spec, monkeypatch):
     ctx, gmail, posts = _run_sequence(
         spec, monkeypatch, written=frozenset({"sam@growthagency.example"})
     )
-    assert ctx._classifier.states[0]["previous_contact"] == "wrote_to_sender"
+    assert ctx.classifier.states[0]["previous_contact"] == "wrote_to_sender"
     assert gmail.modified[-1][2] == ["INBOX"]
     assert posts == [] and gmail.sent == []
     with ctx.sessions() as s:
@@ -292,11 +292,11 @@ def test_ex06_pitch_via_own_group_uses_author_and_never_unsubscribes(spec, monke
             authentication_results="mx.google.com; dmarc=pass header.from=example.com",
         )
     }
-    ctx._classifier.answers["Partnership idea"] = answer("cold_outreach", cold_outreach=0.97)
+    ctx.classifier.answers["Partnership idea"] = answer("cold_outreach", cold_outreach=0.97)
     posts = _one_click_posts(monkeypatch)
     triage.run_account(ctx, account, Mode.ACT)
 
-    state = ctx._classifier.states[0]  # allow_domains matched the author, not the group
+    state = ctx.classifier.states[0]  # allow_domains matched the author, not the group
     assert (state["original_sender"], state["sent_via_group"]) == (
         "dana@pitchco.example",
         "hello@example.com",
@@ -450,14 +450,14 @@ def test_ex12_pulling_back_to_inbox_becomes_a_rule(spec):
     """EX-12 (docs/how-it-decides.md §5, §3.7 corrections)."""
     ctx, gmail, account = spec
     gmail.emails = {"1": email("1", "Weekly <news@weekly.example>", "Issue 41")}
-    ctx._classifier.answers["Issue 41"] = answer("newsletter", newsletter=0.97)
+    ctx.classifier.answers["Issue 41"] = answer("newsletter", newsletter=0.97)
     triage.run_account(ctx, account, Mode.ACT)
     assert gmail.modified[-1][2] == ["INBOX"]
 
     gmail.emails["1"].label_ids.append("INBOX")  # the user moves it back
     gmail.emails["2"] = email("2", "Weekly <news@weekly.example>", "Issue 42")
-    ctx._classifier.answers["Issue 42"] = answer("newsletter", newsletter=0.97)
-    states = len(ctx._classifier.states)
+    ctx.classifier.answers["Issue 42"] = answer("newsletter", newsletter=0.97)
+    states = len(ctx.classifier.states)
     triage.run_account(ctx, account, Mode.ACT)
 
     assert _row(ctx, "1").corrected_category == "important"
@@ -466,7 +466,7 @@ def test_ex12_pulling_back_to_inbox_becomes_a_rule(spec):
         assert (rule.category, rule.source, rule.active) == ("important", "correction", True)
     # A keep rule decided issue 42: Jev was asked only for the flags, its newsletter answer
     # was ignored.
-    assert [st["subject"] for st in ctx._classifier.states[states:]] == ["Issue 42"]
+    assert [st["subject"] for st in ctx.classifier.states[states:]] == ["Issue 42"]
     row = _row(ctx, "2")
     assert (row.category, row.source, row.archived) == ("important", "rule", False)
     assert "Label_Jev/Important" in gmail.modified[-1][1] and gmail.modified[-1][2] == []
@@ -479,7 +479,7 @@ def test_ex13_failing_email_backs_off_then_gives_up(spec):
         "1": email("1", "Vendor <billing@vendor.example>", "Invoice 7"),
         "2": email("2", "Weekly <news@weekly.example>", "Issue 41"),
     }
-    ctx._classifier.answers["Issue 41"] = answer("newsletter", newsletter=0.97)  # no "Invoice 7"
+    ctx.classifier.answers["Issue 41"] = answer("newsletter", newsletter=0.97)  # no "Invoice 7"
 
     def later(minutes):
         with ctx.sessions() as s:
@@ -498,15 +498,15 @@ def test_ex13_failing_email_backs_off_then_gives_up(spec):
     assert _row(ctx, "1").error_attempts == 8
 
     later(60 * 24)
-    calls = ctx._classifier.calls
+    calls = ctx.classifier.calls
     assert triage.run_account(ctx, account, Mode.ACT).errors == 0  # gave up
-    assert ctx._classifier.calls == calls
+    assert ctx.classifier.calls == calls
     assert not [m for m in gmail.modified if m[0] == "1"]  # untouched in Gmail
     with ctx.sessions() as s:
         text = digest.build(s, ctx.cfg, account.email, hours=48, language=DigestLanguage.ES)
     assert "Invoice 7" in text.split("Sin más reintentos")[1]
 
-    ctx._classifier.answers["Invoice 7"] = answer("transactional", transactional=0.95)
+    ctx.classifier.answers["Invoice 7"] = answer("transactional", transactional=0.95)
     with ctx.sessions() as s:
         triage.reset_error_attempts(s, account.email)
     triage.run_account(ctx, account, Mode.ACT)
@@ -525,9 +525,9 @@ def test_ex14_rule_to_removed_category_goes_through_jev(spec, caplog):
         "2": email("2", "Deals <sale@deals.example>", "Monday picks"),
     }
     for subject in ("Weekend picks", "Monday picks"):
-        ctx._classifier.answers[subject] = answer("newsletter", newsletter=0.93, marketing=0.07)
+        ctx.classifier.answers[subject] = answer("newsletter", newsletter=0.93, marketing=0.07)
     gmail.emails["3"] = email("3", "Billing <billing@vendor.example>", "Invoice 88")
-    ctx._classifier.answers["Invoice 88"] = answer("important", important=0.96, marketing=0.04)
+    ctx.classifier.answers["Invoice 88"] = answer("important", important=0.96, marketing=0.04)
     with ctx.sessions() as s:
         rules.set_rule(s, account.email, "@deals.example", "promotions", RuleSource.MANUAL)
         rules.set_rule(s, account.email, "@vendor.example", "marketing", RuleSource.MANUAL)
@@ -536,7 +536,7 @@ def test_ex14_rule_to_removed_category_goes_through_jev(spec, caplog):
     run = triage.run_account(ctx, account, Mode.ACT)
 
     assert (run.processed, run.errors) == (3, 0)
-    assert ctx._classifier.calls == 3
+    assert ctx.classifier.calls == 3
     for gmail_id in ("1", "2"):
         row = _row(ctx, gmail_id)
         assert (row.source, row.category, row.archived) == ("jev", "newsletter", True)
@@ -563,7 +563,7 @@ def test_ex15_keep_rule_still_gets_needs_reply(spec):
         "1": email("1", "Ana <ana@client.example>", "Signed contract by Friday?"),
         "2": email("2", "Weekly <news@weekly.example>", "Issue 43"),
     }
-    ctx._classifier.answers["Signed contract by Friday?"] = answer(
+    ctx.classifier.answers["Signed contract by Friday?"] = answer(
         "cold_outreach", needs_reply=0.92, cold_outreach=0.55, important=0.45
     )
     with ctx.sessions() as s:
@@ -572,8 +572,8 @@ def test_ex15_keep_rule_still_gets_needs_reply(spec):
         s.commit()
     triage.run_account(ctx, account, Mode.ACT)
 
-    assert [st["subject"] for st in ctx._classifier.states] == ["Signed contract by Friday?"]
-    assert "previous_contact" not in ctx._classifier.states[0]
+    assert [st["subject"] for st in ctx.classifier.states] == ["Signed contract by Friday?"]
+    assert "previous_contact" not in ctx.classifier.states[0]
     assert gmail.written_queries == []  # no sent-mail search for a keep decision
     mods = {m[0]: m for m in gmail.modified}
     assert {"Label_Jev/Important", "Label_Jev/Needs Reply"} <= set(mods["1"][1])
@@ -598,13 +598,13 @@ def test_ex19_flags_only_jev_failure_still_labels(spec, caplog):
         "1": email("1", "Lea <lea@acme.example>", "Budget review"),
         "2": email("2", "Ana <ana@client.example>", "Signed contract by Friday?"),
     }
-    ctx._classifier = _JevDown({})
+    ctx = triage.Context(ctx.settings, ctx.cfg, ctx.sessions, classifier=JevDown({}))
     with ctx.sessions() as s:
         rules.set_rule(s, account.email, "ana@client.example", "important", RuleSource.CORRECTION)
         s.commit()
     run = triage.run_account(ctx, account, Mode.ACT)
 
-    assert (run.processed, run.errors) == (2, 0) and ctx._classifier.calls == 2
+    assert (run.processed, run.errors) == (2, 0) and ctx.classifier.calls == 2
     mods = {m[0]: m for m in gmail.modified}
     for gmail_id, source in (("1", "allowlist"), ("2", "rule")):
         row = _row(ctx, gmail_id)
@@ -653,7 +653,7 @@ def test_ex17_no_gmail_authentication_results_is_unverified(spec, monkeypatch):
             list_unsubscribe_post="List-Unsubscribe=One-Click",
         )
     }
-    ctx._classifier.answers["Flash sale"] = answer("marketing", marketing=0.97)
+    ctx.classifier.answers["Flash sale"] = answer("marketing", marketing=0.97)
     posts = _one_click_posts(monkeypatch)
     triage.run_account(ctx, account, Mode.ACT)
 
@@ -675,14 +675,14 @@ def test_ex18_dry_run_learns_no_rules(spec):
         str(n): email(str(n), "Weekly <news@weekly.example>", f"Issue {n}") for n in (1, 2, 3)
     }
     for n in (1, 2, 3):
-        ctx._classifier.answers[f"Issue {n}"] = answer("newsletter", newsletter=0.97)
+        ctx.classifier.answers[f"Issue {n}"] = answer("newsletter", newsletter=0.97)
     triage.run_account(ctx, account, Mode.DRY_RUN)
     with ctx.sessions() as s:
         assert s.query(SenderRule).count() == 0
     assert all(add == [] and remove == [] for _, add, remove in gmail.modified)
 
     triage.run_account(ctx, account, Mode.ACT)  # the dry-run rows are processed again
-    assert ctx._classifier.calls == 6
+    assert ctx.classifier.calls == 6
     with ctx.sessions() as s:
         rule = s.query(SenderRule).one()
         assert (rule.category, rule.hits, rule.active) == ("newsletter", 3, True)
@@ -698,7 +698,7 @@ def test_ex20_restore_skips_emails_deleted_in_gmail(spec, monkeypatch):
         "1": email("1", "Weekly <news@weekly.example>", "Issue 42"),
         "2": email("2", "Shop <promo@shop.example>", "Sale"),
     }
-    ctx._classifier.answers.update({"Issue 42": answer("newsletter"), "Sale": answer("marketing")})
+    ctx.classifier.answers.update({"Issue 42": answer("newsletter"), "Sale": answer("marketing")})
     triage.run_account(ctx, account, Mode.ACT)
     assert _row(ctx, "1").archived and _row(ctx, "2").archived
 
@@ -706,7 +706,7 @@ def test_ex20_restore_skips_emails_deleted_in_gmail(spec, monkeypatch):
 
     def modify(message_id, add, remove):
         if message_id == "1":
-            raise _HttpError(404)  # deleted in Gmail
+            raise HttpError(404)  # deleted in Gmail
         real(message_id, add, remove)
 
     monkeypatch.setattr(gmail, "modify", modify)

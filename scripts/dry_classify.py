@@ -97,7 +97,7 @@ def main() -> None:
                     if args.ignore_rules
                     else rules.match(session, account.email, sig.sender, cfg.by_key)
                 )
-                # Same calls as `run` (triage.process): Jev with the sent-mail search when no
+                # Same calls as `run` (triage._gather_inputs): Jev with the sent-mail search when no
                 # rule or allowlist decides, Jev for the flags only on keep rules and the
                 # allowlist, and the sent-mail search on a rule only when it could unsubscribe.
                 classification, contact = None, None

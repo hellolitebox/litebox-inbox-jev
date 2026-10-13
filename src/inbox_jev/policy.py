@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 from .classifier import Classification
 from .config import PUBLIC_GROUP_HOSTS, Account, Action, CategoriesConfig, Mode
 from .signals import Signals, domain_of, on_domain
+from .system_labels import INBOX, SPAM
 
 ARCHIVE_ACTIONS = (Action.ARCHIVE, Action.ARCHIVE_UNSUBSCRIBE)
 # previous_contact values meaning I have written to the sender or their domain.
@@ -369,9 +370,9 @@ def plan(
     labels = list(dict.fromkeys([*decision.add_labels, cfg.processed_label]))
     if mode == Mode.LABEL:
         return Plan(labels, [], archived=False, spammed=False, unsubscribe=False)
-    remove = ["INBOX"] if (decision.archive or decision.spam) else []
+    remove = [INBOX] if (decision.archive or decision.spam) else []
     if decision.spam:
-        labels.append("SPAM")
+        labels.append(SPAM)
     return Plan(
         labels,
         remove,

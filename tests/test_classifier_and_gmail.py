@@ -2,7 +2,7 @@ import base64
 import time
 
 import pytest
-from test_triage import _HttpError
+from fakes import HttpError
 
 from inbox_jev import gmail as gmail_module
 from inbox_jev.classifier import CATEGORY_Q, NEEDS_REPLY_Q, TAG_PREFIX, build_questions, build_state
@@ -217,8 +217,8 @@ def test_extract_body_normalize_is_linear_on_long_whitespace_runs():
 
 
 def test_is_not_found_only_for_http_404():
-    assert is_not_found(_HttpError(404))
-    assert not is_not_found(_HttpError(403))
+    assert is_not_found(HttpError(404))
+    assert not is_not_found(HttpError(403))
     assert not is_not_found(OSError("connection reset"))
 
 
@@ -305,7 +305,7 @@ def _gmail(monkeypatch, svc) -> Gmail:
 def test_get_label_ids_batches_calls_and_maps_deleted_emails_to_none(monkeypatch):
     ids = [f"m{i}" for i in range(120)]
     svc = _FakeGmailService(
-        labels={"m7": ["INBOX", "Label_1"]}, batch_errors={"m60": _HttpError(404)}
+        labels={"m7": ["INBOX", "Label_1"]}, batch_errors={"m60": HttpError(404)}
     )
     result = _gmail(monkeypatch, svc).get_label_ids([*ids, "m7"])  # a repeat is asked once
     assert [len(b) for b in svc.batches] == [BATCH_SIZE, BATCH_SIZE, 20]
@@ -319,36 +319,36 @@ def test_get_label_ids_batches_calls_and_maps_deleted_emails_to_none(monkeypatch
 def test_get_label_ids_asks_failed_batch_calls_again_one_by_one(monkeypatch, caplog):
     svc = _FakeGmailService(
         labels={"m3": ["INBOX"]},
-        batch_errors={"m3": _HttpError(429), "m1": _HttpError(503)},
-        single_errors={"m1": _HttpError(404)},
+        batch_errors={"m3": HttpError(429), "m1": HttpError(503)},
+        single_errors={"m1": HttpError(404)},
     )
     result = _gmail(monkeypatch, svc).get_label_ids(["m0", "m1", "m2", "m3"])
     assert svc.singles == ["m1", "m3"]
     assert svc.single_retries == [SINGLE_RETRIES, SINGLE_RETRIES]  # backoff on 429 / 5xx
     assert result == {"m0": [], "m1": None, "m2": [], "m3": ["INBOX"]}
     (warning,) = [r for r in caplog.records if r.levelname == "WARNING"]
-    assert (warning.failed, warning.error_types) == (2, ["_HttpError"])
+    assert (warning.failed, warning.error_types) == (2, ["HttpError"])
 
 
 def test_get_label_ids_raises_when_the_single_retry_fails_too(monkeypatch):
     ids = [f"m{i}" for i in range(120)]
     svc = _FakeGmailService(
-        batch_errors={"m70": _HttpError(503), "m55": _HttpError(429)},
-        single_errors={"m70": _HttpError(500), "m55": _HttpError(429)},
+        batch_errors={"m70": HttpError(503), "m55": HttpError(429)},
+        single_errors={"m70": HttpError(500), "m55": HttpError(429)},
     )
-    with pytest.raises(_HttpError) as raised:
+    with pytest.raises(HttpError) as raised:
         _gmail(monkeypatch, svc).get_label_ids(ids)
     assert raised.value.resp.status == 429  # m55: the first failure in id order
     assert svc.singles == ["m55"]
     assert len(svc.batches) == 2  # the third batch is never sent
 
 
-@pytest.mark.parametrize("error", [_HttpError(503), KeyError("response-7"), OSError("reset")])
+@pytest.mark.parametrize("error", [HttpError(503), KeyError("response-7"), OSError("reset")])
 def test_get_label_ids_asks_again_one_by_one_when_the_whole_batch_fails(monkeypatch, caplog, error):
     ids = [f"m{i}" for i in range(60)]
     svc = _FakeGmailService(
         labels={"m55": ["INBOX"]},
-        batch_errors={"m2": _HttpError(429)},
+        batch_errors={"m2": HttpError(429)},
         batch_raises={0: (5, error)},  # the first batch answers m0..m4, then fails as a whole
     )
     result = _gmail(monkeypatch, svc).get_label_ids(ids)
@@ -357,15 +357,15 @@ def test_get_label_ids_asks_again_one_by_one_when_the_whole_batch_fails(monkeypa
     assert result == {i: ["INBOX"] if i == "m55" else [] for i in ids}
     (warning,) = [r for r in caplog.records if r.levelname == "WARNING"]
     assert warning.failed == BATCH_SIZE - 4
-    assert warning.error_types == sorted({"_HttpError", type(error).__name__})
+    assert warning.error_types == sorted({"HttpError", type(error).__name__})
 
 
 def test_get_label_ids_raises_when_the_whole_batch_and_the_single_retry_fail(monkeypatch):
     ids = [f"m{i}" for i in range(60)]
     svc = _FakeGmailService(
-        batch_raises={0: (0, _HttpError(429))}, single_errors={"m0": _HttpError(403)}
+        batch_raises={0: (0, HttpError(429))}, single_errors={"m0": HttpError(403)}
     )
-    with pytest.raises(_HttpError) as raised:
+    with pytest.raises(HttpError) as raised:
         _gmail(monkeypatch, svc).get_label_ids(ids)
     assert raised.value.resp.status == 403  # e.g. an auth error isn't hidden by the fallback
     assert svc.singles == ["m0"]

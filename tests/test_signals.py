@@ -1,5 +1,5 @@
 import pytest
-from conftest import GMAIL_PASS
+from fakes import GMAIL_PASS
 
 from inbox_jev.signals import (
     dmarc_passed,

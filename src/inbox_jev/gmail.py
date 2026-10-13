@@ -20,6 +20,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 from . import signals
+from .system_labels import INBOX
 
 log = logging.getLogger(__name__)
 
@@ -27,7 +28,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.send",
 ]
-INBOX, SPAM = "INBOX", "SPAM"
 # Calls per batch HTTP request: Gmail accepts up to 100 but advises at most 50, since larger
 # batches are likely to trigger rate limiting.
 BATCH_SIZE = 50

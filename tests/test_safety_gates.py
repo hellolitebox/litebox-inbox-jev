@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 import pytest
 from conftest import make_classification, make_signals
-from test_triage import _archived, _failed_unsub, email, setup  # noqa: F401 (pytest fixture)
+from fakes import as_archived, email, failed_unsub
 
 from inbox_jev import rules, triage
 from inbox_jev.config import Mode
@@ -137,7 +137,7 @@ def _email(sc):
 
 def _jev_path(ctx, gmail, account, sc):
     gmail.emails = {"9": _email(sc)}
-    ctx._classifier.answers["Offer"] = make_classification(sc.category, 0.97)
+    ctx.classifier.answers["Offer"] = make_classification(sc.category, 0.97)
     triage.run_account(ctx, account, sc.mode)
 
 
@@ -152,10 +152,10 @@ def _rule_path(ctx, gmail, account, sc):
 
 def _retry_path(ctx, gmail, account, sc):
     account.mode = sc.mode
-    gmail.emails = _archived(_email(sc))
+    gmail.emails = as_archived(_email(sc))
     sender = triage.signals_for(gmail.emails["9"], account).sender
     with ctx.sessions() as s:
-        _failed_unsub(s, account, "9", "the-list", sc.category, sender=sender, confidence=0.97)
+        failed_unsub(s, account, "9", "the-list", sc.category, sender=sender, confidence=0.97)
     with ctx.sessions() as s:
         triage.retry_unsubscribes(ctx, s, gmail, account)
 
@@ -165,7 +165,7 @@ PATHS = {"jev": _jev_path, "rule": _rule_path, "retry": _retry_path}
 
 @pytest.mark.parametrize("path", PATHS)
 @pytest.mark.parametrize("name", SCENARIOS)
-def test_every_path_reaches_the_same_unsubscribe_outcome(setup, cfg, name, path):  # noqa: F811
+def test_every_path_reaches_the_same_unsubscribe_outcome(setup, cfg, name, path):
     ctx, gmail, account = setup
     sc = SCENARIOS[name]
     gmail.written = sc.written
@@ -190,7 +190,7 @@ def test_scenarios_match_the_gate(cfg, account, name):
 
 
 @pytest.mark.parametrize("name", SCENARIOS)
-def test_jev_and_rule_paths_store_the_same_unverified_flag(setup, name):  # noqa: F811
+def test_jev_and_rule_paths_store_the_same_unverified_flag(setup, name):
     ctx, gmail, account = setup
     sc = SCENARIOS[name]
     gmail.written = sc.written

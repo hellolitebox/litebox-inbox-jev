@@ -2,7 +2,7 @@ from datetime import timedelta
 
 import pytest
 from conftest import make_classification, make_signals, selects_from
-from test_triage import _HttpError
+from fakes import HttpError
 
 from inbox_jev import corrections, rules
 from inbox_jev.config import Account, Mode
@@ -336,8 +336,8 @@ def test_check_without_candidates_learns_nothing(cfg, session):
 
 def test_check_gmail_failure_is_raised_and_changes_no_row(cfg, session):
     _checkable(session, "a", "b")
-    gmail = _LabelGmail(current={"a": ["INBOX"]}, error=_HttpError(503))
-    with pytest.raises(_HttpError):
+    gmail = _LabelGmail(current={"a": ["INBOX"]}, error=HttpError(503))
+    with pytest.raises(HttpError):
         corrections.check(session, gmail, "me@acme.com", cfg)
     assert all(m.correction_checked_at is None for m in session.query(Message))
     assert session.query(SenderRule).count() == 0

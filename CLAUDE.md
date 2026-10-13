@@ -125,7 +125,7 @@ section (QA checks for it, see the reviewer's "Real-mail check"); never log or p
   keep that shape when editing them by hand.
 - Python ≥ 3.11, ruff (line length 100), mypy (`[tool.mypy]` in `pyproject.toml`: `src` and
   `scripts`; only `yaml`, `googleapiclient` and `google_auth_oauthlib` are untyped, their objects
-  are `Any`), pytest. No network calls in tests: use fakes like `tests/test_triage.py`.
+  are `Any`), pytest. No network calls in tests: use the fakes in `tests/fakes.py`.
 - `policy.py` stays pure (no I/O). Gmail access goes in `gmail.py` and orchestration in `triage.py`.
 - New categories or labels go in `categories.yaml`, not in code.
 - Anything keyed on the sender (rules, corrections, `previous_contact`, allowlist) uses

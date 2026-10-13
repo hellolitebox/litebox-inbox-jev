@@ -12,6 +12,7 @@ from . import rules
 from .config import CategoriesConfig, Mode
 from .db import Message, MessageStatus, now
 from .gmail import Gmail
+from .system_labels import INBOX
 
 log = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ def detect(msg: Message, current_labels: set[str], cfg: CategoriesConfig) -> str
             return current[0]
         if msg.low_confidence and cfg.review_label not in current_labels:
             return current[0]  # user accepted the suggested category
-    if (msg.archived or msg.spammed) and "INBOX" in current_labels:
+    if (msg.archived or msg.spammed) and INBOX in current_labels:
         return "important"  # user pulled it back
     return None
 

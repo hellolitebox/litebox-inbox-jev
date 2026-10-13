@@ -4,18 +4,17 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+from fakes import FakeClassifier, FakeGmail, email
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 
+from inbox_jev import triage
 from inbox_jev.classifier import Classification
-from inbox_jev.config import Account, load_categories
+from inbox_jev.config import Account, Settings, load_categories
+from inbox_jev.db import make_session_factory
 from inbox_jev.signals import Signals
 
 ROOT = Path(__file__).resolve().parents[1]
-
-GMAIL_PASS = (
-    "mx.google.com; dkim=pass header.i=@news.shop.com; spf=pass; dmarc=pass header.from=shop.com"
-)
 
 
 @pytest.fixture
@@ -72,3 +71,37 @@ def selects_from(engine: Engine, table: str) -> Iterator[list[str]]:
         yield found
     finally:
         event.remove(engine, "before_cursor_execute", record)
+
+
+@pytest.fixture
+def setup(cfg, account, monkeypatch):
+    """Four inbox emails on a fake Gmail, a fake Jev and an in-memory DB: (ctx, gmail, account)."""
+    emails = [
+        email(
+            "1",
+            "Client <c@client.com>",
+            "Proposal",
+        ),
+        email(
+            "2",
+            "Shop <promo@shop.com>",
+            "50% off",
+            list_unsubscribe="<mailto:u@shop.com>",
+        ),
+        email("3", "Bank <x@acme.com>", "Internal"),  # allowlisted domain
+        email("4", "Weird <w@weird.biz>", "Maybe promo"),
+    ]
+    answers = {
+        "Proposal": make_classification("important", 0.9, needs_reply=0.9),
+        "50% off": make_classification("marketing", 0.97),
+        "Maybe promo": make_classification("marketing", 0.6),
+        # Allowlisted: Jev is asked only for the flags; its category is ignored.
+        "Internal": make_classification("notification", 0.99),
+    }
+    gmail = FakeGmail(emails)
+    monkeypatch.setattr(triage, "Gmail", lambda creds: gmail)
+    monkeypatch.setattr(triage, "load_credentials", lambda d, e: None)
+    settings = Settings(_env_file=None, typesafe_api_key="x", database_url="sqlite:///:memory:")
+    sessions = make_session_factory(settings.database_url)
+    ctx = triage.Context(settings, cfg, sessions, classifier=FakeClassifier(answers))
+    return ctx, gmail, account

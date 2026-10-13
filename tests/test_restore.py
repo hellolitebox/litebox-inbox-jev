@@ -4,7 +4,7 @@ from datetime import timedelta
 
 import pytest
 from conftest import make_classification
-from test_triage import _HttpError, email, setup  # noqa: F401 (pytest fixture)
+from fakes import HttpError, email
 from typer.testing import CliRunner
 
 from inbox_jev import cli, triage
@@ -29,11 +29,11 @@ def _jev_labels(gmail, message_id):
 
 
 @pytest.fixture
-def acted(setup):  # noqa: F811
+def acted(setup):
     """setup's four emails after an act pass, plus a scam moved to Spam."""
     ctx, gmail, account = setup
     gmail.emails["5"] = email("5", "Prize <win@lottery.biz>", "You won")
-    ctx._classifier.answers["You won"] = make_classification("spam", 0.99)
+    ctx.classifier.answers["You won"] = make_classification("spam", 0.99)
     triage.run_account(ctx, account, Mode.ACT)
     assert "INBOX" not in gmail.emails["2"].label_ids  # archived marketing
     assert "SPAM" in gmail.emails["5"].label_ids
@@ -94,7 +94,7 @@ def test_restore_is_idempotent(acted):
     assert len(gmail.modified) == calls
 
 
-def test_restore_skips_dry_run_rows(setup):  # noqa: F811
+def test_restore_skips_dry_run_rows(setup):
     ctx, gmail, account = setup
     triage.run_account(ctx, account, Mode.DRY_RUN)
     calls = len(gmail.modified)
@@ -118,9 +118,9 @@ def test_restored_emails_are_not_reprocessed_or_learned_as_corrections(acted):
     with ctx.sessions() as s:
         s.query(Message).update({Message.correction_checked_at: None})
         s.commit()
-    calls, jev_calls = len(gmail.modified), ctx._classifier.calls
+    calls, jev_calls = len(gmail.modified), ctx.classifier.calls
     assert triage.run_account(ctx, account, Mode.ACT).processed == 0
-    assert (len(gmail.modified), ctx._classifier.calls) == (calls, jev_calls)
+    assert (len(gmail.modified), ctx.classifier.calls) == (calls, jev_calls)
     with ctx.sessions() as s:
         assert s.query(SenderRule).filter_by(source="correction").count() == 0
 
@@ -161,7 +161,7 @@ def _fail_modify(monkeypatch, gmail, failing):
 
 def test_restore_skips_emails_deleted_in_gmail(acted, monkeypatch):
     ctx, gmail, account = acted
-    _fail_modify(monkeypatch, gmail, {"2": _HttpError(404)})
+    _fail_modify(monkeypatch, gmail, {"2": HttpError(404)})
     assert _restore(ctx, gmail, account) == triage.RestoreResult(restored=4, deleted=1)
     rows = _rows(ctx)
     assert rows["2"] == (False, True, False)  # left as it was
@@ -170,7 +170,7 @@ def test_restore_skips_emails_deleted_in_gmail(acted, monkeypatch):
     assert _restore(ctx, gmail, account) == triage.RestoreResult(restored=0, deleted=1)
 
 
-@pytest.mark.parametrize("error", [_HttpError(401), _HttpError(429), _HttpError(503), OSError()])
+@pytest.mark.parametrize("error", [HttpError(401), HttpError(429), HttpError(503), OSError()])
 def test_restore_raises_other_gmail_errors(acted, monkeypatch, error):
     ctx, gmail, account = acted
     _fail_modify(monkeypatch, gmail, {"2": error})

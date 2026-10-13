@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from sqlalchemy import Update, and_, or_, select, update
 from sqlalchemy.engine import CursorResult
@@ -25,7 +25,9 @@ from .gmail import (
     token_error_detail,
 )
 from .policy import (
+    Decision,
     DecisionSource,
+    Plan,
     Veto,
     acts_on,
     decide,
@@ -36,6 +38,7 @@ from .policy import (
     unsubscribes,
 )
 from .signals import ADDRESS, Signals, domain_of, resolve_relay
+from .system_labels import INBOX, SPAM, STARRED, TRASH
 from .unsubscribe import UnsubscribeStatus
 
 log = logging.getLogger(__name__)
@@ -68,17 +71,36 @@ class UnsubscribeBudget:
         self.remaining -= 1
 
 
-@dataclass
+class JevClient(Protocol):
+    """What triage needs from Jev: a `classifier.Classifier`, or a fake one in tests."""
+
+    def classify(self, state: dict) -> Classification: ...
+    def close(self) -> None: ...
+
+
 class Context:
-    settings: Settings
-    cfg: CategoriesConfig
-    sessions: sessionmaker
-    _classifier: Classifier | None = None
-    # (account, sender_key) of rules to removed categories already logged in this invocation.
-    stale_rules_logged: set[tuple[str, str]] = field(default_factory=set)
+    """What one CLI invocation shares across its accounts: settings, categories, DB, Jev.
+
+    `classifier` injects the Jev client (tests pass a fake). Without one, a `Classifier` is
+    created from the settings the first time Jev is asked.
+    """
+
+    def __init__(
+        self,
+        settings: Settings,
+        cfg: CategoriesConfig,
+        sessions: sessionmaker,
+        classifier: JevClient | None = None,
+    ) -> None:
+        self.settings = settings
+        self.cfg = cfg
+        self.sessions = sessions
+        self._classifier = classifier
+        # (account, sender_key) of rules to removed categories already logged in this invocation.
+        self.stale_rules_logged: set[tuple[str, str]] = set()
 
     @property
-    def classifier(self) -> Classifier:
+    def classifier(self) -> JevClient:
         if self._classifier is None:
             s = self.settings
             self._classifier = Classifier(s.typesafe_api_key, s.typesafe_model, self.cfg)
@@ -156,41 +178,10 @@ def _run_pass(
     ids = gmail.list_inbox_ids(
         lookback or ctx.settings.lookback, limit or ctx.settings.max_messages_per_run
     )
-    # Emails still in the inbox that were seen in a weaker mode (dry_run, or label when running
-    # act) get processed once more, so switching modes also covers them. Restored rows are never
-    # touched again: the user explicitly undid them. Errors wait for their backoff (`_retry_due`).
-    weaker = {
-        Mode.DRY_RUN: [],
-        Mode.LABEL: [Mode.DRY_RUN],
-        Mode.ACT: [Mode.DRY_RUN, Mode.LABEL],
-    }
-    done_query = select(Message.gmail_id).where(
-        Message.account == account.email,
-        Message.gmail_id.in_(ids),
-        or_(
-            Message.restored.is_(True),
-            and_(
-                Message.status == MessageStatus.DONE,
-                Message.mode.not_in(weaker[mode]),
-            ),
-        ),
-    )
-    done = set(session.scalars(done_query))
-    errored = select(Message.gmail_id, Message.error_attempts, Message.processed_at).where(
-        Message.account == account.email,
-        Message.gmail_id.in_(ids),
-        Message.status == MessageStatus.ERROR,
-        Message.restored.is_(False),
-    )
-    started = now()
-    done.update(
-        gmail_id
-        for gmail_id, attempts, last in session.execute(errored)
-        if not _retry_due(attempts, last, started)
-    )
+    skip = _not_due(session, account.email, mode, ids)
     budget = UnsubscribeBudget(ctx.settings.max_unsubscribes_per_run)
     for message_id in ids:
-        if message_id in done:
+        if message_id in skip:
             continue
         try:
             process(ctx, session, gmail, account, mode, label_ids, message_id, budget)
@@ -202,6 +193,48 @@ def _run_pass(
             counts.errors += 1
             _record_error(session, account.email, mode, message_id, exc)
             log.exception("message failed", extra={"account": account.email, "id": message_id})
+
+
+# The modes a pass in each mode redoes: an email still in the inbox that was seen in a weaker mode
+# (dry_run, or label when running act) is processed once more, so switching modes also covers it.
+_WEAKER_MODES: dict[Mode, list[Mode]] = {
+    Mode.DRY_RUN: [],
+    Mode.LABEL: [Mode.DRY_RUN],
+    Mode.ACT: [Mode.DRY_RUN, Mode.LABEL],
+}
+
+
+def _not_due(session: Session, account: str, mode: Mode, ids: list[str]) -> set[str]:
+    """Which of the inbox `ids` a pass in `mode` leaves alone.
+
+    Rows done in `mode` or a stronger one (see _WEAKER_MODES), restored rows (the user explicitly
+    undid them: never touched again) and errors still waiting for their backoff (`_retry_due`).
+    """
+    done_query = select(Message.gmail_id).where(
+        Message.account == account,
+        Message.gmail_id.in_(ids),
+        or_(
+            Message.restored.is_(True),
+            and_(
+                Message.status == MessageStatus.DONE,
+                Message.mode.not_in(_WEAKER_MODES[mode]),
+            ),
+        ),
+    )
+    done = set(session.scalars(done_query))
+    errored = select(Message.gmail_id, Message.error_attempts, Message.processed_at).where(
+        Message.account == account,
+        Message.gmail_id.in_(ids),
+        Message.status == MessageStatus.ERROR,
+        Message.restored.is_(False),
+    )
+    started = now()
+    done.update(
+        gmail_id
+        for gmail_id, attempts, last in session.execute(errored)
+        if not _retry_due(attempts, last, started)
+    )
+    return done
 
 
 def _retry_due(attempts: int, last_failure: datetime, at: datetime) -> bool:
@@ -301,12 +334,12 @@ def restore(
         query = query.where(Message.category == category)
     result = RestoreResult()
     for msg in session.scalars(query).all():
-        remove = [ids[n] for n in (msg.labels_added or []) if n in ids and n != "SPAM"]
+        remove = [ids[n] for n in (msg.labels_added or []) if n in ids and n != SPAM]
         add = []
         if msg.archived or msg.spammed:
-            add.append("INBOX")
+            add.append(INBOX)
         if msg.spammed:
-            remove.append("SPAM")
+            remove.append(SPAM)
         try:
             gmail.modify(msg.gmail_id, add=add, remove=remove)
         except Exception as exc:
@@ -349,53 +382,141 @@ def process(
     message_id: str,
     unsub_budget: UnsubscribeBudget,
 ) -> Message:
+    """Decide one inbox email, apply the decision in Gmail and store it (committed).
+
+    The steps: hand off an email the user edited since an earlier pass (`_user_touched`);
+    gather the sender rule, Jev's answer and the sent-mail search (`_gather_inputs`); decide
+    and plan (`policy`, pure); apply the labels in Gmail and store the outcome; learn an auto
+    rule; unsubscribe within the run cap.
+    """
     email = gmail.get(message_id)
     sig = signals_for(email, account)
     prev = _find_message(session, account.email, message_id)
     if prev is not None:
         prev.sender = sig.sender  # rows stored before group authors were recovered
-    if (
-        prev is not None
-        and mode != Mode.DRY_RUN
-        and _user_touched(ctx.cfg, session, account, prev, email, label_ids)
-    ):
-        # Leave Gmail and labels_added as they are; just don't revisit it in this mode.
-        prev.status, prev.error, prev.mode = MessageStatus.DONE, None, mode
-        prev.error_attempts = 0
-        session.commit()
-        return prev
-    rule = rule_for(ctx, session, account, sig.sender)
+        if mode != Mode.DRY_RUN and _user_touched(
+            ctx.cfg, session, account, prev, email, label_ids
+        ):
+            return _leave_alone(session, prev, mode)
 
-    classification, contact = None, None
+    list_row = _ListRow(session, account.email, sig.list_key)
+    inputs = _gather_inputs(ctx, session, gmail, account, mode, email, sig, list_row)
+    decision = decide(
+        ctx.cfg,
+        account,
+        sig,
+        inputs.classification,
+        inputs.rule_category,
+        previous_contact=inputs.contact,
+    )
+    actions = plan(ctx.cfg, decision, mode, account.act_categories)
+
+    msg = _upsert_message(session, account.email, email, sig, prev)
+    _apply_labels(gmail, message_id, msg, label_ids, actions)
+    _store_outcome(msg, mode, inputs.classification, decision, actions)
+    _learn_auto_rule(ctx, session, account, mode, sig, inputs, decision)
+    if (
+        actions.unsubscribe
+        and not unsub_budget.exhausted
+        and _unsubscribe(session, gmail, account, email, sig, list_row)
+    ):
+        unsub_budget.spend()
+
+    session.commit()
+    _log_processed(account, message_id, sig, inputs, decision, actions)
+    return msg
+
+
+@dataclass(frozen=True)
+class _Inputs:
+    """What `policy.decide` gets for one email besides its signals."""
+
+    rule: SenderRule | None
+    classification: Classification | None  # None: Jev not asked, or its flags-only call failed
+    contact: str | None  # previous_contact's answer; None: not checked, or the search failed
+
+    @property
+    def rule_category(self) -> str | None:
+        return self.rule.category if self.rule else None
+
+
+class _ListRow:
+    """An email's row in the Unsubscribe table, read at most once while the email is processed.
+
+    Both the rule path's sent-mail check (`_rule_needs_contact`) and the unsubscribe step
+    (`_unsubscribe`) need it; nothing writes it in between, so they share one read.
+    """
+
+    def __init__(self, session: Session, account: str, list_key: str) -> None:
+        self._session, self._account, self._list_key = session, account, list_key
+        self._read = False
+        self._row: Unsubscribe | None = None
+
+    def get(self) -> Unsubscribe | None:
+        if not self._read:
+            self._row = _unsub_row(self._session, self._account, self._list_key)
+            self._read = True
+        return self._row
+
+
+def _leave_alone(session: Session, msg: Message, mode: Mode) -> Message:
+    """An email the user edited: leave Gmail and labels_added as they are, done in `mode`.
+
+    Marking it done in this mode is what keeps the next passes from revisiting it.
+    """
+    msg.status, msg.error, msg.mode = MessageStatus.DONE, None, mode
+    msg.error_attempts = 0
+    session.commit()
+    return msg
+
+
+def _gather_inputs(
+    ctx: Context,
+    session: Session,
+    gmail: Gmail,
+    account: Account,
+    mode: Mode,
+    email: Email,
+    sig: Signals,
+    list_row: _ListRow,
+) -> _Inputs:
+    """The sender rule, Jev's answer and the sent-mail search, each only where it can matter.
+
+    No allowlist entry and no rule: Jev decides, told whether I wrote to the sender. The
+    allowlist or a rule to a keep category (`policy.flags_only`): Jev only for the flags, no
+    search. Any other rule: the search only if it could stop an unsubscribe
+    (`_rule_needs_contact`).
+    """
+    rule = rule_for(ctx, session, account, sig.sender)
     if not is_allowed(account, sig) and rule is None:
         contact = previous_contact(gmail, account.email, sig.sender)
         classification = ctx.classifier.classify(
             build_state(email, account.email, ctx.settings.body_chars, contact, sig)
         )
-    elif flags_only(ctx.cfg, account, sig, rule.category if rule else None):
-        classification = flags_classification(
-            ctx.classifier, email, account, ctx.settings.body_chars, sig
-        )
-    elif rule and rule_needs_contact(ctx.cfg, session, account, sig, rule.category, mode):
-        contact = previous_contact(gmail, account.email, sig.sender)
-    decision = decide(
-        ctx.cfg,
-        account,
-        sig,
-        classification,
-        rule.category if rule else None,
-        previous_contact=contact,
-    )
-    actions = plan(ctx.cfg, decision, mode, account.act_categories)
+        return _Inputs(rule, classification, contact)
+    if flags_only(ctx.cfg, account, sig, rule.category if rule else None):
+        flags = flags_classification(ctx.classifier, email, account, ctx.settings.body_chars, sig)
+        return _Inputs(rule, flags, None)
+    if rule is not None and _rule_needs_contact(
+        ctx.cfg, account, sig, rule.category, mode, list_row
+    ):
+        return _Inputs(rule, None, previous_contact(gmail, account.email, sig.sender))
+    return _Inputs(rule, None, None)
 
-    msg = _upsert_message(session, account.email, email, sig, prev)
-    # Reprocessing (e.g. label -> act): drop labels from the previous pass that no longer apply.
+
+def _apply_labels(
+    gmail: Gmail, message_id: str, msg: Message, label_ids: dict[str, str], actions: Plan
+) -> None:
+    """Apply the plan in Gmail (labels, INBOX, SPAM), from `msg`'s state before this pass.
+
+    Reprocessing (e.g. label -> act) also drops labels of the previous pass that no longer apply.
+    """
     stale = [
         label_ids[name]
         for name in (msg.labels_added or [])
-        # "SPAM" is a defensive guard: only act rows carry it and those are never reprocessed,
+        # SPAM is a defensive guard: only act rows carry it and those are never reprocessed,
         # but if one ever were, removing SPAM here would silently un-spam the email.
-        if name not in actions.add_labels and name in label_ids and name != "SPAM"
+        if name not in actions.add_labels and name in label_ids and name != SPAM
     ]
     gmail.modify(
         message_id,
@@ -403,6 +524,15 @@ def process(
         remove=actions.remove_labels + stale,
     )
 
+
+def _store_outcome(
+    msg: Message,
+    mode: Mode,
+    classification: Classification | None,
+    decision: Decision,
+    actions: Plan,
+) -> None:
+    """Record on the email's row what was decided and what was applied (not committed)."""
     msg.status, msg.error, msg.error_attempts = MessageStatus.DONE, None, 0
     msg.source = decision.source
     msg.jev_category = classification.category if classification else None
@@ -419,20 +549,37 @@ def process(
     msg.archived, msg.spammed = actions.archived, actions.spammed
     msg.processed_at = now()
 
-    # Only Jev's own decisions count, and not in dry_run: a rule learned there would apply
-    # without Jev (and act) as soon as the mode is label or act.
+
+def _learn_auto_rule(
+    ctx: Context,
+    session: Session,
+    account: Account,
+    mode: Mode,
+    sig: Signals,
+    inputs: _Inputs,
+    decision: Decision,
+) -> None:
+    """Count Jev's decision toward an auto rule for the sender (`rules.record_auto`).
+
+    Only Jev's own decisions count, and not in dry_run: a rule learned there would apply
+    without Jev (and act) as soon as the mode is label or act.
+    """
+    classification = inputs.classification
     if classification and decision.source == DecisionSource.JEV and mode != Mode.DRY_RUN:
         rules.record_auto(
-            session, ctx.cfg, account.email, sig.sender, classification, decision, contact
+            session, ctx.cfg, account.email, sig.sender, classification, decision, inputs.contact
         )
-    if (
-        actions.unsubscribe
-        and not unsub_budget.exhausted
-        and _unsubscribe(session, gmail, account, email, sig)
-    ):
-        unsub_budget.spend()
 
-    session.commit()
+
+def _log_processed(
+    account: Account,
+    message_id: str,
+    sig: Signals,
+    inputs: _Inputs,
+    decision: Decision,
+    actions: Plan,
+) -> None:
+    classification = inputs.classification
     log.info(
         "message processed",
         extra={
@@ -444,18 +591,17 @@ def process(
             "source": decision.source,
             "low_confidence": decision.low_confidence,
             "archive_group": decision.archive_group,
-            "previous_contact": contact,
+            "previous_contact": inputs.contact,
             "labels": actions.add_labels,
             "archived": actions.archived,
             "spammed": actions.spammed,
             "request_id": classification.request_id if classification else None,
         },
     )
-    return msg
 
 
 def flags_classification(
-    classifier: Classifier, email: Email, account: Account, body_chars: int, sig: Signals
+    classifier: JevClient, email: Email, account: Account, body_chars: int, sig: Signals
 ) -> Classification | None:
     """Jev's answer for an email kept by the allowlist or a keep rule, or None if the call fails.
 
@@ -574,8 +720,7 @@ def _user_touched(
     """
     if not msg.labels_added:
         return False  # nothing of ours in Gmail yet (dry_run)
-    names = {v: k for k, v in label_ids.items()}
-    current = {names.get(i, i) for i in email.label_ids}
+    current = _current_label_names(email, label_ids)
     if msg.corrected_category is None:
         category = corrections.detect(msg, current, cfg)
         if category:
@@ -591,6 +736,15 @@ def _user_touched(
     return True
 
 
+def _current_label_names(email: Email, label_ids: dict[str, str]) -> set[str]:
+    """The email's current Gmail labels by name, from `label_ids` (name -> id).
+
+    An id missing from `label_ids` is kept as is: system labels' ids are their names.
+    """
+    names = {v: k for k, v in label_ids.items()}
+    return {names.get(i, i) for i in email.label_ids}
+
+
 def _user_edit(
     cfg: CategoriesConfig, msg: Message, current: set[str]
 ) -> tuple[str, list[str]] | None:
@@ -600,7 +754,7 @@ def _user_edit(
     has a correction, else `removed` (a label of ours is gone) or `added` (one of our labels that
     the last pass didn't set). Returns (reason, labels involved).
     """
-    if "STARRED" in current:
+    if STARRED in current:
         return "starred", []
     if msg.corrected_category is not None:
         return None
@@ -626,14 +780,27 @@ def rule_needs_contact(
     Only when the category is acted on (`policy.acts_on`), `policy.unsubscribe_gate` lets it
     through with only the sent-mail search left to decide (a category that spares known
     contacts, a verified non-group sender), and the list isn't already settled in the
-    Unsubscribe table.
+    Unsubscribe table. Read-only: `scripts/dry_classify.py` asks it too.
     """
+    list_row = _ListRow(session, account.email, sig.list_key)
+    return _rule_needs_contact(cfg, account, sig, category, mode, list_row)
+
+
+def _rule_needs_contact(
+    cfg: CategoriesConfig,
+    account: Account,
+    sig: Signals,
+    category: str,
+    mode: Mode,
+    list_row: _ListRow,
+) -> bool:
+    """`rule_needs_contact` on the email's `list_row`, which `process` reuses to unsubscribe."""
     if not acts_on(mode, account.act_categories, category):
         return False
     gate = unsubscribe_gate(cfg, account, sig, category, previous_contact=None)
     if not (gate.allowed and gate.contact_unknown):
         return False
-    return not _unsub_settled(_unsub_row(session, account.email, sig.list_key))
+    return not _unsub_settled(list_row.get())
 
 
 def retry_unsubscribes(
@@ -670,88 +837,111 @@ def retry_unsubscribes(
     ).all()
     if mode != Mode.ACT:
         return [(row.list_key, f"held: mode is {mode}") for row in rows]
-    out: list[tuple[str, str]] = []
     budget = UnsubscribeBudget(ctx.settings.max_unsubscribes_per_run)
-    names: dict[str, str] | None = None
+    out: list[tuple[str, str]] = []
     for row in rows:
-        msg = _find_message(session, account.email, row.gmail_id)
-        if msg is None:
-            out.append((row.list_key, "held: no stored message"))
-            continue
-        reason = None
-        if msg.restored:
-            reason = "restored by the user"
-        elif msg.corrected_category is not None:
-            reason = f"corrected to {msg.corrected_category}"
-        if reason:
-            out.append(_skip(session, row, reason))
-            continue
-        if budget.exhausted:
-            out.append((row.list_key, "held: run cap reached"))
-            continue
-        try:
-            email = gmail.get(row.gmail_id)
-        except Exception as exc:
-            if is_not_found(exc):
-                out.append((row.list_key, "held: email deleted in Gmail"))
-                continue
-            raise
-        if names is None:
-            names = {v: k for k, v in gmail.labels().items()}
-        current = {names.get(i, i) for i in email.label_ids}
-        sig = signals_for(email, account)
-        rule = rule_for(ctx, session, account, sig.sender)
-        rule_category = rule.category if rule else None
-        category = rule_category or msg.category
-        if "SPAM" in current:
-            reason = "reported as spam"  # unsubscribing would confirm the address
-        elif "TRASH" in current:
-            reason = "in the trash"
-        elif corrected := corrections.detect(msg, current, ctx.cfg):
-            reason = f"corrected in Gmail to {corrected}"
-        elif edit := _user_edit(ctx.cfg, msg, current):
-            what, labels = edit
-            reason = f"label {what} in Gmail: {', '.join(labels)}" if labels else what
-        elif rule_category and not unsubscribes(ctx.cfg, rule_category):
-            reason = f"sender rule says {rule_category}"
-        if reason:
-            out.append(_skip(session, row, reason))
-            continue
-        if (
-            category is None
-            or not unsubscribes(ctx.cfg, category)
-            or not acts_on(mode, account.act_categories, category)
-        ):
-            out.append((row.list_key, f"held: category {category} doesn't unsubscribe here"))
-            continue
-        held = None
-        if rule_category is None and msg.source != DecisionSource.JEV:
-            held = "rule since removed"  # run would ask Jev again; not worth it for a retry
-        elif (
-            rule_category is None
-            and msg.source == DecisionSource.JEV
-            and not _confident(ctx.cfg, account, msg, category)
-        ):
-            held = f"confidence {msg.confidence} below the {category} threshold"
-        if held:
-            out.append((row.list_key, f"held: {held}"))
-            continue
-        gate = unsubscribe_gate(ctx.cfg, account, sig, category, previous_contact=None)
-        if gate.allowed and gate.contact_unknown:
-            contact = previous_contact(gmail, account.email, sig.sender)
-            if contact is None:  # stricter than run: nothing in a manual retry is urgent
-                out.append((row.list_key, "held: sent-mail search failed"))
-                continue
-            gate = unsubscribe_gate(ctx.cfg, account, sig, category, contact)
-        if gate.veto is not None:
-            out.append(_skip(session, row, _RETRY_SKIP_REASONS[gate.veto]))
-            continue
-        result = unsub.unsubscribe(sig, send_mail=gmail.send)
-        record_attempt(row, result)
-        session.commit()
-        budget.spend()
-        out.append((row.list_key, result.status))
+        out.append(_retry_one(ctx, session, gmail, account, mode, row, budget))
     return out
+
+
+def _retry_one(
+    ctx: Context,
+    session: Session,
+    gmail: Gmail,
+    account: Account,
+    mode: Mode,
+    row: Unsubscribe,
+    budget: UnsubscribeBudget,
+) -> tuple[str, str]:
+    """One failed unsubscribe through `retry_unsubscribes`' checks, in order: (list, outcome)."""
+    msg = _find_message(session, account.email, row.gmail_id)
+    if msg is None:
+        return row.list_key, "held: no stored message"
+    if reason := _stored_user_decision(msg):
+        return _skip(session, row, reason)
+    if budget.exhausted:
+        return row.list_key, "held: run cap reached"
+    try:
+        email = gmail.get(row.gmail_id)
+    except Exception as exc:
+        if is_not_found(exc):
+            return row.list_key, "held: email deleted in Gmail"
+        raise
+    current = _current_label_names(email, gmail.labels())
+    sig = signals_for(email, account)
+    rule = rule_for(ctx, session, account, sig.sender)
+    rule_category = rule.category if rule else None
+    if reason := _live_user_decision(ctx.cfg, msg, current, rule_category):
+        return _skip(session, row, reason)
+    category = rule_category or msg.category
+    if (
+        category is None
+        or not unsubscribes(ctx.cfg, category)
+        or not acts_on(mode, account.act_categories, category)
+    ):
+        return row.list_key, f"held: category {category} doesn't unsubscribe here"
+    if rule_category is None and (held := _stale_decision(ctx.cfg, account, msg, category)):
+        return row.list_key, f"held: {held}"
+    gate = unsubscribe_gate(ctx.cfg, account, sig, category, previous_contact=None)
+    if gate.allowed and gate.contact_unknown:
+        contact = previous_contact(gmail, account.email, sig.sender)
+        if contact is None:  # stricter than run: nothing in a manual retry is urgent
+            return row.list_key, "held: sent-mail search failed"
+        gate = unsubscribe_gate(ctx.cfg, account, sig, category, contact)
+    if gate.veto is not None:
+        return _skip(session, row, _RETRY_SKIP_REASONS[gate.veto])
+    result = unsub.unsubscribe(sig, send_mail=gmail.send)
+    record_attempt(row, result)
+    session.commit()
+    budget.spend()
+    return row.list_key, result.status
+
+
+def _stored_user_decision(msg: Message) -> str | None:
+    """Why the stored row rules a retry out (restored or corrected by the user), or None."""
+    if msg.restored:
+        return "restored by the user"
+    if msg.corrected_category is not None:
+        return f"corrected to {msg.corrected_category}"
+    return None
+
+
+def _live_user_decision(
+    cfg: CategoriesConfig, msg: Message, current: set[str], rule_category: str | None
+) -> str | None:
+    """Why the email's live labels or the current sender rule rule a retry out, or None.
+
+    Reported as spam (unsubscribing would confirm the address), in the trash, a correction
+    (`corrections.detect`), any edit `run` leaves alone (`_user_edit`), or a sender rule to a
+    category that doesn't unsubscribe.
+    """
+    if SPAM in current:
+        return "reported as spam"
+    if TRASH in current:
+        return "in the trash"
+    if corrected := corrections.detect(msg, current, cfg):
+        return f"corrected in Gmail to {corrected}"
+    if edit := _user_edit(cfg, msg, current):
+        what, labels = edit
+        return f"label {what} in Gmail: {', '.join(labels)}" if labels else what
+    if rule_category and not unsubscribes(cfg, rule_category):
+        return f"sender rule says {rule_category}"
+    return None
+
+
+def _stale_decision(
+    cfg: CategoriesConfig, account: Account, msg: Message, category: str
+) -> str | None:
+    """Why the stored decision, with no sender rule now, no longer backs a retry, or None.
+
+    A stored rule decision needs that rule to still exist (`run` would ask Jev again; not worth
+    it for a retry); a stored Jev decision must still clear the category's current threshold.
+    """
+    if msg.source != DecisionSource.JEV:
+        return "rule since removed"
+    if not _confident(cfg, account, msg, category):
+        return f"confidence {msg.confidence} below the {category} threshold"
+    return None
 
 
 # The `skipped: …` reasons unsubscribe-retry stores for each gate veto. NOT_UNSUBSCRIBING never
@@ -791,13 +981,21 @@ def _unsub_settled(row: Unsubscribe | None) -> bool:
 
 
 def _unsubscribe(
-    session: Session, gmail: Gmail, account: Account, email: Email, sig: Signals
+    session: Session,
+    gmail: Gmail,
+    account: Account,
+    email: Email,
+    sig: Signals,
+    list_row: _ListRow,
 ) -> bool:
     """Unsubscribe once per (account, list). Returns True if an attempt was made."""
-    row = _unsub_row(session, account.email, sig.list_key)
+    row = list_row.get()
     if _unsub_settled(row):
         return False
 
+    # Write the email's row (taking SQLite's write lock) before the irreversible request, so a
+    # locked DB fails the email before it unsubscribes rather than rolling back the attempt's row.
+    session.flush()
     result = unsub.unsubscribe(sig, send_mail=gmail.send)
     if row is None:
         row = Unsubscribe(account=account.email, list_key=sig.list_key, attempts=0)
