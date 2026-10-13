@@ -1,16 +1,56 @@
-"""Schema upgrade for existing databases and log filtering."""
+"""Schema upgrade for existing databases, SQLite settings and log filtering."""
 
+import contextlib
 import logging
 
+import httpx2
 import pytest
 from conftest import ROOT
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
+from typesafe_sdk import Noul, RetryPolicy, TypeSafeClient, TypeSafeError
 
 from inbox_jev import logs
 from inbox_jev.config import load_categories
-from inbox_jev.db import Base, Message, make_engine
+from inbox_jev.db import SQLITE_BUSY_TIMEOUT_MS, Base, Message, make_engine
 from inbox_jev.digest import build
+
+
+def test_sqlite_file_database_uses_wal_and_busy_timeout(tmp_path):
+    engine = make_engine(f"sqlite:///{tmp_path / 'app.db'}")
+    for _ in range(2):  # every pooled connection, not just the first
+        with engine.connect() as conn:
+            assert conn.exec_driver_sql("PRAGMA journal_mode").scalar() == "wal"
+            assert conn.exec_driver_sql("PRAGMA busy_timeout").scalar() == SQLITE_BUSY_TIMEOUT_MS
+        engine.dispose()
+
+
+def test_in_memory_sqlite_still_works():
+    engine = make_engine("sqlite:///:memory:")
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql("PRAGMA journal_mode").scalar() == "memory"
+
+
+def test_make_engine_adds_error_attempts_to_existing_rows(tmp_path):
+    """Deploy story for `messages.error_attempts`: old rows get 0, so they are retried as before."""
+    url = f"sqlite:///{tmp_path / 'old.db'}"
+    old = create_engine(url)
+    Base.metadata.create_all(old)
+    with old.begin() as conn:
+        conn.execute(text("ALTER TABLE messages DROP COLUMN error_attempts"))
+        conn.execute(
+            text(
+                "INSERT INTO messages (account, gmail_id, thread_id, sender, from_header, subject,"
+                " status, mode, low_confidence, downgraded_to_spam, archived, spammed, restored,"
+                " processed_at) VALUES ('me@acme.com', '1', '', '', '', '', 'error', 'act',"
+                " 0, 0, 0, 0, 0, CURRENT_TIMESTAMP)"
+            )
+        )
+    old.dispose()
+
+    engine = make_engine(url)
+    with Session(engine) as s:
+        assert s.scalars(select(Message)).one().error_attempts == 0
 
 
 def test_make_engine_adds_missing_columns(tmp_path):
@@ -94,12 +134,42 @@ def test_setup_keeps_sdk_at_info_with_filter(monkeypatch):
     root = logging.getLogger()
     monkeypatch.setattr(root, "handlers", list(root.handlers))
     monkeypatch.setattr(root, "level", root.level)
-    sdk, httpx2 = logging.getLogger("typesafe_sdk"), logging.getLogger("httpx2")
+    sdk, httpx2_log = logging.getLogger("typesafe_sdk"), logging.getLogger("httpx2")
     monkeypatch.setattr(sdk, "filters", list(sdk.filters))
     monkeypatch.setattr(sdk, "level", sdk.level)
-    monkeypatch.setattr(httpx2, "level", httpx2.level)
+    monkeypatch.setattr(httpx2_log, "level", httpx2_log.level)
     logs.setup("INFO")
     logs.setup("INFO")
     assert sdk.getEffectiveLevel() == logging.INFO
     assert sum(isinstance(f, logs.DropSdkSuccess) for f in sdk.filters) == 1
-    assert httpx2.level == logging.WARNING
+    assert httpx2_log.level == logging.WARNING
+
+
+def test_sdk_filter_matches_the_installed_sdk_log_records(caplog, monkeypatch):
+    """Send real requests through typesafe_sdk (mock transport, no network) and filter its logs.
+
+    `DropSdkSuccess` matches the SDK's internal "<- status in Nms" format; if an SDK update
+    changes it, this fails instead of the success lines silently flooding the journal.
+    """
+    sdk = logging.getLogger("typesafe_sdk")
+    monkeypatch.setattr(sdk, "filters", [])  # let caplog see what the SDK emits
+    statuses = iter([200, 503])
+
+    def handler(request):
+        return httpx2.Response(next(statuses), json={}, headers={"x-typesafe-request-id": "r1"})
+
+    client = TypeSafeClient(
+        api_key="test-key",
+        model="test-model",
+        transport=httpx2.MockTransport(handler),
+        retry=RetryPolicy(max_retries=0),
+    )
+    with client, caplog.at_level(logging.INFO, logger="typesafe_sdk"):
+        for _ in range(2):
+            with contextlib.suppress(TypeSafeError):  # `{}` isn't a valid answer; only logs matter
+                client.system_one({"subject": "hi"}, {"q": Noul(instructions="Is it?")})
+
+    replies = [r for r in caplog.records if r.name == "typesafe_sdk" and " <- " in r.getMessage()]
+    assert [r.args[2] for r in replies] == [200, 503]
+    f = logs.DropSdkSuccess()
+    assert [f.filter(r) for r in replies] == [False, True]  # success dropped, error kept

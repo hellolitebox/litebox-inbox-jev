@@ -181,6 +181,18 @@ def reprocess(
     )
 
 
+@app.command("retry-errors")
+def retry_errors(account: Annotated[str, typer.Option("--account", "-a")]) -> None:
+    """Have the next run retry emails that failed, including those that stopped retrying."""
+    s = _settings()
+    with make_session_factory(s.database_url)() as session:
+        count = triage.reset_error_attempts(session, account)
+    typer.echo(
+        f"Reset {count} failed emails. The next `run` retries those still inside its window: use "
+        "`run --lookback` wide enough to reach the oldest one."
+    )
+
+
 @app.command("unsubscribe-retry")
 def unsubscribe_retry(account: AccountOpt = None) -> None:
     """Retry failed unsubscribes (up to 3 attempts each) that still pass run's checks."""

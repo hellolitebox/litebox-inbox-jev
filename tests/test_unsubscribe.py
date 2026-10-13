@@ -1,11 +1,21 @@
+import socket
+import ssl
+import threading
+from datetime import UTC, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
 import httpx
+import pytest
 from conftest import make_signals
 
-from inbox_jev.unsubscribe import is_public_https, parse_mailto, unsubscribe
+from inbox_jev import unsubscribe as unsub
+from inbox_jev.unsubscribe import one_click, parse_mailto, resolve_public_https, unsubscribe
+
+PUBLIC_IP = "93.184.216.34"
 
 
 def allow(_url):
-    return True
+    return [PUBLIC_IP]
 
 
 def client_returning(status, seen=None):
@@ -46,7 +56,7 @@ def test_one_click_failure_without_mailto_reports_failure():
 
 def test_blocked_url_uses_mailto():
     sent = []
-    r = unsubscribe(make_signals(), lambda *a: sent.append(a), url_guard=lambda u: False)
+    r = unsubscribe(make_signals(), lambda *a: sent.append(a), url_guard=lambda u: [])
     assert r.method == "mailto" and sent
 
 
@@ -71,8 +81,252 @@ def test_parse_mailto():
 
 
 def test_ssrf_guard_rejects_private_and_http():
-    assert not is_public_https("http://example.com/u")
-    assert not is_public_https("https://127.0.0.1/u")
-    assert not is_public_https("https://10.0.0.5:9099/run-script")
-    assert not is_public_https("https://localhost/u")
-    assert not is_public_https("https:///nohost")
+    assert resolve_public_https("http://example.com/u") == []
+    assert resolve_public_https("https://127.0.0.1/u") == []
+    assert resolve_public_https("https://10.0.0.5:9099/run-script") == []
+    assert resolve_public_https("https://localhost/u") == []
+    assert resolve_public_https("https:///nohost") == []
+    assert resolve_public_https("https://shop.com:99999/u") == []  # bad port
+
+
+def _resolver(monkeypatch, answers):
+    """Fake DNS: hostname -> list of addresses, in order; records each lookup."""
+    lookups = []
+
+    def getaddrinfo(host, port, *args, **kwargs):
+        lookups.append(host)
+        if host not in answers:
+            raise socket.gaierror("no such host")
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port)) for ip in answers[host]]
+
+    monkeypatch.setattr(unsub.socket, "getaddrinfo", getaddrinfo)
+    return lookups
+
+
+def test_ssrf_guard_returns_the_validated_address(monkeypatch):
+    _resolver(monkeypatch, {"shop.com": [PUBLIC_IP, "93.184.216.35", PUBLIC_IP]})
+    assert resolve_public_https("https://shop.com/u/123") == [PUBLIC_IP, "93.184.216.35"]
+
+
+def test_ssrf_guard_rejects_host_with_any_private_address(monkeypatch):
+    _resolver(
+        monkeypatch,
+        {"shop.com": [PUBLIC_IP, "10.0.0.5"], "gone.com": [], "v6.com": [PUBLIC_IP, "fe80::1%en0"]},
+    )
+    assert resolve_public_https("https://shop.com/u") == []
+    assert resolve_public_https("https://v6.com/u") == []  # link-local with a zone id
+    assert resolve_public_https("https://gone.com/u") == []
+    assert resolve_public_https("https://nxdomain.com/u") == []
+
+
+def test_one_click_connects_to_the_validated_address_not_a_second_lookup(monkeypatch):
+    """DNS rebinding: the host resolves to a public IP for the guard, then to an internal one.
+
+    The POST must go to the address the guard returned, with the hostname kept for the Host
+    header and for TLS (SNI and certificate check), and DNS must not be consulted again.
+    """
+    answers = {"shop.com": [PUBLIC_IP]}
+    lookups = _resolver(monkeypatch, answers)
+    seen = []
+    client = client_returning(200, seen)
+    original = unsub.resolve_public_https
+
+    def guard_then_rebind(url):
+        address = original(url)
+        answers["shop.com"] = ["127.0.0.1"]  # any later lookup would hit localhost
+        return address
+
+    r = unsubscribe(
+        make_signals(unsubscribe_https=["https://shop.com:8443/u/123?list=a&b=c"]),
+        lambda *a: None,
+        client,
+        url_guard=guard_then_rebind,
+    )
+    assert (r.status, r.target) == ("ok", "https://shop.com:8443/u/123?list=a&b=c")
+    [req] = seen
+    assert str(req.url) == f"https://{PUBLIC_IP}:8443/u/123?list=a&b=c"
+    assert req.headers["host"] == "shop.com:8443"
+    assert req.extensions["sni_hostname"] == "shop.com"
+    assert lookups == ["shop.com"]
+
+
+def test_one_click_pins_ipv6_and_idna_hosts():
+    seen = []
+    r = one_click("https://bücher.example/u", ["2001:db8::1"], client_returning(200, seen))
+    assert r.status == "ok"
+    assert str(seen[0].url) == "https://[2001:db8::1]/u"
+    assert seen[0].headers["host"] == "xn--bcher-kva.example"
+    assert seen[0].extensions["sni_hostname"] == "xn--bcher-kva.example"
+
+
+def test_one_click_does_not_follow_redirects():
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(302, headers={"Location": "https://127.0.0.1/admin"})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        r = one_click("https://shop.com/u", [PUBLIC_IP], client)
+    assert (r.status, r.http_status) == ("ok", 302) and len(seen) == 1
+
+
+def test_one_click_tries_the_next_address_when_one_is_unreachable():
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.host)
+        if request.url.host == "2001:db8::1":
+            raise httpx.ConnectError("Network is unreachable", request=request)
+        return httpx.Response(200)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        r = one_click("https://shop.com/u", ["2001:db8::1", PUBLIC_IP], client)
+    assert (r.status, r.http_status) == ("ok", 200)
+    assert seen == ["2001:db8::1", PUBLIC_IP]
+
+
+def test_one_click_stops_at_the_first_answer_or_a_request_already_sent():
+    seen = []
+
+    def answers_500(request):
+        seen.append(request.url.host)
+        return httpx.Response(500, text="nope")
+
+    with httpx.Client(transport=httpx.MockTransport(answers_500)) as client:
+        r = one_click("https://shop.com/u", [PUBLIC_IP, "93.184.216.35"], client)
+    assert (r.status, r.http_status, seen) == ("failed", 500, [PUBLIC_IP])
+
+    seen.clear()
+
+    def read_timeout(request):
+        seen.append(request.url.host)
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    with httpx.Client(transport=httpx.MockTransport(read_timeout)) as client:
+        r = one_click("https://shop.com/u", [PUBLIC_IP, "93.184.216.35"], client)
+    assert r.status == "failed" and r.error.startswith("ReadTimeout")
+    assert seen == [PUBLIC_IP]
+
+
+def test_one_click_reports_the_last_connect_error_when_every_address_fails():
+    def refused(request):
+        raise httpx.ConnectError(f"refused by {request.url.host}", request=request)
+
+    with httpx.Client(transport=httpx.MockTransport(refused)) as client:
+        r = one_click("https://shop.com/u", [PUBLIC_IP, "93.184.216.35"], client)
+    assert (r.status, r.error) == ("failed", "ConnectError: refused by 93.184.216.35")
+
+
+def test_production_client_ignores_proxy_env_and_redirects(monkeypatch):
+    """A proxy from HTTPS_PROXY would tunnel without `sni_hostname` and pick the destination."""
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:3128")
+    with unsub._client() as client:
+        assert client.trust_env is False and client.follow_redirects is False
+        assert not client._mounts  # no proxy transport was mounted from the environment
+
+
+# A real TLS handshake on loopback (no external network): proves that connecting to a pinned IP
+# still verifies the certificate against the URL's hostname. `cryptography` comes with
+# google-auth's dependencies (it is in uv.lock); only these tests skip without it.
+
+
+def _cert_files(tmp_path, hostname):
+    """A throwaway CA and a certificate for `hostname` it signed: (ca.pem, cert.pem, key.pem)."""
+    x509 = pytest.importorskip("cryptography.x509")
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    def name(cn):
+        return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+
+    start = datetime.now(UTC) - timedelta(days=1)
+    ca_key, key = ec.generate_private_key(ec.SECP256R1()), ec.generate_private_key(ec.SECP256R1())
+    ca = (
+        x509.CertificateBuilder(subject_name=name("test ca"), issuer_name=name("test ca"))
+        .public_key(ca_key.public_key())
+        .serial_number(1)
+        .not_valid_before(start)
+        .not_valid_after(start + timedelta(days=2))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), False)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=False,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+    cert = (
+        x509.CertificateBuilder(subject_name=name(hostname), issuer_name=ca.subject)
+        .public_key(key.public_key())
+        .serial_number(2)
+        .not_valid_before(start)
+        .not_valid_after(start + timedelta(days=2))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(hostname)]), critical=False)
+        .add_extension(  # required by Python 3.13+'s strict verification
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), False
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+    pem = serialization.Encoding.PEM
+    (tmp_path / "ca.pem").write_bytes(ca.public_bytes(pem))
+    (tmp_path / "cert.pem").write_bytes(cert.public_bytes(pem))
+    (tmp_path / "key.pem").write_bytes(
+        key.private_bytes(pem, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
+    )
+    return tmp_path / "ca.pem", tmp_path / "cert.pem", tmp_path / "key.pem"
+
+
+@pytest.fixture
+def tls_server(tmp_path):
+    """HTTPS server on 127.0.0.1 with a certificate for unsub.test; yields (port, ca, hosts)."""
+    ca, cert, key = _cert_files(tmp_path, "unsub.test")
+    hosts = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            hosts.append(self.headers["Host"])
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert, key)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_address[1], ca, hosts
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_pinned_one_click_verifies_tls_against_the_hostname(tls_server):
+    port, ca, hosts = tls_server
+    verify = ssl.create_default_context(cafile=str(ca))
+    with httpx.Client(verify=verify, timeout=5, trust_env=False) as client:
+        ok = one_click(f"https://unsub.test:{port}/u", ["127.0.0.1"], client)
+    assert (ok.status, ok.http_status) == ("ok", 200), ok.error
+    assert hosts == [f"unsub.test:{port}"]
+
+    with httpx.Client(verify=verify, timeout=5, trust_env=False) as client:
+        bad = one_click(f"https://other.test:{port}/u", ["127.0.0.1"], client)
+    assert bad.status == "failed" and "ConnectError" in bad.error
+    assert hosts == [f"unsub.test:{port}"]  # the mismatched certificate stopped the request

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import Session, sessionmaker
@@ -14,8 +14,8 @@ from . import corrections, rules
 from . import unsubscribe as unsub
 from .classifier import Classifier, build_state
 from .config import FREE_MAIL, Account, Action, CategoriesConfig, Mode, Settings
-from .db import Message, Run, Unsubscribe, now
-from .gmail import Email, Gmail, load_credentials
+from .db import MAX_ERROR_ATTEMPTS, Message, Run, Unsubscribe, now
+from .gmail import Email, Gmail, is_token_refresh_error, load_credentials, token_error_detail
 from .policy import (
     KNOWN_CONTACT,
     can_unsubscribe,
@@ -29,7 +29,17 @@ from .signals import Signals, resolve_relay
 log = logging.getLogger(__name__)
 
 MAX_UNSUB_ATTEMPTS = 3
+# An email whose processing fails is retried with exponential backoff (5, 10, 20… minutes after
+# each failure) and left alone (status stays `error`) after db.MAX_ERROR_ATTEMPTS failed passes,
+# about 10.5 hours after the first one, so an outage of a few hours doesn't make it give up.
+ERROR_RETRY_BACKOFF = timedelta(minutes=5)
 SAFE_ADDRESS = re.compile(r"^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$")
+
+
+@dataclass
+class RunCounts:
+    processed: int = 0
+    errors: int = 0
 
 
 @dataclass
@@ -62,62 +72,26 @@ def run_account(
     limit: int | None = None,
     lookback: str | None = None,
 ) -> Run:
-    mode = effective_mode(ctx.settings, account, mode_override)
-    unknown = set(account.act_categories or []) - set(ctx.cfg.by_key)
-    if unknown:
-        raise ValueError(f"{account.email}: unknown act_categories {sorted(unknown)}")
-    gmail = Gmail(load_credentials(ctx.settings.google_tokens_dir, account.email))
-    label_ids = gmail.ensure_labels(ctx.cfg.all_labels()) if mode != Mode.DRY_RUN else {}
+    """One pass over an account's inbox, recorded as a `Run` row.
 
+    The row is committed first, so any failure (bad config, an expired Gmail token, Gmail or DB
+    errors) is stored in `runs.error` with `finished_at` set, then re-raised for the caller.
+    """
+    mode = effective_mode(ctx.settings, account, mode_override)
     with ctx.sessions() as session:
         run = Run(account=account.email, mode=mode.value)
         session.add(run)
         session.commit()
+        # Counted outside the ORM object: a rollback after a failed email would reset it.
+        counts = RunCounts()
         try:
-            if mode != Mode.DRY_RUN:
-                corrections.check(session, gmail, account.email, ctx.cfg)
-
-            ids = gmail.list_inbox_ids(
-                lookback or ctx.settings.lookback, limit or ctx.settings.max_messages_per_run
-            )
-            # Emails still in the inbox that were seen in a weaker mode (dry_run, or label when
-            # running act) get processed once more, so switching modes also covers them.
-            # Restored rows are never touched again: the user explicitly undid them.
-            weaker = {
-                Mode.DRY_RUN: [],
-                Mode.LABEL: [Mode.DRY_RUN],
-                Mode.ACT: [Mode.DRY_RUN, Mode.LABEL],
-            }
-            done_query = select(Message.gmail_id).where(
-                Message.account == account.email,
-                Message.gmail_id.in_(ids),
-                or_(
-                    Message.restored.is_(True),
-                    and_(
-                        Message.status == "done",
-                        Message.mode.not_in([m.value for m in weaker[mode]]),
-                    ),
-                ),
-            )
-            done = set(session.scalars(done_query))
-            budget = [ctx.settings.max_unsubscribes_per_run]
-            for message_id in ids:
-                if message_id in done:
-                    continue
-                try:
-                    process(ctx, session, gmail, account, mode, label_ids, message_id, budget)
-                    run.processed += 1
-                except Exception as exc:
-                    session.rollback()
-                    run.errors += 1
-                    _record_error(session, account.email, mode, message_id, exc)
-                    log.exception(
-                        "message failed", extra={"account": account.email, "id": message_id}
-                    )
+            _run_pass(ctx, session, account, mode, limit, lookback, counts)
         except Exception as exc:
-            run.error = f"{type(exc).__name__}: {exc}"
+            session.rollback()
+            run.error = describe_run_error(exc, account.email)
             raise
         finally:
+            run.processed, run.errors = counts.processed, counts.errors
             run.finished_at = now()
             session.add(run)
             session.commit()
@@ -128,9 +102,108 @@ def run_account(
                     "mode": mode.value,
                     "processed": run.processed,
                     "errors": run.errors,
+                    "failed": run.error is not None,
                 },
             )
     return run
+
+
+def _run_pass(
+    ctx: Context,
+    session: Session,
+    account: Account,
+    mode: Mode,
+    limit: int | None,
+    lookback: str | None,
+    counts: RunCounts,
+) -> None:
+    unknown = set(account.act_categories or []) - set(ctx.cfg.by_key)
+    if unknown:
+        raise ValueError(f"{account.email}: unknown act_categories {sorted(unknown)}")
+    gmail = Gmail(load_credentials(ctx.settings.google_tokens_dir, account.email))
+    label_ids = gmail.ensure_labels(ctx.cfg.all_labels()) if mode != Mode.DRY_RUN else {}
+    if mode != Mode.DRY_RUN:
+        corrections.check(session, gmail, account.email, ctx.cfg)
+
+    ids = gmail.list_inbox_ids(
+        lookback or ctx.settings.lookback, limit or ctx.settings.max_messages_per_run
+    )
+    # Emails still in the inbox that were seen in a weaker mode (dry_run, or label when running
+    # act) get processed once more, so switching modes also covers them. Restored rows are never
+    # touched again: the user explicitly undid them. Errors wait for their backoff (`_retry_due`).
+    weaker = {
+        Mode.DRY_RUN: [],
+        Mode.LABEL: [Mode.DRY_RUN],
+        Mode.ACT: [Mode.DRY_RUN, Mode.LABEL],
+    }
+    done_query = select(Message.gmail_id).where(
+        Message.account == account.email,
+        Message.gmail_id.in_(ids),
+        or_(
+            Message.restored.is_(True),
+            and_(
+                Message.status == "done",
+                Message.mode.not_in([m.value for m in weaker[mode]]),
+            ),
+        ),
+    )
+    done = set(session.scalars(done_query))
+    errored = select(Message.gmail_id, Message.error_attempts, Message.processed_at).where(
+        Message.account == account.email,
+        Message.gmail_id.in_(ids),
+        Message.status == "error",
+        Message.restored.is_(False),
+    )
+    started = now()
+    done.update(
+        gmail_id
+        for gmail_id, attempts, last in session.execute(errored)
+        if not _retry_due(attempts, last, started)
+    )
+    budget = [ctx.settings.max_unsubscribes_per_run]
+    for message_id in ids:
+        if message_id in done:
+            continue
+        try:
+            process(ctx, session, gmail, account, mode, label_ids, message_id, budget)
+            counts.processed += 1
+        except Exception as exc:
+            session.rollback()
+            if is_token_refresh_error(exc):
+                raise  # token refresh failed: fail the run, don't count it against the email
+            counts.errors += 1
+            _record_error(session, account.email, mode, message_id, exc)
+            log.exception("message failed", extra={"account": account.email, "id": message_id})
+
+
+def _retry_due(attempts: int, last_failure: datetime, at: datetime) -> bool:
+    """Whether an email that failed `attempts` times, last at `last_failure`, is retried at `at`."""
+    if attempts >= MAX_ERROR_ATTEMPTS:
+        return False
+    if last_failure.tzinfo is None:  # SQLite returns naive datetimes (stored as UTC)
+        last_failure = last_failure.replace(tzinfo=UTC)
+    return at >= last_failure + ERROR_RETRY_BACKOFF * 2 ** max(attempts - 1, 0)
+
+
+def describe_run_error(exc: BaseException, account: str) -> str:
+    """The `runs.error` text: the exception, or what to do when the Gmail token can't refresh.
+
+    Never includes a token refresh failure's own text unless it is the `invalid_grant` summary:
+    a transient one can carry the token endpoint's raw response body.
+    """
+    detail = token_error_detail(exc)
+    if detail is not None:
+        return (
+            f"Gmail token expired or revoked ({detail[:200]}): run `inbox-jev auth add {account}`"
+        )
+    if is_token_refresh_error(exc):
+        if getattr(exc, "retryable", False):
+            return "Gmail token refresh failed (temporary); will retry next run"
+        return (
+            "Gmail token refresh failed (not invalid_grant); will retry next run, "
+            f"run `inbox-jev auth add {account}` if it persists"
+        )
+    return f"{type(exc).__name__}: {exc}"[:2000]
 
 
 def mark_for_reprocess(
@@ -164,6 +237,18 @@ def mark_for_reprocess(
     return count
 
 
+def reset_error_attempts(session: Session, account: str) -> int:
+    """Have the next run retry every email stored as `error`, including those that gave up.
+
+    Only emails still within that run's `--lookback` window are retried. Returns how many rows
+    were reset.
+    """
+    query = update(Message).where(Message.account == account, Message.status == "error")
+    count = session.execute(query.values(error_attempts=0)).rowcount
+    session.commit()
+    return count
+
+
 def process(
     ctx: Context,
     session: Session,
@@ -182,6 +267,7 @@ def process(
     if mode != Mode.DRY_RUN and _user_touched(ctx.cfg, session, account, prev, email, label_ids):
         # Leave Gmail and labels_added as they are; just don't revisit it in this mode.
         prev.status, prev.error, prev.mode = "done", None, mode.value
+        prev.error_attempts = 0
         session.commit()
         return prev
     rule = rules.lookup(session, account.email, sig.sender)
@@ -221,7 +307,7 @@ def process(
         remove=actions.remove_labels + stale,
     )
 
-    msg.status, msg.error = "done", None
+    msg.status, msg.error, msg.error_attempts = "done", None, 0
     msg.source = decision.source
     msg.jev_category = classification.category if classification else None
     msg.category = decision.category
@@ -611,5 +697,11 @@ def _record_error(
         session.add(msg)
     msg.status, msg.mode = "error", mode.value
     msg.error = f"{type(exc).__name__}: {exc}"[:2000]
+    msg.error_attempts = (msg.error_attempts or 0) + 1
     msg.processed_at = now()
     session.commit()
+    if msg.error_attempts >= MAX_ERROR_ATTEMPTS:
+        log.warning(
+            "message gave up",
+            extra={"account": account, "id": message_id, "attempts": msg.error_attempts},
+        )

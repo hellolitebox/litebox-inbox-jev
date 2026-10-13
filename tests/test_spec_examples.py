@@ -7,6 +7,7 @@ an ID exists on only one side, so the spec and these tests can't drift apart.
 import base64
 import re
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import httpx
@@ -68,12 +69,14 @@ def _one_click_posts(monkeypatch):
     real = unsub.unsubscribe
 
     def handler(request):
-        posts.append((str(request.url), request.content.decode()))
+        # The POST goes to the IP the guard validated; Host carries the URL's hostname.
+        url = f"https://{request.headers['host']}{request.url.raw_path.decode()}"
+        posts.append((url, request.content.decode()))
         return httpx.Response(200)
 
     def fake(sig, send_mail):
         with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-            return real(sig, send_mail, client=client, url_guard=lambda url: True)
+            return real(sig, send_mail, client=client, url_guard=lambda url: ["93.184.216.34"])
 
     monkeypatch.setattr(triage.unsub, "unsubscribe", fake)
     return posts
@@ -450,6 +453,48 @@ def test_ex12_pulling_back_to_inbox_becomes_a_rule(spec):
     row = _row(ctx, "2")
     assert (row.category, row.source, row.archived) == ("important", "rule", False)
     assert "Label_Jev/Important" in gmail.modified[-1][1] and gmail.modified[-1][2] == []
+
+
+def test_ex13_failing_email_backs_off_then_gives_up(spec):
+    """EX-13 (docs/how-it-decides.md §5, §1 the pass over an inbox)."""
+    ctx, gmail, account = spec
+    gmail.emails = {
+        "1": email("1", "Vendor <billing@vendor.example>", "Invoice 7"),
+        "2": email("2", "Weekly <news@weekly.example>", "Issue 41"),
+    }
+    ctx._classifier.answers["Issue 41"] = answer("newsletter", newsletter=0.97)  # no "Invoice 7"
+
+    def later(minutes):
+        with ctx.sessions() as s:
+            row = s.query(Message).filter_by(gmail_id="1").one()
+            row.processed_at = row.processed_at - timedelta(minutes=minutes)
+            s.commit()
+
+    run = triage.run_account(ctx, account, Mode.ACT)
+    assert (run.processed, run.errors) == (1, 1)  # the run carries on
+    assert (_row(ctx, "1").status, _row(ctx, "1").error_attempts) == ("error", 1)
+    assert triage.run_account(ctx, account, Mode.ACT).errors == 0  # < 5 minutes: not retried
+
+    for wait in (5, 10, 20, 40, 80, 160, 320):
+        later(wait)
+        assert triage.run_account(ctx, account, Mode.ACT).errors == 1
+    assert _row(ctx, "1").error_attempts == 8
+
+    later(60 * 24)
+    calls = ctx._classifier.calls
+    assert triage.run_account(ctx, account, Mode.ACT).errors == 0  # gave up
+    assert ctx._classifier.calls == calls
+    assert not [m for m in gmail.modified if m[0] == "1"]  # untouched in Gmail
+    with ctx.sessions() as s:
+        text = digest.build(s, ctx.cfg, account.email, hours=48)
+    assert "Invoice 7" in text.split("Sin más reintentos")[1]
+
+    ctx._classifier.answers["Invoice 7"] = answer("transactional", transactional=0.95)
+    with ctx.sessions() as s:
+        triage.reset_error_attempts(s, account.email)
+    triage.run_account(ctx, account, Mode.ACT)
+    row = _row(ctx, "1")
+    assert (row.status, row.category, row.error_attempts) == ("done", "transactional", 0)
 
 
 # --- docs <-> tests ----------------------------------------------------------------------------

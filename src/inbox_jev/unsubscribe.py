@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import socket
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -16,6 +16,8 @@ USER_AGENT = "inbox-jev/0.1 (+List-Unsubscribe one-click)"
 TIMEOUT = httpx.Timeout(15.0)
 
 SendMail = Callable[[str, str, str], None]  # (to, subject, body)
+# Validates a one-click URL and returns the IP addresses to connect to, in order (empty: skip it).
+UrlGuard = Callable[[str], list[str]]
 
 
 @dataclass
@@ -27,16 +29,30 @@ class Result:
     error: str | None = None
 
 
-def is_public_https(url: str) -> bool:
-    """Reject non-https and hosts resolving to private/loopback/link-local addresses (SSRF)."""
-    parts = urlsplit(url)
-    if parts.scheme != "https" or not parts.hostname:
-        return False
+def resolve_public_https(url: str) -> list[str]:
+    """The addresses to POST to, in DNS order; empty for non-https URLs and non-public hosts.
+
+    SSRF guard: every address the host resolves to must be global (no private, loopback or
+    link-local IP); a DNS failure or a malformed URL rejects it. The caller connects to the
+    returned addresses itself, so a second DNS answer (DNS rebinding) can't point the request
+    somewhere else.
+    """
     try:
-        infos = socket.getaddrinfo(parts.hostname, parts.port or 443, proto=socket.IPPROTO_TCP)
-    except socket.gaierror:
-        return False
-    return all(ipaddress.ip_address(info[4][0]).is_global for info in infos)
+        parts = urlsplit(url)
+        port = parts.port or 443
+    except ValueError:
+        return []
+    if parts.scheme != "https" or not parts.hostname:
+        return []
+    try:
+        infos = socket.getaddrinfo(parts.hostname, port, proto=socket.IPPROTO_TCP)
+    except (socket.gaierror, UnicodeError):
+        return []
+    # Drop an IPv6 zone ("fe80::1%eth0"): ip_address rejects it, and such addresses aren't global.
+    addresses = [ipaddress.ip_address(info[4][0].split("%", 1)[0]) for info in infos]
+    if not all(a.is_global for a in addresses):
+        return []
+    return list(dict.fromkeys(str(a) for a in addresses))  # one entry per address, DNS order
 
 
 def parse_mailto(uri: str) -> tuple[str, str, str]:
@@ -47,44 +63,70 @@ def parse_mailto(uri: str) -> tuple[str, str, str]:
     return to, query.get("subject", "unsubscribe"), query.get("body", "unsubscribe")
 
 
-def one_click(url: str, client: httpx.Client) -> Result:
-    try:
-        resp = client.post(
+def one_click(url: str, addresses: Sequence[str], client: httpx.Client) -> Result:
+    """RFC 8058 POST to `url`, connecting to the IPs the guard validated, in order.
+
+    The request goes to the IP with the original Host header, and TLS uses the hostname for SNI
+    and certificate verification (httpx's `sni_hostname` extension), so the certificate must
+    still be valid for the hostname. When an address can't be connected to (refused, timeout,
+    TLS failure) the next one is tried, as `socket.create_connection` does; once a request has
+    been sent, its answer (or error) is the result.
+    """
+    result = Result("one_click", "failed", url, error="no address to connect to")
+    for address in addresses:
+        try:
+            target = httpx.URL(url)
+            resp = client.post(
+                target.copy_with(host=address),
+                data={"List-Unsubscribe": "One-Click"},
+                headers={"User-Agent": USER_AGENT, "Host": target.netloc.decode("ascii")},
+                extensions={"sni_hostname": target.raw_host.decode("ascii")},
+            )
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:  # not sent: try the next IP
+            result = Result("one_click", "failed", url, error=f"{type(exc).__name__}: {exc}")
+            continue
+        except (httpx.HTTPError, httpx.InvalidURL) as exc:
+            return Result("one_click", "failed", url, error=f"{type(exc).__name__}: {exc}")
+        # RFC 8058 servers answer 2xx; some ESPs reply with a redirect to a confirmation page.
+        ok = 200 <= resp.status_code < 400
+        return Result(
+            "one_click",
+            "ok" if ok else "failed",
             url,
-            data={"List-Unsubscribe": "One-Click"},
-            headers={"User-Agent": USER_AGENT},
+            http_status=resp.status_code,
+            error=None if ok else resp.text[:500],
         )
-    except httpx.HTTPError as exc:
-        return Result("one_click", "failed", url, error=f"{type(exc).__name__}: {exc}")
-    # RFC 8058 servers answer 2xx; some ESPs reply with a redirect to a confirmation page.
-    ok = 200 <= resp.status_code < 400
-    return Result(
-        "one_click",
-        "ok" if ok else "failed",
-        url,
-        http_status=resp.status_code,
-        error=None if ok else resp.text[:500],
-    )
+    return result
+
+
+def _client() -> httpx.Client:
+    """The production one-click client.
+
+    No redirects: a redirect could point at an internal host and bypass the URL guard. No
+    proxy from the environment (`trust_env=False`): httpcore's proxy tunnel ignores
+    `sni_hostname`, so a pinned request would fail TLS, and the proxy would pick the destination.
+    """
+    return httpx.Client(timeout=TIMEOUT, follow_redirects=False, trust_env=False)
 
 
 def unsubscribe(
     sig: Signals,
     send_mail: SendMail,
     client: httpx.Client | None = None,
-    url_guard: Callable[[str], bool] = is_public_https,
+    url_guard: UrlGuard = resolve_public_https,
 ) -> Result:
     if not sig.dmarc_pass:
         return Result("manual", "skipped", error="sender not authenticated (dmarc != pass)")
 
     if sig.one_click:
         for url in sig.unsubscribe_https:
-            if not url_guard(url):
+            addresses = url_guard(url)
+            if not addresses:
                 continue
             own_client = client is None
-            # No redirects: a redirect could point at an internal host and bypass url_guard.
-            client = client or httpx.Client(timeout=TIMEOUT, follow_redirects=False)
+            client = client or _client()
             try:
-                result = one_click(url, client)
+                result = one_click(url, addresses, client)
             finally:
                 if own_client:
                     client.close()

@@ -50,7 +50,12 @@ def check(session: Session, gmail: Gmail, account: str, cfg: CategoriesConfig) -
                 Message.correction_checked_at < cutoff - RECHECK_EVERY,
             ),
         )
-        .order_by(Message.processed_at.desc())
+        # Never-checked rows first, then the longest unchecked, so with more than MAX_PER_RUN
+        # candidates the older ones still get their turn instead of the newest hogging the cap.
+        .order_by(
+            Message.correction_checked_at.asc().nulls_first(),
+            Message.processed_at.desc(),
+        )
         .limit(MAX_PER_RUN)
     ).all()
 

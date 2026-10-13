@@ -27,3 +27,5 @@ record when the decision changes: add a new one and mark the old one `Superseded
 | [0014](0014-unsubscribe-retry-same-checks.md) | `unsubscribe-retry` applies the same checks as `run` | Accepted | #15 |
 | [0015](0015-user-edits-hands-off.md) | Learn from corrections; leave edited emails alone | Accepted | #6, #15 |
 | [0016](0016-reproducible-build.md) | Reproducible build with `uv.lock` | Accepted | #16 |
+| [0017](0017-error-retry-backoff-and-cap.md) | Retry failed emails with a backoff, give up after 8 failures | Accepted | #20 |
+| [0018](0018-one-click-pinned-to-validated-ip.md) | One-click unsubscribe connects to the validated IPs | Accepted | #20 |

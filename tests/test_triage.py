@@ -1,5 +1,7 @@
 """End-to-end triage with fake Gmail and a fake Jev classifier."""
 
+from datetime import timedelta
+
 import pytest
 from conftest import GMAIL_PASS, make_classification
 
@@ -171,16 +173,29 @@ def test_correction_creates_rule(setup):
         assert (rule.category, rule.source, rule.active) == ("important", "correction", True)
 
 
+def _age_errors(ctx, minutes):
+    """Move every stored failure `minutes` into the past, as if later runs came by."""
+    with ctx.sessions() as s:
+        for m in s.query(Message).filter_by(status="error"):
+            m.processed_at = m.processed_at - timedelta(minutes=minutes)
+        s.commit()
+
+
 def test_classifier_error_is_recorded_and_retried(setup):
     ctx, gmail, account = setup
     answers = ctx._classifier.answers
     good = answers.pop("Proposal")
     triage.run_account(ctx, account, Mode.ACT)
     with ctx.sessions() as s:
-        assert s.query(Message).filter_by(gmail_id="1").one().status == "error"
+        row = s.query(Message).filter_by(gmail_id="1").one()
+        assert (row.status, row.error_attempts) == ("error", 1)
     answers["Proposal"] = good
+    _age_errors(ctx, 5)
     run = triage.run_account(ctx, account, Mode.ACT)
     assert run.processed == 1
+    with ctx.sessions() as s:
+        row = s.query(Message).filter_by(gmail_id="1").one()
+        assert (row.status, row.error, row.error_attempts) == ("done", None, 0)
 
 
 def test_act_categories_gate_actions_end_to_end(setup):
@@ -330,6 +345,7 @@ def test_reprocess_error_stays_retryable_and_keeps_old_labels(setup):
         assert row.labels_added == ["Jev/Marketing", "Jev/Processed"]
 
     answers["50% off"] = make_classification("newsletter", 0.95)
+    _age_errors(ctx, 5)
     assert triage.run_account(ctx, account, Mode.ACT).processed == 1
     [(_, add, remove)] = _mods(gmail, "2")
     assert "Label_Jev/Newsletters" in add

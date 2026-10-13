@@ -15,13 +15,19 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    event,
     inspect,
     literal,
     text,
 )
 from sqlalchemy.engine import Engine, make_url
+from sqlalchemy.engine.interfaces import DBAPIConnection
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+from sqlalchemy.pool import ConnectionPoolEntry
+
+# Failed passes on one email before triage stops retrying it (see triage.ERROR_RETRY_BACKOFF).
+MAX_ERROR_ATTEMPTS = 8
 
 
 def now() -> datetime:
@@ -58,6 +64,10 @@ class Message(Base):
     received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(16), default="done")  # done | error
     error: Mapped[str | None] = mapped_column(Text)
+    # Consecutive failed passes; reset on success. Retries stop at MAX_ERROR_ATTEMPTS.
+    # server_default too, so inserts that don't know the column (older code after a rollback,
+    # raw SQL) still work on databases created by this version.
+    error_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     source: Mapped[str | None] = mapped_column(String(16))  # jev | rule | allowlist
     jev_category: Mapped[str | None] = mapped_column(String(64))  # raw model answer
     category: Mapped[str | None] = mapped_column(String(64), index=True)  # after policy
@@ -113,11 +123,29 @@ class SenderRule(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
 
 
+# How long a SQLite connection waits for another process's write lock before failing with
+# "database is locked" (e.g. a manual command while the timer's run is writing).
+SQLITE_BUSY_TIMEOUT_MS = 30_000
+
+
+def _sqlite_pragmas(dbapi_conn: DBAPIConnection, _record: ConnectionPoolEntry) -> None:
+    """WAL lets readers (digest, viewer) work while a run writes; busy_timeout waits for locks."""
+    cursor = dbapi_conn.cursor()
+    try:
+        cursor.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+        cursor.execute("PRAGMA journal_mode = WAL")  # in-memory databases stay "memory"
+    finally:
+        cursor.close()
+
+
 def make_engine(url: str) -> Engine:
     parsed = make_url(url)
-    if parsed.get_backend_name() == "sqlite" and parsed.database not in (None, "", ":memory:"):
+    sqlite = parsed.get_backend_name() == "sqlite"
+    if sqlite and parsed.database not in (None, "", ":memory:"):
         Path(parsed.database).parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(url)
+    if sqlite:
+        event.listen(engine, "connect", _sqlite_pragmas)
     Base.metadata.create_all(engine)
     _add_missing_columns(engine)
     return engine

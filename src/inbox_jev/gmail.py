@@ -11,6 +11,7 @@ from email.message import EmailMessage as MimeMessage
 from html.parser import HTMLParser
 from pathlib import Path
 
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -25,6 +26,29 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
 ]
 INBOX, SPAM = "INBOX", "SPAM"
+
+
+def is_token_refresh_error(exc: BaseException) -> bool:
+    """Whether `exc` is a failure to refresh the Gmail OAuth token (permanent or transient)."""
+    return isinstance(exc, RefreshError)
+
+
+def token_error_detail(exc: BaseException) -> str | None:
+    """The OAuth error summary if `exc` means the stored token is unusable, else None.
+
+    Only a non-retryable `invalid_grant` refresh failure (token expired or revoked) counts: it
+    needs `inbox-jev auth add`. google-auth also raises `RefreshError` for other token
+    endpoint failures (5xx, `temporarily_unavailable`), whose first argument can be the raw
+    response body (a non-JSON body comes back non-retryable); those return None. The summary
+    is the first line of the first argument (e.g. "invalid_grant: Token has been expired or
+    revoked."), never the raw OAuth response.
+    """
+    if not isinstance(exc, RefreshError) or exc.retryable:
+        return None
+    first = exc.args[0] if exc.args else ""
+    if not isinstance(first, str) or not first.startswith("invalid_grant"):
+        return None
+    return first.splitlines()[0]
 
 
 def token_path(tokens_dir: Path, email: str) -> Path:

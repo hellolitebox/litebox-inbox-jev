@@ -211,6 +211,7 @@ uv run inbox-jev digest --dry-print
 | `inbox-jev restore -a EMAIL --since 1d [--category marketing]` | Undo: back to inbox, remove labels |
 | `inbox-jev reprocess -a EMAIL --category KEY [--low-confidence-only]` | Have the next `act` run redo that category's emails still in the inbox (pair with `run --lookback`) |
 | `inbox-jev rules list [-a EMAIL] [--all]` / `rules set -a EMAIL @domain.com newsletter` / `rules delete -a EMAIL SENDER` | Sender rules |
+| `inbox-jev retry-errors -a EMAIL` | Have the next `run` retry emails that failed, including those that stopped retrying after 8 failures (pair with `run --lookback`) |
 | `inbox-jev unsubscribe-retry [-a EMAIL]` | Retry failed unsubscribes after re-checking them against the current rules, corrections and [unsubscribe checks](docs/how-it-decides.md#33-unsubscribe-conditions) |
 | `inbox-jev senders backfill [-a EMAIL]` | Store the author, not the group, for group emails saved before authors were recovered |
 | `inbox-jev stats [-a EMAIL] [--days 7]` | Counts per category |
@@ -243,7 +244,9 @@ sudo systemctl enable --now inbox-jev-triage.timer inbox-jev-digest.timer
 - Triage runs every 10 minutes, so a new email can sit in the inbox for up to ~10 minutes before
   it is handled; the digest runs daily at 08:00 America/Argentina/Buenos_Aires (edit
   `OnCalendar`/timezone in the `.timer` files).
-- Run logs (JSON lines): `journalctl -u inbox-jev-triage -f`.
+- Run logs (JSON lines): `journalctl -u inbox-jev-triage -f`. A run that fails for one account
+  (for example an expired Gmail token) is recorded in `runs.error`, the other accounts still
+  run, and the service exits non-zero so systemd shows the failure.
 - Browse the DB: `docker compose --profile viewer up -d viewer`, then
   `ssh -L 8001:localhost:8001 <host>` and open http://localhost:8001. It is bound to localhost
   on the server, never public.
@@ -253,8 +256,13 @@ sudo systemctl enable --now inbox-jev-triage.timer inbox-jev-digest.timer
 One Slack DM per account (`slack_user_id`), by default at 08:00. It lists: totals per category
 and how many are in Review; one section per keep category other than `important` (e.g.
 `Jev/Action`); emails that need a reply; unsubscribes done, pending a manual click, or failed;
-low-confidence emails; corrections learned; and run errors. Preview it with
-`inbox-jev digest --dry-print`.
+low-confidence emails; corrections learned; and errors. Errors are failed runs (identical ones
+grouped, e.g. an expired Gmail token, with the fix: `run inbox-jev auth add EMAIL`) and emails
+that stopped being retried. An email that fails is retried with a backoff (5, 10, 20 … minutes)
+and given up after 8 failures, about 10.5 hours; `inbox-jev retry-errors` retries them again
+(details: [docs/how-it-decides.md §1](docs/how-it-decides.md#1-the-pass-over-an-inbox)).
+Everything taken from an email is escaped for Slack, so a subject can't mention `@channel` or
+fake a link. Preview it with `inbox-jev digest --dry-print`.
 
 ## Updating a deployment
 
@@ -265,8 +273,9 @@ sudo systemctl stop inbox-jev-triage.timer        # no pass while you change thi
 while [ "$(systemctl show -p ActiveState --value inbox-jev-triage.service)" = activating ]; do
   sleep 2
 done
-# SQLite only (the default DATABASE_URL). data/ belongs to APP_UID with mode 700: needs sudo
-sudo cp -p data/inbox-jev.db "data/inbox-jev.db.bak-$(date +%Y%m%d%H%M)"
+# SQLite only (the default DATABASE_URL). data/ belongs to APP_UID with mode 700: needs sudo.
+# The DB runs in WAL mode: sqlite3's .backup copies a consistent DB, WAL included.
+sudo sqlite3 data/inbox-jev.db ".backup 'data/inbox-jev.db.bak-$(date +%Y%m%d%H%M)'"
 git pull && docker compose build
 # one-off steps from the PR's deploy notes (reprocess, senders backfill, rules review…)
 sudo systemctl start inbox-jev-triage.timer
@@ -284,7 +293,17 @@ deployed (see [Rolling out a category change](#rolling-out-a-category-change)).
 | `messages` | Every processed email: category, confidence, probabilities, labels, archived/spammed, corrections |
 | `unsubscribes` | One row per (account, list): method, target, status, HTTP status, error |
 | `sender_rules` | manual / correction / auto rules |
-| `runs` | Each triage pass: processed, errors |
+| `runs` | Each triage pass: processed, errors, and why the run failed (`error`) |
+
+SQLite databases are opened in WAL mode with a 30 s busy timeout, so the digest, the viewer
+and manual commands can read while a triage pass writes, and concurrent writers wait instead of
+failing with "database is locked". The `-wal` and `-shm` files next to the DB are part of it.
+A read-only reader needs `data/` writable (SQLite creates `-shm`) or immutable mode: the
+viewer opens it with `datasette -i`, and `scripts/dry_classify.py` runs with `data/` mounted
+read-write.
+
+New columns are added on startup (`create_all` plus a small "add missing columns" step, with
+their default for existing rows); there is no other migration tool.
 
 To use a hosted DB, install its driver and change the URL. For example, Postgres on Neon:
 `uv add 'psycopg[binary]'` (commit `pyproject.toml` and `uv.lock`, then rebuild the image with

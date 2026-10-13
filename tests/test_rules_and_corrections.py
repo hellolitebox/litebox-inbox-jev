@@ -1,9 +1,11 @@
+from datetime import timedelta
+
 import pytest
 from conftest import make_classification, make_signals
 
-from inbox_jev import rules
+from inbox_jev import corrections, rules
 from inbox_jev.corrections import detect
-from inbox_jev.db import Message, make_session_factory
+from inbox_jev.db import Message, make_session_factory, now
 from inbox_jev.policy import Decision, decide
 
 
@@ -187,3 +189,48 @@ def test_known_contact_cold_outreach_does_not_earn_rule(cfg, session, account):
         rules.record_auto(session, cfg, "me@acme.com", "rep@vendor.com", c, d)
         session.commit()
     assert rules.lookup(session, "me@acme.com", "rep@vendor.com") is None
+
+
+class _LabelGmail:
+    """Gmail that only answers label lookups, recording which emails were checked."""
+
+    def __init__(self):
+        self.checked = []
+
+    def labels(self):
+        return {}
+
+    def get_label_ids(self, gmail_id):
+        self.checked.append(gmail_id)
+        return ["Jev/Marketing"]  # untouched
+
+
+def test_check_puts_never_and_longest_unchecked_rows_first(cfg, session, monkeypatch):
+    """With more candidates than the cap, older rows still get checked instead of starving."""
+    t = now()
+    rows = {
+        "new_checked": (t - timedelta(minutes=10), t - timedelta(hours=2)),
+        "old_unchecked": (t - timedelta(days=3), None),
+        "old_checked_long_ago": (t - timedelta(days=5), t - timedelta(hours=30)),
+        "new_unchecked": (t - timedelta(minutes=5), None),
+    }
+    for gmail_id, (processed_at, checked_at) in rows.items():
+        session.add(
+            msg(
+                account="me@acme.com",
+                gmail_id=gmail_id,
+                thread_id="t",
+                sender="promo@shop.com",
+                status="done",
+                mode="act",
+                processed_at=processed_at,
+                correction_checked_at=checked_at,
+            )
+        )
+    session.commit()
+    monkeypatch.setattr(corrections, "MAX_PER_RUN", 3)
+    gmail = _LabelGmail()
+    corrections.check(session, gmail, "me@acme.com", cfg)
+    assert gmail.checked == ["new_unchecked", "old_unchecked", "old_checked_long_ago"]
+    corrections.check(session, gmail, "me@acme.com", cfg)  # the others are within the hour now
+    assert gmail.checked[3:] == ["new_checked"]

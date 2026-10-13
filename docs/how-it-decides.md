@@ -27,8 +27,20 @@ Contents:
 `inbox-jev run` (`triage.run_account`) handles one account:
 
 1. The **mode** is `--mode`, else the account's `mode`, else `MODE` from `.env` (default
-   `dry_run`). An `act_categories` key that isn't in `categories.yaml` fails the account's run
-   before anything is touched.
+   `dry_run`). A `runs` row is stored before anything else, so every failure below ends up in
+   `runs.error` (shown in the digest) and the run still gets its `finished_at`. An
+   `act_categories` key that isn't in `categories.yaml` fails the account's run before anything
+   is touched. So does a Gmail token that can't be refreshed, with one of three `runs.error`
+   texts, depending on how google-auth reports the failure:
+   - `invalid_grant` (token expired or revoked): run `inbox-jev auth add EMAIL`;
+   - a failure google-auth marks retryable (a 5xx or `temporarily_unavailable` with a JSON
+     error body): "temporary", it will retry next run;
+   - any other refresh failure (e.g. a 5xx whose body isn't JSON, such as an HTML error page,
+     which google-auth marks non-retryable): "not invalid_grant", it will retry next run, and
+     run `inbox-jev auth add EMAIL` if it persists.
+
+   In all three the run fails and the next one tries again, and the token endpoint's response
+   is never stored (only the `invalid_grant` summary line is).
 2. In `label` and `act`, the Jev labels are created in Gmail if missing.
 3. In `label` and `act`, **corrections** are checked first (`corrections.check`, see
    [3.7](#37-corrections-user-edits-and-restore)).
@@ -37,9 +49,16 @@ Contents:
 5. A listed email is **skipped** when its stored row is `restored`, or is `done` in the current
    mode or a stronger one. So an email seen in `dry_run` is processed again by `label` or `act`,
    and one seen in `label` is processed again by `act`. Rows with `status = error` are retried
-   on every run while they are still listed.
+   while they are still listed, with a backoff: after the n-th failure the email waits
+   5 × 2<sup>n−1</sup> minutes (5, 10, 20 … 320). After **8** failures (`db.MAX_ERROR_ATTEMPTS`,
+   about 10.5 hours after the first) it is no longer retried: it stays in the inbox untouched,
+   with `status = error`, and the digest lists it (see [EX-13](#ex-13--an-email-that-keeps-failing)).
+   A success resets the count. `inbox-jev retry-errors -a EMAIL` resets it for every `error` row
+   of the account, so the next run retries those still inside its `--lookback`.
 6. Each remaining email goes through the [pipeline](#2-the-per-email-pipeline). An exception
-   rolls back that email, stores it as `status = error` and the run continues.
+   rolls back that email, stores it as `status = error` (counting one failure) and the run
+   continues. A Gmail token refresh that fails mid-run (permanent or transient) is the
+   exception: it fails the whole run instead and isn't counted against the email.
 7. One unsubscribe budget is shared by the whole run: `MAX_UNSUBSCRIBES_PER_RUN` (default 20)
    attempts.
 
@@ -317,7 +336,9 @@ row's stored sender. It is checked in two places:
 
 - `corrections.check`, at the start of every `label`/`act` run: rows that are `done`, not
   `dry_run`, not restored, not yet corrected, processed in the last **7 days**, and not checked
-  in the last **hour**; newest first, at most **100** per run. Deleted emails are skipped.
+  in the last **hour**; never-checked rows first (newest first), then the ones checked longest
+  ago, at most **100** per run, so older rows aren't starved when there are more. Deleted emails
+  are skipped.
 - In the pipeline, when an email from an earlier `label`/`act` pass is processed again.
 
 **User edits = hands off** (`triage._user_edit`, only for rows that have labels from an earlier
@@ -396,8 +417,13 @@ the headers are used with the same rule.
   3. The first `mailto:` with an `@` gets an email from your Gmail (subject and body from the
      URI, default `unsubscribe`). Sent → `ok`; error → `failed`.
   4. Otherwise `manual_pending` with the first `https` URL as target (listed in the digest).
-- **URL guard** (`is_public_https`): scheme `https`, a hostname, and every address it resolves to
-  is global (no private, loopback or link-local IPs); a DNS failure rejects it.
+- **URL guard** (`resolve_public_https`): scheme `https`, a hostname, and every address it
+  resolves to is global (no private, loopback or link-local IPs); a DNS failure rejects it. The
+  `POST` then connects to the validated addresses itself, in DNS order, with the URL's hostname
+  as `Host` and for TLS (SNI and certificate check), so a second DNS answer can't redirect it to
+  an internal host (DNS rebinding). An address that can't be connected to (refused, connect
+  timeout, TLS failure) is skipped for the next one; once a request was sent, its answer is the
+  result. The client ignores proxy environment variables (`HTTPS_PROXY`).
 - Links in the body are never followed.
 
 ### 4.4 `List-Post`
@@ -609,6 +635,21 @@ the probabilities that matter are shown; the rest are ~0.
 - **Why**: pulling an archived email back to the inbox is a correction to `important`; changing
   the category label would be a correction to that category.
 
+### EX-13 — An email that keeps failing
+
+- **Test**: `test_ex13_failing_email_backs_off_then_gives_up`
+- **Input**: in act mode, every call to Jev for `billing@vendor.example`'s "Invoice 7" fails.
+  The timer runs every 10 minutes.
+- **Outcome**: the first run stores the email as `error` (1 failure) and the run carries on with
+  the other emails. A run less than 5 minutes later doesn't retry it; later runs retry it 5, 10,
+  20, 40, 80, 160 and 320 minutes after each failure. After the 8th failure it is never retried
+  again: it stays in the inbox with no Jev labels, and that day's digest lists it under "Sin más
+  reintentos". If Jev answers on a retry before that, the email is processed normally and its
+  failure count goes back to 0. `inbox-jev retry-errors` makes the next run try it again.
+- **Why**: retrying every 10 minutes for the whole `LOOKBACK` (up to 288 times in 2 days) costs
+  Jev calls and log noise for an email that fails the same way; the backoff still rides out an
+  outage of several hours ([ADR 0017](decisions/0017-error-retry-backoff-and-cap.md)).
+
 ## 6. Glossary
 
 - **Action**: what a category does: `keep`, `archive`, `archive_unsubscribe`, `spam`.
@@ -621,6 +662,8 @@ the probabilities that matter are shown; the rest are ~0.
   becomes a `correction` sender rule.
 - **`downgraded_to_spam`**: historical column name. Means "unsubscribe skipped: unverified
   sender"; the email keeps its category.
+- **Error retry / gave up**: an email whose processing failed (`status = error`) is retried
+  with a backoff, and not after 8 failures ("gave up"; `inbox-jev retry-errors` resets that).
 - **Group / discussion list**: mail whose `List-Unsubscribe` would remove you from a list you
   belong to (see `_group_list`).
 - **Group author / relayed_by**: the person who wrote to a Google Group, and the group address,
@@ -649,7 +692,8 @@ Behaviour found while writing this spec, documented as it is today:
 
 - A sender rule whose category was removed from `categories.yaml` makes `decide` raise
   (`classification is required…`): every email from that sender is stored as `error` and retried
-  on each run until the rule is deleted. `unsubscribe-retry` ignores such a rule instead.
+  with the error backoff until it gives up (8 failures); after deleting the rule, run
+  `inbox-jev retry-errors`. `unsubscribe-retry` ignores such a rule instead.
 - Rule and allowlist decisions never add `Jev/Needs Reply` or tag labels. A sender that earns a
   keep auto rule (e.g. `important`, 3 answers ≥ 0.95 with little other keep probability), or a
   `correction` rule to `important`, stops getting `Jev/Needs Reply` and drops out of the digest's
