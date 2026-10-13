@@ -7,7 +7,7 @@
 #   archive_unsubscribe  remove from inbox and unsubscribe (only with dmarc=pass + List-Unsubscribe
 #                        and never through a group or discussion list; otherwise it keeps its
 #                        category and label and is only archived, never unsubscribed or spammed.
-#                        See README "Unsubscribe safety")
+#                        See docs/how-it-decides.md, section 3.3)
 #   spam                 move to Gmail Spam
 # min_confidence: below it, nothing destructive happens; the email stays in the inbox with the
 #   review label plus the suggested category label (unless archive_group_min_confidence below

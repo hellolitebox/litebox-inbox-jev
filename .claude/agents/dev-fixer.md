@@ -41,6 +41,13 @@ review threads (CodeRabbit or human) on the PR.
    it with the Skill tool for context, so the fix follows the guidance the reviewer applied.
 4. Don't expand scope. Don't refactor unrelated code. If you find a new bug outside the PR,
    mention it in your reply instead of fixing it.
+   When a fix changes decision logic (`categories.yaml`, `policy`, `triage`, `rules`,
+   `corrections`, `signals`, `unsubscribe`, classifier state, body extraction,
+   `gmail.has_written_to`, `config.py` constants/validators/`Settings` defaults, or the `cli.py`
+   commands `restore`, `reprocess`, `rules set`/`delete`, `unsubscribe-retry`), update
+   `docs/how-it-decides.md`, the affected `EX-NN` examples and `tests/test_spec_examples.py` (a
+   new rule or guard that changes an outcome gets a new `EX-NN`), and the ADR in `docs/decisions/` if the fix changes a design decision, in the same push (see
+   CLAUDE.md, "Decision logic docs").
 5. Make the checks green (use `$ROOT/.venv`, or a throwaway venv if `pyproject.toml` deps changed):
    `cd "$WT" && "$ROOT/.venv/bin/ruff" format src tests && "$ROOT/.venv/bin/ruff" check src tests && PYTHONPATH=src "$ROOT/.venv/bin/pytest" -q`.
 6. Stage files by explicit path (`git add <file> …`), commit with a message describing what was

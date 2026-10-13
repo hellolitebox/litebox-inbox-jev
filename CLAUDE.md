@@ -5,13 +5,14 @@ See [README.md](README.md) for what the tool does and how it is configured.
 ## Development workflow (mandatory for every change)
 
 `main` is production: the VPS deploys from it. The repo ruleset "main: PR + CI" only accepts
-changes through squash-merged pull requests with green `test` and `secrets` checks and no
-unresolved review threads; it requires no approving review. Every change, however small,
+changes through squash-merged pull requests with green `test`, `secrets` and `docker` checks
+and no unresolved review threads; it requires no approving review. Every change, however small,
 follows this loop:
 
 1. **Branch** off `main`: `feat/…`, `fix/…`, `chore/…`.
 2. **Implement** with tests. Before pushing, run `ruff format`, `ruff check` and `pytest` and
-   make them green.
+   make them green. A change to decision logic also updates the spec, its examples and their
+   tests in the same PR (see [Decision logic docs](#decision-logic-docs-mandatory)).
 3. **Open a PR** (`gh pr create`) whose body says what changed, why, and how it was verified.
 4. **QA ⇄ Dev loop**:
    - Spawn the `qa-reviewer` subagent with the PR number. It posts its review on the PR. Every
@@ -115,3 +116,32 @@ email bodies.
   email bodies.
 - Schema changes: the project uses `create_all` with no migrations yet. A change to an existing
   table needs a migration story (or an explicit note in the PR) for databases already deployed.
+
+## Decision logic docs (mandatory)
+[`docs/how-it-decides.md`](docs/how-it-decides.md) is the functional spec of how an email is
+decided, and [`docs/decisions/`](docs/decisions/README.md) holds the ADRs explaining why. Every
+change to decision logic must, **in the same PR**:
+
+- update `docs/how-it-decides.md` (flowcharts, tables, numbers, "Known gaps") so it matches the
+  code;
+- add or update the worked examples (`EX-NN`) it affects, and their tests in
+  `tests/test_spec_examples.py` (`test_exNN_…`, docstring citing `EX-NN`). A **new** rule or
+  guard that changes an outcome (what is labeled, archived, spammed, unsubscribed or learned) gets
+  a **new** `EX-NN` showing it. The test `test_doc_examples_match_tests` fails when an ID exists
+  on only one side, or when the doc's "**Test**:" name isn't the test's name;
+- add an ADR (`docs/decisions/NNNN-title.md`, plus the index) when the change is a design
+  decision: a new rule or guard, a changed threshold or default, a trade-off between safety and
+  coverage. Supersede an old ADR instead of rewriting it.
+
+Decision logic means: `categories.yaml` (categories, actions, thresholds, criteria, archive group,
+needs_reply, tags, auto_rule), `policy.py`, `triage.py` (pipeline, `previous_contact`, user edits,
+unsubscribe paths), `rules.py`, `corrections.py`, `signals.py`, `unsubscribe.py`, the classifier
+state and questions (`classifier.py`), body extraction (`gmail.extract_body`), the sent-mail
+search and its cache (`gmail.has_written_to`), `config.py` (`FREE_MAIL`, `PUBLIC_GROUP_HOSTS`,
+`group_domains` normalisation and rejection, the `act_categories` and
+`archive_group_reply_keep_probability` validators, and the `Settings` defaults `MODE`,
+`LOOKBACK`, `MAX_MESSAGES_PER_RUN`, `MAX_UNSUBSCRIBES_PER_RUN`, `BODY_CHARS`), and the `cli.py`
+commands that change decisions or stored state (`restore`, `reprocess`, `rules set` /
+`rules delete`, `unsubscribe-retry`). QA rejects a PR that changes any of these without the
+matching doc, example and test updates (or an explicit "no behaviour change" justification in
+the PR body, e.g. a pure refactor).
