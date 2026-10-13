@@ -449,6 +449,24 @@ def test_previous_contact_is_sent_to_jev(setup):
     assert "acme.com" not in gmail.written_queries  # allowlisted sender: no lookup at all
 
 
+def test_known_contact_reply_blocks_group_archive_end_to_end(setup):
+    # Same uncertain pitch with needs_reply from a sender I wrote to (stays) and a stranger
+    # (group-archived): triage passes previous_contact through to the policy.
+    ctx, gmail, account = setup
+    gmail.emails = {
+        "5": email("5", "Vendor <c@client.com>", "Follow-up"),
+        "6": email("6", "Stranger <s@pitch.biz>", "Pitch"),
+    }
+    for subject in ("Follow-up", "Pitch"):
+        c = make_classification("cold_outreach", 0.60, needs_reply=0.9)
+        c.probabilities = {"cold_outreach": 0.60, "marketing": 0.36, "important": 0.0}
+        ctx._classifier.answers[subject] = c
+    triage.run_account(ctx, account, Mode.ACT)
+    mods = {m[0]: m for m in gmail.modified}
+    assert "Label_Jev/Needs Reply" in mods["5"][1] and mods["5"][2] == []
+    assert mods["6"][2] == ["INBOX"]
+
+
 class ContactGmail:
     def __init__(self, written=(), fail=False):
         self.written, self.fail, self.queries = set(written), fail, []

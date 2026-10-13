@@ -9,6 +9,8 @@ from .config import Account, Action, CategoriesConfig, Mode
 from .signals import Signals
 
 ARCHIVE_ACTIONS = (Action.ARCHIVE, Action.ARCHIVE_UNSUBSCRIBE)
+# previous_contact values meaning I have written to the sender or their domain.
+KNOWN_CONTACT = ("wrote_to_sender", "wrote_to_their_domain")
 
 
 @dataclass
@@ -45,7 +47,10 @@ def decide(
     sig: Signals,
     classification: Classification | None = None,
     rule_category: str | None = None,
+    *,
+    previous_contact: str | None = None,
 ) -> Decision:
+    """`previous_contact` is triage.previous_contact's answer (None = unknown / not checked)."""
     if account.is_allowed(sig.sender):
         return _apply(cfg, Decision(category="important", confidence=1.0, source="allowlist"))
     if rule_category and rule_category in cfg.by_key:
@@ -74,7 +79,7 @@ def decide(
         _apply(cfg, decision)
         if unverified:
             decision.unsubscribe = False
-    elif _archive_group_confident(cfg, account, classification, threshold):
+    elif _archive_group_confident(cfg, account, classification, threshold, previous_contact):
         # Jev is sure the email gets archived, just not which archive category fits best
         # (e.g. notification 0.55 / newsletter 0.45). Archive it under the top category, but
         # never unsubscribe: that still needs the category's own confidence.
@@ -89,7 +94,11 @@ def decide(
 
 
 def _archive_group_confident(
-    cfg: CategoriesConfig, account: Account, classification: Classification, threshold: float
+    cfg: CategoriesConfig,
+    account: Account,
+    classification: Classification,
+    threshold: float,
+    previous_contact: str | None = None,
 ) -> bool:
     """True when the archive categories together reach `archive_group_min_confidence`.
 
@@ -100,14 +109,23 @@ def _archive_group_confident(
       includes an account-level min_confidence), so a stricter setting is never bypassed;
     - a member whose account-level min_confidence is above the floor doesn't count;
     - with `act_categories`, only categories the account acts on count;
-    - an email Jev thinks expects a reply (needs_reply >= threshold) stays in Review.
+    - an email Jev thinks expects a reply (needs_reply >= threshold) stays in Review. For a
+      sender I have never written to (or when that's unknown) this only applies when the keep
+      categories (important, action_required) together reach
+      `archive_group_reply_keep_probability`: every pitch "expects a reply", so the reply
+      signal only matters when the email might be from someone who actually needs one. For a
+      known contact (I wrote to the sender or their domain) any reply signal blocks the group.
     """
     floor = cfg.archive_group_min_confidence
     top = classification.category
     if floor is None or cfg.by_key[top].action not in ARCHIVE_ACTIONS:
         return False
     if classification.needs_reply >= cfg.needs_reply.threshold:
-        return False
+        if previous_contact in KNOWN_CONTACT:
+            return False
+        keep = cfg.keep_probability(classification.probabilities)
+        if keep >= cfg.archive_group_reply_keep_probability:
+            return False
     floor = max(floor, threshold)
     acts = account.act_categories
 

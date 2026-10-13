@@ -97,6 +97,11 @@ class CategoriesConfig(BaseModel):
     # Archive when the archive categories' probabilities add up to this, even if the top one
     # alone is below its min_confidence. None disables it.
     archive_group_min_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    # needs_reply only blocks a group archive when the keep categories (important,
+    # action_required) together reach this, unless I have written to the sender or their
+    # domain (then any reply signal blocks it). 0 = any reply signal blocks it. Must be at most
+    # 1 - archive_group_min_confidence: above that the keep categories can never reach it.
+    archive_group_reply_keep_probability: float = Field(default=0.05, ge=0.0, le=1.0)
 
     @model_validator(mode="after")
     def _validate(self) -> CategoriesConfig:
@@ -107,11 +112,30 @@ class CategoriesConfig(BaseModel):
             raise ValueError("a category with key 'important' is required (allowlist target)")
         if len(keys) < 2:
             raise ValueError("at least two categories are required")
+        floor = self.archive_group_min_confidence
+        # The group only fires when the archive categories reach the floor, so the keep
+        # categories are at most 1 - floor; a higher value would silently disable the veto.
+        # The epsilon tolerates float rounding (1 - 0.9 == 0.09999999999999998).
+        if floor is not None and self.archive_group_reply_keep_probability > 1 - floor + 1e-9:
+            raise ValueError(
+                "archive_group_reply_keep_probability must be at most "
+                "1 - archive_group_min_confidence"
+            )
         return self
 
     @cached_property
     def by_key(self) -> dict[str, Category]:
         return {c.key: c for c in self.categories}
+
+    def keep_probability(
+        self, probabilities: dict[str, float], exclude: str | None = None
+    ) -> float:
+        """Combined probability of the `action: keep` categories (unknown keys are skipped)."""
+        return sum(
+            p
+            for key, p in probabilities.items()
+            if key != exclude and key in self.by_key and self.by_key[key].action == Action.KEEP
+        )
 
     def all_labels(self) -> list[str]:
         labels = [c.label for c in self.categories] + [t.label for t in self.tags]

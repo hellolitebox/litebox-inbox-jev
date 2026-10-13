@@ -4,7 +4,7 @@ from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from inbox_jev import cli
-from inbox_jev.config import Account, Settings
+from inbox_jev.config import Account, CategoriesConfig, Settings
 
 
 def account(text):
@@ -38,3 +38,21 @@ def test_cli_rejects_invalid_lookback_before_running():
     result = CliRunner().invoke(cli.app, ["run", "--lookback", "30"])
     assert result.exit_code == 2
     assert "invalid lookback" in result.output
+
+
+def categories(cfg, **update):
+    return CategoriesConfig.model_validate({**cfg.model_dump(), **update})
+
+
+def test_reply_keep_probability_above_group_ceiling_is_rejected(cfg):
+    with pytest.raises(ValidationError, match="at most 1 - archive_group_min_confidence"):
+        categories(cfg, archive_group_min_confidence=0.9, archive_group_reply_keep_probability=0.2)
+
+
+@pytest.mark.parametrize(("floor", "keep"), [(0.9, 0.1), (0.9, 0.05), (0.7, 0.3), (None, 0.5)])
+def test_reply_keep_probability_within_ceiling_is_accepted(cfg, floor, keep):
+    # 0.1 == 1 - 0.9 only up to float rounding: the boundary itself must be accepted.
+    c = categories(
+        cfg, archive_group_min_confidence=floor, archive_group_reply_keep_probability=keep
+    )
+    assert c.archive_group_reply_keep_probability == keep

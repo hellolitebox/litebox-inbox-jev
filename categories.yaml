@@ -86,6 +86,11 @@ categories:
 # probability, even if Jev's top category alone is below its min_confidence: it is sure the email
 # goes away, just not which label fits best. Never unsubscribes or spams. Remove to disable.
 archive_group_min_confidence: 0.90
+# An email Jev thinks expects a reply skips the rule above when I have written to the sender or
+# their domain; otherwise only when important + action_required together reach this: every pitch
+# "expects a reply". 0 = always skip. At most 1 - archive_group_min_confidence (0.10 here):
+# above that it could never be reached and the check is rejected at load.
+archive_group_reply_keep_probability: 0.05
 
 # Extra yes/no questions. Additive: a label is applied when probability >= threshold,
 # on top of the category. Remove the list or leave it empty to skip.

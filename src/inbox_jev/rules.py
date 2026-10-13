@@ -48,11 +48,7 @@ def record_auto(
     Only touches automatic rules: manual and correction rules are never changed here.
     """
     is_keep = _is_keep(cfg, decision.category)
-    other_keep = sum(
-        p
-        for key, p in classification.probabilities.items()
-        if key != decision.category and _is_keep(cfg, key)
-    )
+    other_keep = cfg.keep_probability(classification.probabilities, exclude=decision.category)
     keep_signal = other_keep >= cfg.auto_rule.max_keep_probability
     rule = session.scalar(
         select(SenderRule).where(SenderRule.account == account, SenderRule.sender_key == sender)

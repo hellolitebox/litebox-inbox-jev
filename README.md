@@ -41,7 +41,11 @@ Everything is recorded in a database (SQLite by default) so it can be audited an
      (including an account-level `min_confidence`); a category whose account-level
      `min_confidence` is above that floor doesn't count toward the sum; with `act_categories`,
      only the archive categories listed there count; and an email Jev thinks expects a reply
-     (`needs_reply` at or above its threshold) stays in Review with `Jev/Needs Reply`.
+     (`needs_reply` at or above its threshold) stays in Review with `Jev/Needs Reply` when I
+     have written to the sender or their domain, or when the keep categories (`important`,
+     `action_required`) together reach `archive_group_reply_keep_probability` (0.05, at most
+     `1 - archive_group_min_confidence`). Otherwise the reply signal is ignored for the group:
+     every pitch from a stranger "expects a reply".
    - Categories with `action: keep` other than `important` (by default `action_required`:
      automated emails that need you to approve, pay, verify or fix something) stay in the inbox
      and get their own section in the digest.

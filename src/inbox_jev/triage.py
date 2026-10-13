@@ -199,7 +199,14 @@ def process(
         classification = ctx.classifier.classify(
             build_state(email, account.email, ctx.settings.body_chars, contact)
         )
-    decision = decide(ctx.cfg, account, sig, classification, rule.category if rule else None)
+    decision = decide(
+        ctx.cfg,
+        account,
+        sig,
+        classification,
+        rule.category if rule else None,
+        previous_contact=contact,
+    )
     actions = plan(ctx.cfg, decision, mode, account.act_categories)
 
     msg = _upsert_message(session, account.email, email)

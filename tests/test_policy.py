@@ -248,3 +248,65 @@ def test_archive_group_vetoed_by_needs_reply(cfg, account):
     d = decide(cfg, account, make_signals(), c)
     assert d.low_confidence and not d.archive and not d.archive_group
     assert {"Jev/Review", "Jev/Needs Reply"} <= set(d.add_labels)
+
+
+def test_needs_reply_does_not_block_group_for_pitch_with_no_keep_signal(cfg, account):
+    # Mass "book your free consultation" email: every pitch expects a reply, but nothing
+    # suggests a real person who needs one, so the group archive still applies.
+    c = probs("cold_outreach", 0.67, marketing=0.31, newsletter=0.01, important=0.0)
+    c.needs_reply = 0.79
+    d = decide(cfg, account, make_signals(), c)
+    assert d.archive and d.archive_group and not d.low_confidence and not d.unsubscribe
+    assert "Jev/Needs Reply" not in d.add_labels and "Jev/Review" not in d.add_labels
+
+
+@pytest.mark.parametrize(
+    "keep", [{"important": 0.05}, {"important": 0.03, "action_required": 0.02}]
+)
+def test_needs_reply_blocks_group_at_keep_threshold(cfg, account, keep):
+    c = probs("cold_outreach", 0.62, marketing=0.33, **keep)
+    c.needs_reply = 0.79
+    d = decide(cfg, account, make_signals(), c)
+    assert d.low_confidence and not d.archive
+    assert {"Jev/Review", "Jev/Needs Reply"} <= set(d.add_labels)
+
+
+def test_needs_reply_just_below_keep_threshold_archives(cfg, account):
+    c = probs("cold_outreach", 0.62, marketing=0.34, important=0.04)
+    c.needs_reply = 0.79
+    d = decide(cfg, account, make_signals(), c)
+    assert d.archive and d.archive_group and not d.low_confidence
+    assert "Jev/Needs Reply" not in d.add_labels
+
+
+@pytest.mark.parametrize("contact", ["wrote_to_sender", "wrote_to_their_domain"])
+def test_needs_reply_blocks_group_for_known_contact_without_keep_signal(cfg, account, contact):
+    # A vendor I emailed replies with a sales-flavoured follow-up: stays in Review even though
+    # the keep categories are below archive_group_reply_keep_probability.
+    c = probs("cold_outreach", 0.60, marketing=0.36, important=0.0)
+    c.needs_reply = 0.90
+    d = decide(cfg, account, make_signals(), c, previous_contact=contact)
+    assert d.low_confidence and not d.archive and not d.archive_group
+    assert {"Jev/Review", "Jev/Needs Reply"} <= set(d.add_labels)
+
+
+@pytest.mark.parametrize("contact", ["never", None])
+def test_needs_reply_relaxed_for_unknown_or_new_contact(cfg, account, contact):
+    c = probs("cold_outreach", 0.60, marketing=0.36, important=0.0)
+    c.needs_reply = 0.90
+    d = decide(cfg, account, make_signals(), c, previous_contact=contact)
+    assert d.archive and d.archive_group and not d.low_confidence
+
+
+def test_known_contact_without_reply_signal_still_group_archives(cfg, account):
+    c = probs("notification", 0.55, newsletter=0.42)
+    d = decide(cfg, account, make_signals(), c, previous_contact="wrote_to_sender")
+    assert d.archive and d.archive_group
+
+
+def test_needs_reply_keep_threshold_zero_restores_strict_veto(cfg, account):
+    cfg = cfg.model_copy(update={"archive_group_reply_keep_probability": 0.0})
+    c = probs("cold_outreach", 0.67, marketing=0.33, important=0.0)
+    c.needs_reply = 0.79
+    d = decide(cfg, account, make_signals(), c)
+    assert d.low_confidence and not d.archive
