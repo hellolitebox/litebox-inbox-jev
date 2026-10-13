@@ -10,9 +10,16 @@ and no unresolved review threads; it requires no approving review. Every change,
 follows this loop:
 
 1. **Branch** off `main`: `feat/…`, `fix/…`, `chore/…`.
-2. **Implement** with tests. Before pushing, run `ruff format`, `ruff check` and `pytest` and
-   make them green. A change to decision logic also updates the spec, its examples and their
-   tests in the same PR (see [Decision logic docs](#decision-logic-docs-mandatory)).
+2. **Implement** with tests. Before writing code, load the unconditional Python skills listed
+   in `.claude/agents/qa-reviewer.md` ("Python skills") with the Skill tool, even when the
+   change has no Python, plus a conditional one when it applies (async code, Temporal), and
+   apply them; the repo's own conventions win over a skill's generic advice. The PR body gets a
+   `Skills applied:` line naming the skills and any concrete change they drove; if a skill isn't
+   available, say so on that line and continue. Whoever implements (this session or a spawned
+   agent) does this; a spawned agent needs the Skill tool. Before pushing, run `ruff format`,
+   `ruff check` and `pytest` and make them green. A change to decision logic also updates the
+   spec, its examples and their tests in the same PR (see
+   [Decision logic docs](#decision-logic-docs-mandatory)).
 3. **Open a PR** (`gh pr create`) whose body says what changed, why, and how it was verified.
 4. **QA ⇄ Dev loop**:
    - Spawn the `qa-reviewer` subagent with the PR number. It posts its review on the PR. Every

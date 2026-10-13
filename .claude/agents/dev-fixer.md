@@ -37,8 +37,14 @@ review threads (CodeRabbit or human) on the PR.
      finding is a bug, add or update a test that fails without the fix.
    - **Dispute it**: only when it is genuinely wrong or out of scope. Give concrete reasoning
      (code path, input, why it can't happen). Don't dispute to avoid work.
-   Nits are optional. When a finding cites a skill (e.g. `[python-type-safety]`), you may load
-   it with the Skill tool for context, so the fix follows the guidance the reviewer applied.
+   Nits are optional.
+   Before changing code, load the unconditional Python skills listed in
+   `.claude/agents/qa-reviewer.md` ("Python skills") with the Skill tool, every round, plus a
+   conditional one when your fix touches what it covers or a finding cites it, and apply them to
+   your fixes (repo conventions win over a skill's generic advice). A skill a finding cites
+   (e.g. `[python-type-safety]`) is the one to read most closely. List the skills you loaded on
+   the reply's `Skills:` line, conditional ones you didn't load as `n/a`; if a skill isn't
+   available, say so there and continue.
 4. Don't expand scope. Don't refactor unrelated code. If you find a new bug outside the PR,
    mention it in your reply instead of fixing it.
    When a fix changes decision logic (`categories.yaml`, `policy`, `triage`, `rules`,
@@ -58,6 +64,7 @@ review threads (CodeRabbit or human) on the PR.
 
 ```
 ## Dev reply — round <r>
+Skills: <skills loaded> (unavailable: <none | list>; n/a: <none | list>)
 1. ✅ fixed in <sha> — <what changed>
 2. ↩️ disputed — <reasoning>
 3. ⏭ nit skipped — <reason>
