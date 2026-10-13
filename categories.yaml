@@ -11,6 +11,8 @@
 # min_confidence: below it, nothing destructive happens; the email stays in the inbox with the
 #   review label plus the suggested category label (unless archive_group_min_confidence below
 #   applies).
+# unsubscribe_known_contacts (archive_unsubscribe only, default true): false archives but never
+#   unsubscribes when I have written to the sender or their domain.
 categories:
   - key: important
     label: Jev/Important
@@ -73,8 +75,13 @@ categories:
       to look personal: agencies, freelancers, lead-gen, recruiting or dev-shop offers, "quick
       question" and follow-up sequences, meeting or podcast invitations, event or sponsorship
       pitches, SEO/link-building offers. Usually from someone I have never written to.
-    action: archive
-    min_confidence: 0.80
+    # Sequence tools (Instantly, Smartlead, ...) send RFC 8058 List-Unsubscribe headers and stop
+    # the sequence on unsubscribe. Same safeguards as marketing; 0.90 like any unsubscribe.
+    # A "pitch" from someone I already wrote to (or their company) is where Jev is most likely
+    # wrong, and an opt-out there can cover all of that company's mail: archive only.
+    action: archive_unsubscribe
+    min_confidence: 0.90
+    unsubscribe_known_contacts: false
 
   - key: spam
     label: Jev/Spam

@@ -64,6 +64,9 @@ class Category(BaseModel):
     criteria: str
     action: Action
     min_confidence: float = 0.0
+    # archive_unsubscribe only: False never unsubscribes when I wrote to the sender or their
+    # domain (previous_contact); the email is still archived. Applies on the Jev and rule paths.
+    unsubscribe_known_contacts: bool = True
 
 
 class Tag(BaseModel):

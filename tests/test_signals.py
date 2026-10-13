@@ -50,3 +50,11 @@ def test_one_click_requires_https_url():
     )
     assert not sig.one_click
     assert sig.list_key == "b.com"
+
+
+def test_extract_list_post_marks_discussion_list():
+    base = {"from": ["a@lists.example.org"], "list-unsubscribe": ["<mailto:x-leave@l.org>"]}
+    assert not extract(base).is_discussion_list
+    assert extract({**base, "list-post": ["<mailto:x@l.org>"]}).is_discussion_list
+    assert extract({**base, "list-post": ["NO"]}).is_discussion_list  # announce-only list
+    assert not extract({**base, "list-post": ["  "]}).is_discussion_list

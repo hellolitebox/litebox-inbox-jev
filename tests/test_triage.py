@@ -3,7 +3,7 @@
 import pytest
 from conftest import GMAIL_PASS, make_classification
 
-from inbox_jev import digest, triage
+from inbox_jev import digest, rules, triage
 from inbox_jev.config import Mode, Settings
 from inbox_jev.db import Message, SenderRule, Unsubscribe, make_session_factory, now
 from inbox_jev.gmail import Email
@@ -524,3 +524,111 @@ def test_digest_does_not_repeat_kept_emails_in_needs_reply(setup):
     assert text.count("Approve payment") == 1
     reply = text.split("Piden respuesta")[1]
     assert "Can we meet?" in reply and "Approve payment" not in reply
+
+
+def _pitch(id, unsubscribe="<mailto:u@agency.io>", **headers):
+    if unsubscribe:
+        headers["list_unsubscribe"] = unsubscribe
+    return email(id, "Bob <bob@agency.io>", f"Pitch {id}", **headers)
+
+
+def test_auto_rule_then_reply_to_sender_never_unsubscribes(setup):
+    # Bob earns an auto rule while a stranger (label mode, so nothing is unsubscribed yet).
+    # Then I reply to him: the rule still archives his next pitch but never unsubscribes.
+    ctx, gmail, account = setup
+    hits = ctx.cfg.auto_rule.hits
+    gmail.emails = {str(i): _pitch(str(i)) for i in range(hits)}
+    for i in range(hits):
+        ctx._classifier.answers[f"Pitch {i}"] = make_classification("cold_outreach", 0.97)
+    triage.run_account(ctx, account, Mode.LABEL)
+    with ctx.sessions() as s:
+        rule = s.query(SenderRule).filter_by(sender_key="bob@agency.io").one()
+        assert (rule.category, rule.source, rule.active) == ("cold_outreach", "auto", True)
+
+    gmail.written = frozenset({"bob@agency.io"})
+    gmail.emails["9"] = _pitch("9")
+    calls = ctx._classifier.calls
+    triage.run_account(ctx, account, Mode.ACT)
+    assert ctx._classifier.calls == calls  # the rule decided (the label-mode ones are redone too)
+    assert all(m[2] == ["INBOX"] for m in gmail.modified[-(hits + 1) :])  # archived
+    assert gmail.sent == []
+    with ctx.sessions() as s:
+        assert s.query(Unsubscribe).count() == 0
+
+
+@pytest.mark.parametrize("act_categories", [None, ["cold_outreach"]])
+def test_manual_domain_rule_on_known_domain_never_unsubscribes(setup, act_categories):
+    ctx, gmail, account = setup
+    account.act_categories = act_categories  # an explicit list must still run the search
+    with ctx.sessions() as s:
+        rules.set_rule(s, account.email, "@agency.io", "cold_outreach", "manual")
+        s.commit()
+    gmail.written = frozenset({"agency.io"})  # wrote_to_their_domain
+    gmail.emails = {"9": _pitch("9")}
+    triage.run_account(ctx, account, Mode.ACT)
+    assert gmail.written_queries == ["bob@agency.io", "agency.io"]
+    assert gmail.modified[-1][2] == ["INBOX"]
+    assert gmail.sent == []
+
+
+def test_rule_path_still_unsubscribes_strangers(setup):
+    ctx, gmail, account = setup
+    with ctx.sessions() as s:
+        rules.set_rule(s, account.email, "@agency.io", "cold_outreach", "manual")
+        s.commit()
+    gmail.emails = {"9": _pitch("9")}
+    triage.run_account(ctx, account, Mode.ACT)
+    assert gmail.written_queries == ["bob@agency.io", "agency.io"]  # "never"
+    assert gmail.sent == ["u@agency.io"]
+
+
+@pytest.mark.parametrize(
+    ("category", "headers", "settled"),
+    [
+        ("marketing", {}, False),  # unsubscribes known contacts too
+        ("newsletter", {}, False),  # never unsubscribes
+        ("cold_outreach", {"unsubscribe": None}, False),  # unverified: no header
+        ("cold_outreach", {"list_post": "<mailto:g@groups.io>"}, False),  # discussion list
+        ("cold_outreach", {}, True),  # list already unsubscribed
+    ],
+)
+def test_rule_hit_that_cannot_unsubscribe_skips_contact_check(setup, category, headers, settled):
+    ctx, gmail, account = setup
+    with ctx.sessions() as s:
+        rules.set_rule(s, account.email, "bob@agency.io", category, "manual")
+        if settled:
+            s.add(
+                Unsubscribe(
+                    account=account.email,
+                    list_key="agency.io",
+                    sender="bob@agency.io",
+                    gmail_id="0",
+                    method="mailto",
+                    status="ok",
+                )
+            )
+        s.commit()
+    gmail.emails = {"9": _pitch("9", **headers)}
+    triage.run_account(ctx, account, Mode.ACT)
+    assert gmail.written_queries == []
+    assert gmail.modified[-1][2] == ["INBOX"]
+
+
+@pytest.mark.parametrize(
+    ("mode", "act_categories"),
+    [
+        (Mode.LABEL, None),
+        (Mode.DRY_RUN, None),
+        (Mode.ACT, ["marketing"]),  # cold_outreach not acted on
+    ],
+)
+def test_rule_hit_that_will_not_act_skips_contact_check(setup, mode, act_categories):
+    ctx, gmail, account = setup
+    account.act_categories = act_categories
+    with ctx.sessions() as s:
+        rules.set_rule(s, account.email, "bob@agency.io", "cold_outreach", "manual")
+        s.commit()
+    gmail.emails = {"9": _pitch("9")}
+    triage.run_account(ctx, account, mode)
+    assert gmail.written_queries == []  # no has_written_to calls
+    assert gmail.sent == []

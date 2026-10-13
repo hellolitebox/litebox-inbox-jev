@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 from .classifier import Classification
 from .config import Account, Action, CategoriesConfig, Mode
@@ -28,6 +29,9 @@ class Decision:
     unsubscribe: bool = False
     # Archived because the archive categories together were confident, not the top one alone.
     archive_group: bool = False
+    # Unsubscribe skipped because I wrote to the sender or their domain (the category's
+    # unsubscribe_known_contacts is false). Applies on the Jev and rule paths.
+    known_contact_kept: bool = False
 
 
 @dataclass
@@ -54,7 +58,17 @@ def decide(
     if account.is_allowed(sig.sender):
         return _apply(cfg, Decision(category="important", confidence=1.0, source="allowlist"))
     if rule_category and rule_category in cfg.by_key:
-        return _apply(cfg, Decision(category=rule_category, confidence=1.0, source="rule"))
+        decision = _apply(cfg, Decision(category=rule_category, confidence=1.0, source="rule"))
+        # A rule skips Jev, not the sender checks: manual and correction rules can point at
+        # senders that never proved who they are.
+        if decision.unsubscribe and not _verified(sig):
+            decision.unsubscribe, decision.downgraded_to_spam = False, True
+        if _group_list(sig, account):
+            decision.unsubscribe = False
+        if decision.unsubscribe and previous_contact in KNOWN_CONTACT:
+            decision.known_contact_kept = spares_known_contacts(cfg, rule_category)
+            decision.unsubscribe = not decision.known_contact_kept
+        return decision
     if classification is None:
         raise ValueError("classification is required when no allowlist entry or rule matches")
 
@@ -69,15 +83,15 @@ def decide(
 
     # Never unsubscribe from something that can't prove who it is: it confirms the address.
     # The email keeps its category (unverified isn't fraud) and is only archived, never spammed.
-    unverified = cfg.by_key[category].action == Action.ARCHIVE_UNSUBSCRIBE and not (
-        sig.dmarc_pass and sig.has_unsubscribe
-    )
+    unverified = cfg.by_key[category].action == Action.ARCHIVE_UNSUBSCRIBE and not _verified(sig)
     decision.downgraded_to_spam = unverified
 
     threshold = account.min_confidence.get(category, cfg.by_key[category].min_confidence)
     if decision.confidence >= threshold:
         _apply(cfg, decision)
-        if unverified:
+        if decision.unsubscribe and previous_contact in KNOWN_CONTACT:
+            decision.known_contact_kept = spares_known_contacts(cfg, category)
+        if unverified or decision.known_contact_kept or _group_list(sig, account):
             decision.unsubscribe = False
     elif _archive_group_confident(cfg, account, classification, threshold, previous_contact):
         # Jev is sure the email gets archived, just not which archive category fits best
@@ -91,6 +105,58 @@ def decide(
         decision.add_labels += [cfg.review_label, cfg.by_key[category].label]
 
     return _add_flags(cfg, classification, decision)
+
+
+def spares_known_contacts(cfg: CategoriesConfig, category: str) -> bool:
+    """The category unsubscribes, but not from senders I wrote to (unsubscribe_known_contacts)."""
+    c = cfg.by_key.get(category)
+    return (
+        c is not None
+        and c.action == Action.ARCHIVE_UNSUBSCRIBE
+        and not c.unsubscribe_known_contacts
+    )
+
+
+def can_unsubscribe(sig: Signals, account: Account) -> bool:
+    """The sender checks every unsubscribe needs: verified and not a group or own list."""
+    return _verified(sig) and not _group_list(sig, account)
+
+
+def _verified(sig: Signals) -> bool:
+    """Safe to unsubscribe: the sender passed DMARC and offers List-Unsubscribe."""
+    return sig.dmarc_pass and sig.has_unsubscribe
+
+
+GROUP_HOSTS = ("googlegroups.com", "groups.google.com")
+
+
+def _target_host(uri: str) -> str:
+    """Host of an https unsubscribe URL, or domain of a mailto address (lowercased)."""
+    if uri.lower().startswith("mailto:"):
+        address = uri[len("mailto:") :].split("?", 1)[0]
+        return address.rsplit("@", 1)[-1].strip().lower()
+    return (urlparse(uri).hostname or "").lower()
+
+
+def _on_domain(host: str, domain: str) -> bool:
+    return host == domain or host.endswith("." + domain)
+
+
+def _group_list(sig: Signals, account: Account) -> bool:
+    """Mail relayed by a discussion list or group (e.g. a pitch posted to hello@ or a community).
+
+    Its List-Unsubscribe removes *me* from the group, not the original sender from anything,
+    so it is never used: anything with a List-Post header (Google Groups, Mailman, groups.io,
+    LISTSERV, Discourse), Google Groups unsubscribe targets, and lists or senders on my domain.
+    """
+    if sig.is_discussion_list:
+        return True
+    own = account.email.lower().rsplit("@", 1)[-1]
+    hosts = [_target_host(u) for u in (*sig.unsubscribe_https, *sig.unsubscribe_mailto)]
+    if any(_on_domain(h, g) for h in hosts for g in GROUP_HOSTS):
+        return True
+    names = [sig.sender_domain, (sig.list_id or "").lower()]
+    return any(_on_domain(n, own) for n in names if n)
 
 
 def _archive_group_confident(

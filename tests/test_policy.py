@@ -1,8 +1,9 @@
 import pytest
-from conftest import make_classification, make_signals
+from conftest import GMAIL_PASS, make_classification, make_signals
 
 from inbox_jev.config import Mode
 from inbox_jev.policy import decide, plan, rule_keys
+from inbox_jev.signals import extract
 
 
 def test_allowlist_skips_everything(cfg, account):
@@ -148,14 +149,38 @@ def test_plan_act_categories_limits_actions_to_listed_categories(cfg, account):
     assert plan(cfg, d, Mode.LABEL, act_categories=["marketing"]).remove_labels == []
 
 
-def test_cold_outreach_is_archived_not_spammed(cfg, account):
-    d = decide(cfg, account, make_signals(), make_classification("cold_outreach", 0.85))
-    assert not d.low_confidence and d.archive and not d.spam and not d.unsubscribe
+def test_cold_outreach_is_archived_and_unsubscribed_not_spammed(cfg, account):
+    d = decide(cfg, account, make_signals(), make_classification("cold_outreach", 0.95))
+    assert not d.low_confidence and d.archive and d.unsubscribe and not d.spam
     assert "Jev/Outreach" in d.add_labels
     act = plan(cfg, d, Mode.ACT, act_categories=["cold_outreach"])
-    assert act.remove_labels == ["INBOX"] and "SPAM" not in act.add_labels
-    low = decide(cfg, account, make_signals(), make_classification("cold_outreach", 0.75))
-    assert low.low_confidence and not low.archive
+    assert act.remove_labels == ["INBOX"] and "SPAM" not in act.add_labels and act.unsubscribe
+    low = decide(cfg, account, make_signals(), make_classification("cold_outreach", 0.85))
+    assert low.low_confidence and not (low.archive or low.unsubscribe)
+
+
+def test_cold_outreach_between_thresholds_is_archived_by_group_without_unsubscribe(cfg, account):
+    c = make_classification("cold_outreach", 0.85)
+    c.probabilities = {"cold_outreach": 0.85, "marketing": 0.14, "important": 0.01}
+    d = decide(cfg, account, make_signals(), c)
+    assert d.archive and d.archive_group and not d.unsubscribe
+
+
+@pytest.mark.parametrize(
+    "signals_kw", [{"dmarc_pass": False}, {"unsubscribe_https": [], "unsubscribe_mailto": []}]
+)
+def test_unverified_cold_outreach_is_archived_without_unsubscribe(cfg, account, signals_kw):
+    d = decide(cfg, account, make_signals(**signals_kw), make_classification("cold_outreach", 1.0))
+    assert d.archive and not d.unsubscribe and not d.spam and d.downgraded_to_spam
+
+
+@pytest.mark.parametrize("category", ["cold_outreach", "marketing"])
+def test_rule_never_unsubscribes_from_unverified_sender(cfg, account, category):
+    unverified = make_signals(dmarc_pass=False)
+    d = decide(cfg, account, unverified, rule_category=category)
+    assert (d.source, d.archive, d.unsubscribe, d.downgraded_to_spam) == ("rule", True, False, True)
+    verified = decide(cfg, account, make_signals(), rule_category=category)
+    assert verified.unsubscribe and not verified.downgraded_to_spam
 
 
 def probs(category, confidence, **others):
@@ -310,3 +335,144 @@ def test_needs_reply_keep_threshold_zero_restores_strict_veto(cfg, account):
     c.needs_reply = 0.79
     d = decide(cfg, account, make_signals(), c)
     assert d.low_confidence and not d.archive
+
+
+GROUP_UNSUB = ["mailto:googlegroups-manage+1+unsubscribe@googlegroups.com"]
+
+
+@pytest.mark.parametrize(
+    "signals_kw",
+    [
+        # A pitch relayed by my own Google Group (hello@acme.com): unsubscribing leaves the group.
+        dict(
+            sender="hello@acme.com",
+            sender_domain="acme.com",
+            list_id="hello.acme.com",
+            unsubscribe_https=["https://groups.google.com/a/acme.com/group/hello/subscribe"],
+            unsubscribe_mailto=GROUP_UNSUB,
+            one_click=False,
+        ),
+        # An external Google Group I belong to.
+        dict(list_id="founders.example.org", unsubscribe_https=[], unsubscribe_mailto=GROUP_UNSUB),
+        # A list on my own domain with a regular ESP unsubscribe.
+        dict(list_id="news.acme.com"),
+    ],
+)
+@pytest.mark.parametrize("category", ["cold_outreach", "marketing"])
+def test_never_unsubscribes_from_groups_or_own_lists(cfg, account, signals_kw, category):
+    account.allow_domains = []  # the fixture allowlists acme.com, which would skip Jev entirely
+    sig = make_signals(**signals_kw)
+    d = decide(cfg, account, sig, make_classification(category, 0.99))
+    assert d.archive and not d.unsubscribe
+    rule = decide(cfg, account, sig, rule_category=category)
+    assert rule.archive and not rule.unsubscribe
+
+
+def _extract(sender, extra):
+    headers = {"from": [sender], "authentication-results": [GMAIL_PASS]}
+    headers.update({k: [v] for k, v in extra.items()})
+    return extract(headers)
+
+
+# Real header shapes; both lists rewrite From to the list domain, so DMARC passes.
+DISCUSSION_LISTS = {
+    "groups.io": (
+        "Jane via founders <founders@groups.io>",
+        {
+            "list-id": "<founders.groups.io>",
+            "list-post": "<mailto:founders@groups.io>",
+            "list-unsubscribe": "<https://groups.io/g/founders/leave/123/abc>",
+            "list-unsubscribe-post": "List-Unsubscribe=One-Click",
+        },
+    ),
+    "mailman": (
+        "Jane via Founders <founders@lists.example.org>",
+        {
+            "list-id": "Founders <founders.lists.example.org>",
+            "list-post": "<mailto:founders@lists.example.org>",
+            "list-unsubscribe": "<mailto:founders-leave@lists.example.org>",
+        },
+    ),
+}
+
+
+@pytest.mark.parametrize("software", sorted(DISCUSSION_LISTS))
+@pytest.mark.parametrize("category", ["cold_outreach", "marketing"])
+def test_never_unsubscribes_from_discussion_lists(cfg, account, software, category):
+    sig = _extract(*DISCUSSION_LISTS[software])
+    assert sig.is_discussion_list and sig.dmarc_pass and sig.has_unsubscribe
+    d = decide(cfg, account, sig, make_classification(category, 0.99))
+    assert d.archive and not d.unsubscribe
+    rule = decide(cfg, account, sig, rule_category=category)
+    assert rule.archive and not rule.unsubscribe
+
+
+def test_sequence_tool_headers_still_unsubscribe(cfg, account):
+    # Instantly / Smartlead style: one-click List-Unsubscribe, no List-Post.
+    sig = _extract(
+        "Sam <sam@trygameplan.co>",
+        {
+            "list-unsubscribe": "<https://track.instantly.ai/unsub/abc>, <mailto:u@inst.ly>",
+            "list-unsubscribe-post": "List-Unsubscribe=One-Click",
+        },
+    )
+    assert not sig.is_discussion_list
+    d = decide(cfg, account, sig, make_classification("cold_outreach", 0.95))
+    assert d.archive and d.unsubscribe
+    assert decide(cfg, account, sig, rule_category="cold_outreach").unsubscribe
+
+
+@pytest.mark.parametrize(
+    "uri, group",
+    [
+        ("https://groups.google.com/a/x.org/group/y/subscribe", True),
+        ("https://sub.googlegroups.com/u", True),
+        ("mailto:googlegroups-manage+1+unsubscribe@googlegroups.com?subject=x", True),
+        ("https://shop.com/u?ref=googlegroups.com", False),
+        ("https://notgooglegroups.com/u", False),
+        ("mailto:googlegroups.com@shop.com", False),
+    ],
+)
+def test_group_host_matches_parsed_host(cfg, account, uri, group):
+    key = "unsubscribe_mailto" if uri.startswith("mailto:") else "unsubscribe_https"
+    sig = make_signals(**{"unsubscribe_https": [], "unsubscribe_mailto": [], key: [uri]})
+    d = decide(cfg, account, sig, make_classification("marketing", 0.99))
+    assert d.unsubscribe is not group
+
+
+@pytest.mark.parametrize("contact", ["wrote_to_sender", "wrote_to_their_domain"])
+def test_cold_outreach_from_known_contact_is_archived_without_unsubscribe(cfg, account, contact):
+    c = make_classification("cold_outreach", 0.99)
+    d = decide(cfg, account, make_signals(), c, previous_contact=contact)
+    assert d.archive and not d.unsubscribe and d.known_contact_kept
+    assert plan(cfg, d, Mode.ACT).remove_labels == ["INBOX"]
+    # Marketing keeps unsubscribing (unsubscribe_known_contacts defaults to true).
+    mkt = make_classification("marketing", 0.99)
+    m = decide(cfg, account, make_signals(), mkt, previous_contact=contact)
+    assert m.unsubscribe and not m.known_contact_kept
+
+
+@pytest.mark.parametrize("contact", ["never", None])
+def test_cold_outreach_from_stranger_still_unsubscribes(cfg, account, contact):
+    c = make_classification("cold_outreach", 0.99)
+    d = decide(cfg, account, make_signals(), c, previous_contact=contact)
+    assert d.unsubscribe and not d.known_contact_kept
+
+
+@pytest.mark.parametrize("contact", ["wrote_to_sender", "wrote_to_their_domain"])
+def test_rule_path_spares_known_contacts(cfg, account, contact):
+    d = decide(
+        cfg, account, make_signals(), rule_category="cold_outreach", previous_contact=contact
+    )
+    assert d.archive and not d.unsubscribe and d.known_contact_kept
+    # Marketing keeps unsubscribing (unsubscribe_known_contacts defaults to true).
+    m = decide(cfg, account, make_signals(), rule_category="marketing", previous_contact=contact)
+    assert m.unsubscribe and not m.known_contact_kept
+
+
+@pytest.mark.parametrize("contact", ["never", None])
+def test_rule_path_still_unsubscribes_strangers(cfg, account, contact):
+    d = decide(
+        cfg, account, make_signals(), rule_category="cold_outreach", previous_contact=contact
+    )
+    assert d.unsubscribe and not d.known_contact_kept

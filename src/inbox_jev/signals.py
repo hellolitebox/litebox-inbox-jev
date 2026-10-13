@@ -19,6 +19,9 @@ class Signals:
     unsubscribe_mailto: list[str] = field(default_factory=list)
     one_click: bool = False
     dmarc_pass: bool = False
+    # RFC 2369 List-Post: set by discussion-list software (Google Groups, Mailman, groups.io,
+    # LISTSERV, Discourse), not by ESPs or sequence tools. Its List-Unsubscribe leaves the list.
+    is_discussion_list: bool = False
 
     @property
     def has_unsubscribe(self) -> bool:
@@ -83,4 +86,5 @@ def extract(headers: dict[str, list[str]]) -> Signals:
         unsubscribe_mailto=mailto,
         one_click="list-unsubscribe=one-click" in post and bool(https),
         dmarc_pass=dmarc_passed(headers.get("authentication-results", [])),
+        is_discussion_list=bool((first("list-post") or "").strip()),
     )

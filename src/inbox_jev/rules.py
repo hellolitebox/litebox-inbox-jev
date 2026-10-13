@@ -63,12 +63,16 @@ def record_auto(
         and not _is_keep(cfg, rule.category)
     ):
         rule.hits = 0
-    # Unverified marketing never earns a rule: a rule skips the DMARC/List-Unsubscribe check.
-    # A group archive never does either: the top category alone was below its threshold.
+    # Unverified senders (downgraded_to_spam) can earn a rule: the rule path re-runs the
+    # DMARC/List-Unsubscribe and group checks on every email, so it never unsubscribes them.
+    # A group archive never earns one: the top category alone was below its threshold. Nor does
+    # an unsubscribe skipped for a known contact: the rule path re-checks previous_contact too,
+    # but a "pitch" from someone I wrote to is where Jev is most likely wrong, so such senders
+    # stay on the Jev path, which sees the relationship on every email.
     if (
         decision.low_confidence
-        or decision.downgraded_to_spam
         or decision.archive_group
+        or decision.known_contact_kept
         or keep_signal
         or classification.confidence < cfg.auto_rule.min_confidence
     ):

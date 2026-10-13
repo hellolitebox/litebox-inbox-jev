@@ -5,7 +5,8 @@ new inbox emails, asks Jev which category they belong to (with a calibrated conf
 
 - **labels** them (`Jev/Important`, `Jev/Transactional`, `Jev/Marketing`, …),
 - **archives** receipts, tool notifications, newsletters and cold sales outreach (`Jev/Outreach`),
-- **unsubscribes** from marketing (RFC 8058 one-click or `mailto:`) and **moves scams/phishing to Spam**,
+- **unsubscribes** from marketing and cold outreach sequences (RFC 8058 one-click or `mailto:`)
+  and **moves scams/phishing to Spam**,
 - leaves anything it is **not sure about** in the inbox with `Jev/Review`,
 - **learns** from your corrections (change a label or move an email back → sender rule),
 - sends a **daily Slack digest** of what it did.
@@ -28,10 +29,25 @@ Everything is recorded in a database (SQLite by default) so it can be audited an
    It comes from one or two Gmail searches over your sent mail, cached per run, and is the
    strongest hint that a personal-looking email is cold outreach.
 4. **Safety checks**:
-   - *marketing* without `dmarc=pass` or without a `List-Unsubscribe` header keeps its category
-     and label and is archived, but never unsubscribed (unsubscribing from an unverified sender
-     only confirms your address) and never moved to Spam. The `downgraded_to_spam` column keeps
-     its historical name and now means "unsubscribe skipped: unverified sender".
+   - An `archive_unsubscribe` category (*marketing*, *cold_outreach*) without `dmarc=pass` or
+     without a `List-Unsubscribe` header keeps its category and label and is archived, but never
+     unsubscribed (unsubscribing from an unverified sender only confirms your address) and never
+     moved to Spam. This also applies when a sender rule decided the category. Links in the body
+     are never followed. The `downgraded_to_spam` column keeps its historical name and now means
+     "unsubscribe skipped: unverified sender".
+   - Mail relayed by a discussion list or group is archived but never unsubscribed: its
+     `List-Unsubscribe` would remove *you* from the group. That is any email with a `List-Post`
+     header (Google Groups, Mailman, groups.io, LISTSERV, Discourse; ESPs and sequence tools
+     don't send it), an unsubscribe target on a Google Groups host, or a list or sender on your
+     own domain (such as a pitch sent to `hello@yourcompany.com`).
+   - *cold_outreach* from someone you have written to (or whose domain you have written to) is
+     archived but never unsubscribed (`unsubscribe_known_contacts: false` in `categories.yaml`):
+     a "pitch" from a known contact is where Jev is most likely wrong, and the opt-out can cover
+     all of that company's mail. This also applies when a sender rule (auto, manual or
+     correction) decided the category: before unsubscribing, the rule path runs the same
+     sent-mail check, so a relationship that starts after the rule exists is covered too. Such
+     Jev answers don't earn an auto rule either. When the sent-mail check fails (unknown), the
+     unsubscribe goes ahead under the other checks.
    - Below a category's `min_confidence` nothing destructive happens, with one exception:
      when Jev's top answer is an archive category and all archive categories together reach
      `archive_group_min_confidence` (0.90 by default), the email is archived under the top
@@ -70,9 +86,17 @@ switch, so they are covered too. Labels from the previous pass that no longer ap
 Widening `act_categories` later only affects new emails, unless you mark the old ones with
 `inbox-jev reprocess` (below).
 
-- `act_categories` is matched against the final category. Listing `marketing` archives every
-  confident marketing email but only unsubscribes from the verified ones (DMARC +
-  `List-Unsubscribe`); listing `spam` only spams what Jev itself calls spam.
+- `act_categories` is matched against the final category. Listing `marketing` or
+  `cold_outreach` archives every confident email of that category but only unsubscribes from the
+  verified ones (DMARC + `List-Unsubscribe`, not a group, and for `cold_outreach` not a known
+  contact); listing `spam` only spams what Jev itself calls spam.
+- `cold_outreach` used to be archive-only. Since it became `archive_unsubscribe`, an account that
+  already lists it in `act_categories` starts unsubscribing on deploy, with no separate opt-in.
+  That includes emails still in the inbox from a weaker mode within `--lookback` (re-run on the
+  first `act` pass), rows marked with `inbox-jev reprocess --category cold_outreach`, and any
+  existing manual, correction or active auto rule with `cold_outreach` (they unsubscribe verified
+  senders straight away; review them with `inbox-jev rules list --all`). Remove it from
+  `act_categories` first if you want to hold that back.
 - `act_categories: []` acts on nothing. Leaving the key empty (for example with every entry
   commented out) is rejected; remove the key entirely to act on every category.
 - Emails you restored with `inbox-jev restore` are never processed again. If you changed a Jev

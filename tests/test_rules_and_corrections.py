@@ -1,10 +1,10 @@
 import pytest
-from conftest import make_classification
+from conftest import make_classification, make_signals
 
 from inbox_jev import rules
 from inbox_jev.corrections import detect
 from inbox_jev.db import Message, make_session_factory
-from inbox_jev.policy import Decision
+from inbox_jev.policy import Decision, decide
 
 
 @pytest.fixture
@@ -148,3 +148,42 @@ def test_keep_answer_leaves_manual_and_correction_rules_alone(cfg, session):
     session.commit()
     rule = auto_rule(session)
     assert (rule.source, rule.category, rule.hits) == ("manual", "notification", 2)
+
+
+def test_unverified_cold_outreach_earns_rule_that_never_unsubscribes(cfg, session, account):
+    unverified = make_signals(dmarc_pass=False)
+    c = make_classification("cold_outreach", 0.99)
+    for _ in range(cfg.auto_rule.hits):
+        d = decide(cfg, account, unverified, c)
+        assert d.downgraded_to_spam and d.archive and not d.unsubscribe
+        rules.record_auto(session, cfg, "me@acme.com", "s@pitch.io", c, d)
+        session.commit()
+    rule = rules.lookup(session, "me@acme.com", "s@pitch.io")
+    assert rule.category == "cold_outreach"
+    d = decide(cfg, account, unverified, rule_category=rule.category)
+    assert d.archive and not d.unsubscribe and d.downgraded_to_spam
+    no_header = make_signals(unsubscribe_https=[], unsubscribe_mailto=[])
+    assert not decide(cfg, account, no_header, rule_category=rule.category).unsubscribe
+
+
+def test_unverified_marketing_rule_never_unsubscribes(cfg, session, account):
+    unverified = make_signals(dmarc_pass=False)
+    c = make_classification("marketing", 0.99)
+    for _ in range(cfg.auto_rule.hits):
+        rules.record_auto(
+            session, cfg, "me@acme.com", "p@shop.com", c, decide(cfg, account, unverified, c)
+        )
+        session.commit()
+    rule = rules.lookup(session, "me@acme.com", "p@shop.com")
+    assert rule.category == "marketing"
+    d = decide(cfg, account, unverified, rule_category=rule.category)
+    assert d.archive and not d.unsubscribe
+
+
+def test_known_contact_cold_outreach_does_not_earn_rule(cfg, session, account):
+    c = make_classification("cold_outreach", 0.99)
+    for _ in range(cfg.auto_rule.hits):
+        d = decide(cfg, account, make_signals(), c, previous_contact="wrote_to_their_domain")
+        rules.record_auto(session, cfg, "me@acme.com", "rep@vendor.com", c, d)
+        session.commit()
+    assert rules.lookup(session, "me@acme.com", "rep@vendor.com") is None

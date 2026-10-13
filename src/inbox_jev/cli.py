@@ -182,7 +182,10 @@ def reprocess(
 
 @app.command("unsubscribe-retry")
 def unsubscribe_retry(account: AccountOpt = None) -> None:
-    """Retry failed unsubscribes (up to 3 attempts each)."""
+    """Retry failed unsubscribes (up to 3 attempts each).
+
+    Doesn't re-check previous_contact: each row passed it when created; `run` re-checks.
+    """
     s = _settings()
     sessions = make_session_factory(s.database_url)
     for acc in _accounts(s, account):

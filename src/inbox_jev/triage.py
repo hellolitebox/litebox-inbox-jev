@@ -16,7 +16,8 @@ from .classifier import Classifier, build_state
 from .config import Account, CategoriesConfig, Mode, Settings
 from .db import Message, Run, Unsubscribe, now
 from .gmail import Email, Gmail, load_credentials
-from .policy import decide, plan
+from .policy import can_unsubscribe, decide, plan, spares_known_contacts
+from .signals import Signals
 
 log = logging.getLogger(__name__)
 
@@ -194,11 +195,15 @@ def process(
     rule = rules.lookup(session, account.email, sig.sender)
 
     classification, contact = None, None
-    if not account.is_allowed(sig.sender) and rule is None:
+    if account.is_allowed(sig.sender):
+        pass
+    elif rule is None:
         contact = previous_contact(gmail, account.email, sig.sender)
         classification = ctx.classifier.classify(
             build_state(email, account.email, ctx.settings.body_chars, contact)
         )
+    elif _rule_needs_contact(ctx.cfg, session, account, sig, rule.category, mode):
+        contact = previous_contact(gmail, account.email, sig.sender)
     decision = decide(
         ctx.cfg,
         account,
@@ -331,15 +336,44 @@ def _user_touched(
     return True
 
 
+def _rule_needs_contact(
+    cfg: CategoriesConfig,
+    session: Session,
+    account: Account,
+    sig: Signals,
+    category: str,
+    mode: Mode,
+) -> bool:
+    """A rule hit that would unsubscribe unless I wrote to the sender: worth the Gmail searches.
+
+    Only in act mode for categories in act_categories (as `plan` decides), for categories that
+    spare known contacts, senders that pass the other unsubscribe checks, and lists not already
+    settled in the Unsubscribe table.
+    """
+    acts = mode == Mode.ACT and (
+        account.act_categories is None or category in account.act_categories
+    )
+    if not (acts and spares_known_contacts(cfg, category) and can_unsubscribe(sig, account)):
+        return False
+    return not _unsub_settled(_unsub_row(session, account.email, sig.list_key))
+
+
+def _unsub_row(session: Session, account: str, list_key: str) -> Unsubscribe | None:
+    return session.scalar(
+        select(Unsubscribe).where(Unsubscribe.account == account, Unsubscribe.list_key == list_key)
+    )
+
+
+def _unsub_settled(row: Unsubscribe | None) -> bool:
+    """No further attempt will be made: done (ok, or any non-failed status) or out of retries."""
+    return row is not None and (row.status != "failed" or row.attempts >= MAX_UNSUB_ATTEMPTS)
+
+
 def _unsubscribe(session: Session, gmail: Gmail, account: Account, email: Email) -> bool:
     """Unsubscribe once per (account, list). Returns True if an attempt was made."""
     sig = email.signals
-    row = session.scalar(
-        select(Unsubscribe).where(
-            Unsubscribe.account == account.email, Unsubscribe.list_key == sig.list_key
-        )
-    )
-    if row and (row.status != "failed" or row.attempts >= MAX_UNSUB_ATTEMPTS):
+    row = _unsub_row(session, account.email, sig.list_key)
+    if _unsub_settled(row):
         return False
 
     result = unsub.unsubscribe(sig, send_mail=gmail.send)
