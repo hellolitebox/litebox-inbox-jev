@@ -14,7 +14,9 @@ follows this loop:
    make them green.
 3. **Open a PR** (`gh pr create`) whose body says what changed, why, and how it was verified.
 4. **QA ⇄ Dev loop**:
-   - Spawn the `qa-reviewer` subagent with the PR number. It posts its review on the PR.
+   - Spawn the `qa-reviewer` subagent with the PR number. It posts its review on the PR. Every
+     review loads the Python skills listed in `.claude/agents/qa-reviewer.md` (Skill tool), so
+     if you spawn a generic agent pointed at that file, it must have the Skill tool.
    - If the verdict is `CHANGES_REQUESTED`, spawn the `dev-fixer` subagent with the PR number
      and the full review. It pushes fixes and posts a reply.
    - Spawn `qa-reviewer` again with the PR number, its previous review and the dev reply.

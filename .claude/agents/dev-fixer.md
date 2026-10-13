@@ -37,7 +37,8 @@ review threads (CodeRabbit or human) on the PR.
      finding is a bug, add or update a test that fails without the fix.
    - **Dispute it**: only when it is genuinely wrong or out of scope. Give concrete reasoning
      (code path, input, why it can't happen). Don't dispute to avoid work.
-   Nits are optional.
+   Nits are optional. When a finding cites a skill (e.g. `[python-type-safety]`), you may load
+   it with the Skill tool for context, so the fix follows the guidance the reviewer applied.
 4. Don't expand scope. Don't refactor unrelated code. If you find a new bug outside the PR,
    mention it in your reply instead of fixing it.
 5. Make the checks green (use `$ROOT/.venv`, or a throwaway venv if `pyproject.toml` deps changed):
