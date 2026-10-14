@@ -71,8 +71,8 @@ gh pr merge $n --squash --delete-branch
 gh pr view $n --json body -q .body | sed -n '/^## Deploy notes/,/^## /p'
 ```
 
-Print the deploy notes and point at README → "Updating a deployment": `scripts/deploy.sh` on the
-server, `scripts/deploy.sh --hold` when the notes have one-off steps.
+Print the deploy notes and point at `docs/operations.md` → "Updating a deployment":
+`scripts/deploy.sh` on the server, `scripts/deploy.sh --hold` when the notes have one-off steps.
 
 ## Dependabot lane
 

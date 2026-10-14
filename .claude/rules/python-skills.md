@@ -17,7 +17,8 @@ paths:
 
 Before writing or judging code, load with the Skill tool the skills this table selects for the paths
 you change, and apply them. A change that touches none of them (docs, ADRs, README, agents, skills,
-workflows without Python) loads none. The repo's own conventions (CLAUDE.md, the rules in this
+workflows without Python) loads none, and so does one that changes only comments or docstrings in
+them: both say `none: docs-only`. The repo's own conventions (CLAUDE.md, the rules in this
 directory, the ruff config) win over a skill's generic advice, and never ask for tooling beyond what
 CI runs (ruff, mypy, pytest): no structlog, tenacity, Celery… unless the change is about it. The PR
 body's `Skills applied:` line names the skills loaded (or `none: docs-only`) and the concrete

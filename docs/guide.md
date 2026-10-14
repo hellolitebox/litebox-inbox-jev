@@ -223,4 +223,5 @@ the last 24 hours, in English or Spanish:
   the reference this guide simplifies.
 - [Design decisions](decisions/README.md): why each rule is the way it is, and what was considered
   instead.
-- [README](../README.md): setup, settings and commands.
+- [README](../README.md): setup, settings and commands; [Operating inbox-jev](operations.md) for the
+  server side.

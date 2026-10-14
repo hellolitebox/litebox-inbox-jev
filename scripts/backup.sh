@@ -10,7 +10,8 @@
 #    top level only: never in a subfolder (a copy kept by hand) or elsewhere under a bare remote.
 #
 # Off (logged, exit 0) when BACKUP_RCLONE_REMOTE isn't set. Any failure exits non-zero, so the
-# service's OnFailure= posts an alert. One-time rclone setup: README → "Off-site backups".
+# service's OnFailure= posts an alert. One-time rclone setup: docs/operations.md →
+# "Off-site backups".
 set -euo pipefail
 
 # shellcheck source=ops_common.sh
@@ -25,7 +26,7 @@ fi
 retention_days=$(env_value BACKUP_RETENTION_DAYS 30)
 require_count BACKUP_RETENTION_DAYS "$retention_days" 1
 db=data/inbox-jev.db
-command -v rclone >/dev/null || { echo "rclone is not installed (README → Off-site backups)" >&2; exit 1; }
+command -v rclone >/dev/null || { echo "rclone is not installed (docs/operations.md → Off-site backups)" >&2; exit 1; }
 [ -f "$db" ] || { echo "$db not found: nothing to back up (hosted DATABASE_URL? unset BACKUP_RCLONE_REMOTE)" >&2; exit 1; }
 
 # As root, sqlite3 runs as the app's uid: a -wal or -shm file it creates must stay writable by

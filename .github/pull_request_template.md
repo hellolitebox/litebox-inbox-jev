@@ -9,9 +9,9 @@
 <!-- `scripts/check.sh` (ruff, mdformat, mypy, pytest counts). A bug fix: the new test run
 without the fix, and how it failed. A change to classification (categories.yaml
 criteria, classifier state, body extraction) or to a destructive path (archive, spam,
-unsubscribe, unsubscribe-retry) also needs the read-only real-mail check (README, "Checking a
-branch against real mail"): paste the output of `scripts/check_branch.sh` (From/Subject truncated,
-never bodies), or say why it isn't needed.
+unsubscribe, unsubscribe-retry) also needs the read-only real-mail check (docs/development.md,
+"Checking a branch against real mail"): paste the output of `scripts/check_branch.sh`
+(From/Subject truncated, never bodies), or say why it isn't needed.
 A classification change adds the reference summary (`check_branch.sh … --reference --quiet`). -->
 
 ## Deploy notes

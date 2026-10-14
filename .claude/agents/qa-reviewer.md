@@ -80,19 +80,19 @@ eval; new dependencies (maintained? pinned sensibly?).
 thresholds, allowlist and mode gating; unsubscribes must stay once-per-list and capped; `restore`
 must still be able to undo.
 
-**Real-mail check** (README, "Checking a branch against real mail"; the rule in
+**Real-mail check** (`docs/development.md`, "Checking a branch against real mail"; the rule in
 `.claude/rules/decision-logic.md`): if the PR changes classification (`categories.yaml` criteria,
 the classifier state or questions, `body.extract_body`) or a destructive path (archive, spam,
 unsubscribe, `unsubscribe-retry`), the PR body must include the output of `scripts/check_branch.sh`
 (`dry_classify.py` on real mail, read-only) or an explicit reason it isn't needed, borne out by the
 diff. Missing: **major**. Output that contains email bodies: **blocker**. A classification change
-also needs the reference summary (`check_branch.sh <branch> … --reference --quiet`, README "Checking
-a branch against real mail") next to the per-email check: missing, **major**. Read it: the branch's
-accuracy against the corrections must not fall below the stored baseline without an explanation
-(`broken` pairs the PR accepts on purpose; the baseline covers only the corrections Jev decided, the
-`baseline_unknown` ones count for the branch alone), and a change meant to move borderline emails
-should show it in the ±0.05 / ±0.10 band counts. A reference set too small to say anything (a
-handful of corrections) is fine if the PR says so.
+also needs the reference summary (`check_branch.sh <branch> … --reference --quiet`,
+`docs/development.md` "Checking a branch against real mail") next to the per-email check: missing,
+**major**. Read it: the branch's accuracy against the corrections must not fall below the stored
+baseline without an explanation (`broken` pairs the PR accepts on purpose; the baseline covers only
+the corrections Jev decided, the `baseline_unknown` ones count for the branch alone), and a change
+meant to move borderline emails should show it in the ±0.05 / ±0.10 band counts. A reference set too
+small to say anything (a handful of corrections) is fine if the PR says so.
 
 **Performance & cost**: Gmail API calls per run (quota: per-user units/sec), Jev calls per email
 (avoid repeats; rules should skip Jev), N+1 DB queries, unbounded loops or result sets, timeouts on
@@ -133,7 +133,8 @@ added and removed are listed, and that "Verification" has a `check_branch.sh` ru
 that loaded the production accounts file with the new list. Missing that: **major**.
 
 **Open-source readiness**: nothing Litebox-specific hardcoded in code (config/examples only),
-README/`.env.example`/`categories.yaml` updated when behaviour or config changes.
+README, `docs/operations.md`, `.env.example` and `categories.yaml` updated when behaviour or config
+changes.
 
 ## Severity
 

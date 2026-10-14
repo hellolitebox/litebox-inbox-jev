@@ -2,12 +2,13 @@
 
 inbox-jev reads people's Gmail, sends email content to the Jev API, labels, archives, spams and
 unsubscribes. A mistake loses or leaks someone's mail, so every change is reviewed by a separate
-agent and verified before it reaches production. [README.md](README.md) says what the tool does and
-how it runs; [docs/how-it-decides.md](docs/how-it-decides.md) is the functional spec of every
-decision, [docs/decisions/](docs/decisions/README.md) the ADRs behind them and
-[docs/guide.md](docs/guide.md) the plain-language guide for the inbox owner. The rules in
-`.claude/rules/` load when you touch the files they cover; read one directly when you plan a change
-to its files.
+agent and verified before it reaches production. [README.md](README.md) says what the tool does,
+[docs/operations.md](docs/operations.md) how it runs in production and
+[docs/development.md](docs/development.md) how it is developed;
+[docs/how-it-decides.md](docs/how-it-decides.md) is the functional spec of every decision,
+[docs/decisions/](docs/decisions/README.md) the ADRs behind them and [docs/guide.md](docs/guide.md)
+the plain-language guide for the inbox owner. The rules in `.claude/rules/` load when you touch the
+files they cover; read one directly when you plan a change to its files.
 
 ## Commands
 
@@ -37,8 +38,8 @@ those commands, and a failing check is fixed through the loop.
    most 5 rounds, then stop and summarize the disagreements for the user), the merge gates and the
    squash merge. Subagents never merge, approve or post a `## QA review` comment: only `qa-reviewer`
    does. Dependabot bumps and Public Suffix List updates have their own lanes there.
-5. **Deploy** on the server with `scripts/deploy.sh` (README → "Updating a deployment"), `--hold`
-   when the PR has one-off steps.
+5. **Deploy** on the server with `scripts/deploy.sh` (`docs/operations.md` → "Updating a
+   deployment"), `--hold` when the PR has one-off steps.
 
 ## Gotchas the code can't tell you
 

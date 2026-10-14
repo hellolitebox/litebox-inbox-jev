@@ -91,6 +91,6 @@ not once the PR is polished.
 A change to classification (`categories.yaml` criteria, `classifier.py` state, body extraction) or
 to a destructive action (archive, spam, unsubscribe, `unsubscribe-retry`) is checked against real
 mail before merging, not only with unit tests: `scripts/check_branch.sh` on the server, read-only
-(README → "Checking a branch against real mail"). The PR's "Verification" gets the per-email check
-on recent mail and, for a classification change, the `--reference --quiet` summary with the branch's
-accuracy next to the stored baseline. Never post email bodies.
+(`docs/development.md` → "Checking a branch against real mail"). The PR's "Verification" gets the
+per-email check on recent mail and, for a classification change, the `--reference --quiet` summary
+with the branch's accuracy next to the stored baseline. Never post email bodies.
