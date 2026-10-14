@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import cached_property
@@ -19,7 +19,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.sql.expression import Executable
 
-from . import corrections, rules
+from . import corrections, logs, rules
 from . import unsubscribe as unsub
 from .classification import Classification, PreviousContact
 from .classifier import (
@@ -133,9 +133,11 @@ class GmailApi(Protocol):
     def modify(self, message_id: str, add: list[str], remove: list[str]) -> None: ...
     def send(self, to: str, subject: str, body: str) -> None: ...
     def has_written_to(self, query: str, scans: DomainScans | None = None) -> bool: ...
+    def close(self) -> None: ...
 
 
 # An account's address -> a Gmail client for it (`gmail.connect` in the CLI, a fake in tests).
+# Whoever opens a client closes it when the account's work ends (`contextlib.closing`).
 GmailFactory = Callable[[str], GmailApi]
 
 
@@ -327,7 +329,8 @@ def run_account(
         # Counted outside the ORM object: a rollback after a failed email would reset it.
         counts = RunCounts()
         try:
-            _run_pass(ctx, session, account, mode, limit, lookback, counts)
+            with logs.run_context(run.id):  # every log line of the pass carries `run_id`
+                _run_pass(ctx, session, account, mode, limit, lookback, counts)
         except Exception as exc:
             session.rollback()
             run.error = describe_run_error(exc, account.email)
@@ -341,6 +344,7 @@ def run_account(
                 "run finished",
                 extra={
                     "account": account.email,
+                    "run_id": run.id,
                     "mode": mode,
                     "processed": run.processed,
                     "errors": run.errors,
@@ -362,56 +366,61 @@ def _run_pass(
 ) -> None:
     jev = JevGuard(ctx.classifier, account.email)  # no API key: fails before touching Gmail
     scans = DomainScanRows(session, account.email)  # a database without the upsert: likewise
-    gmail = ctx.gmail(account.email)
-    label_ids = gmail.ensure_labels(ctx.cfg.all_labels()) if mode != Mode.DRY_RUN else {}
-    if mode != Mode.DRY_RUN:
-        corrections.check(session, gmail, account.email, ctx.cfg)
+    with closing(ctx.gmail(account.email)) as gmail:
+        label_ids = gmail.ensure_labels(ctx.cfg.all_labels()) if mode != Mode.DRY_RUN else {}
+        if mode != Mode.DRY_RUN:
+            corrections.check(session, gmail, account.email, ctx.cfg)
 
-    ids = gmail.list_inbox_ids(
-        lookback or ctx.settings.lookback, limit or ctx.settings.max_messages_per_run
-    )
-    skip = _not_due(session, account.email, mode, ids)
-    budget = UnsubscribeBudget(ctx.settings.max_unsubscribes_per_run)
-    account_pass = AccountPass(ctx, session, gmail, account, mode, label_ids, budget, jev, scans)
-    held: _HeldRejection | None = None  # an email Jev refused, until the next call says why
-    for message_id in ids:
-        if message_id in skip:
-            continue
-        # The failure is handled after the `try`, not in its `except`: an error raised while
-        # handling it (the rollback, `_record_error`'s commit) would otherwise chain a Jev error,
-        # whose text can echo the email, into the traceback the caller logs.
-        failure: Exception | None = None
-        try:
-            process(account_pass, message_id)
-        except Exception as exc:
-            failure = exc
-        else:
-            counts.processed += 1
-        if failure is not None:
-            session.rollback()
-        if held is not None and jev.last_rejection is not held.failure:
-            _settle_rejection(account_pass, held, counts)  # a later Jev call says whose fault
-            held = None
-        if failure is None:
-            continue
-        if isinstance(failure, _JevStopped):
-            if failure.refusal is None:  # needed Jev after the pass stopped asking it
-                counts.jev_skipped += 1  # untouched
-            else:  # refused like the email before it, which stopped the pass
-                refusal = failure.refusal
-                _fail(account_pass, message_id, refusal, account_pass.fetched, counts, alone=False)
-            continue
-        if is_token_refresh_error(failure):
-            raise failure  # token refresh failed: fail the run, don't count it against the email
-        rejection = jev.last_rejection
-        if rejection is not None and failure is rejection:  # this email, or Jev refusing all?
-            held = _HeldRejection(message_id, rejection, account_pass.fetched)
-            continue
-        _fail(account_pass, message_id, failure, account_pass.fetched, counts)
-    if held is not None:  # no later call: Jev refused only this email as far as anyone knows
-        _settle_rejection(account_pass, held, counts)
-    if jev.stopped is not None:
-        raise JevUnavailable(jev.stopped)
+        ids = gmail.list_inbox_ids(
+            lookback or ctx.settings.lookback, limit or ctx.settings.max_messages_per_run
+        )
+        skip = _not_due(session, account.email, mode, ids)
+        budget = UnsubscribeBudget(ctx.settings.max_unsubscribes_per_run)
+        account_pass = AccountPass(
+            ctx, session, gmail, account, mode, label_ids, budget, jev, scans
+        )
+        held: _HeldRejection | None = None  # an email Jev refused, until the next call says why
+        for message_id in ids:
+            if message_id in skip:
+                continue
+            # The failure is handled after the `try`, not in its `except`: an error raised
+            # while handling it (the rollback, `_record_error`'s commit) would otherwise chain a
+            # Jev error, whose text can echo the email, into the traceback the caller logs.
+            failure: Exception | None = None
+            try:
+                process(account_pass, message_id)
+            except Exception as exc:
+                failure = exc
+            else:
+                counts.processed += 1
+            if failure is not None:
+                session.rollback()
+            if held is not None and jev.last_rejection is not held.failure:
+                _settle_rejection(account_pass, held, counts)  # a later Jev call says whose fault
+                held = None
+            if failure is None:
+                continue
+            if isinstance(failure, _JevStopped):
+                if failure.refusal is None:  # needed Jev after the pass stopped asking it
+                    counts.jev_skipped += 1  # untouched
+                else:  # refused like the email before it, which stopped the pass
+                    refusal = failure.refusal
+                    _fail(
+                        account_pass, message_id, refusal, account_pass.fetched, counts, alone=False
+                    )
+                continue
+            if is_token_refresh_error(failure):
+                # Token refresh failed: fail the run, don't count it against the email.
+                raise failure
+            rejection = jev.last_rejection
+            if rejection is not None and failure is rejection:  # this email, or Jev refusing all?
+                held = _HeldRejection(message_id, rejection, account_pass.fetched)
+                continue
+            _fail(account_pass, message_id, failure, account_pass.fetched, counts)
+        if held is not None:  # no later call: Jev refused only this email as far as anyone knows
+            _settle_rejection(account_pass, held, counts)
+        if jev.stopped is not None:
+            raise JevUnavailable(jev.stopped)
 
 
 @dataclass(frozen=True)
@@ -1038,9 +1047,10 @@ def rule_for(ctx: Context, account: Account, known: rules.SenderRules) -> Sender
 def signals_for(email: Email, account: Account) -> Signals:
     """The email's signals with the group author as sender when the group is trusted.
 
-    Use this, not `email.signals`, wherever the sender drives a decision, a rule or the DB.
+    Use this, not `email.extract_signals()`, wherever the sender drives a decision, a rule or
+    the DB.
     """
-    return resolve_relay(email.signals, account.group_domains)
+    return resolve_relay(email.extract_signals(), account.group_domains)
 
 
 # Headers signals_for needs to recover a group's author (see signals.original_sender).

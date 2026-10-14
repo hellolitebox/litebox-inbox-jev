@@ -281,7 +281,8 @@ sudo systemctl enable --now inbox-jev-triage.timer inbox-jev-digest.timer
 - Triage runs every 10 minutes, so a new email can sit in the inbox for up to ~10 minutes before
   it is handled; the digest runs daily at 08:00 America/Argentina/Buenos_Aires (edit
   `OnCalendar`/timezone in the `.timer` files).
-- Run logs (JSON lines): `journalctl -u inbox-jev-triage -f`. A run that fails for one account
+- Run logs (JSON lines): `journalctl -u inbox-jev-triage -f`. Every line logged during an
+  account's pass carries `run_id`, the id of its `runs` row. A run that fails for one account
   (for example an expired Gmail token, a missing `TYPESAFE_API_KEY`, or Jev rejecting the key
   or failing 3 calls in a row) is recorded in `runs.error`, the other accounts still run, and
   the service exits non-zero so systemd shows the failure. `digest`, `unsubscribe-retry` and

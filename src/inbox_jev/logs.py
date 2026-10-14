@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 
 from .config import LogLevel
@@ -24,6 +27,31 @@ class JsonFormatter(logging.Formatter):
         if record.exc_info:
             data["exc"] = self.formatException(record.exc_info)
         return json.dumps(data, default=str, ensure_ascii=False)
+
+
+# The `runs` row of the triage pass in progress (`run_context`), stamped on its log lines.
+_run_id: ContextVar[int | None] = ContextVar("run_id", default=None)
+
+
+@contextmanager
+def run_context(run_id: int) -> Iterator[None]:
+    """Tag every log line emitted inside the block with `run_id` (`RunIdFilter`), the pass's
+    `runs` row, so a message, Jev or Gmail line can be tied to its run."""
+    token = _run_id.set(run_id)
+    try:
+        yield
+    finally:
+        _run_id.reset(token)
+
+
+class RunIdFilter(logging.Filter):
+    """Adds `run_id` to records logged inside `run_context` (an explicit `extra` wins)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        run_id = _run_id.get()
+        if run_id is not None and not hasattr(record, "run_id"):
+            record.run_id = run_id
+        return True
 
 
 # typesafe_sdk logs one INFO line per successful request; keep its retry/error lines.
@@ -46,6 +74,7 @@ class DropSdkSuccess(logging.Filter):
 def setup(level: LogLevel = LogLevel.INFO) -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter())
+    handler.addFilter(RunIdFilter())
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(level.value)

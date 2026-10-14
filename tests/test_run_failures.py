@@ -1,6 +1,7 @@
 """Run-level failures (token, config), the per-email error retry cap and `run` across accounts."""
 
 import json
+import logging
 from unittest import mock
 
 import google.auth._exponential_backoff
@@ -11,7 +12,7 @@ from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
 from typer.testing import CliRunner
 
-from inbox_jev import cli, digest, triage
+from inbox_jev import cli, digest, logs, triage
 from inbox_jev import gmail as inbox_gmail
 from inbox_jev.config import DigestLanguage, Mode
 from inbox_jev.db import MAX_ERROR_ATTEMPTS, Message, Run, Unsubscribe
@@ -442,3 +443,29 @@ def test_email_gmail_no_longer_has_gets_no_metadata_read(triage_setup, monkeypat
     row = _row(ctx, "1")
     assert (row.status, row.error, row.subject) == ("error", "HttpError: HTTP 404", "")
     assert header_reads == []
+
+
+def test_a_pass_closes_its_gmail_client_and_tags_its_log_lines_with_the_run(triage_setup, caplog):
+    ctx, gmail, account = triage_setup
+    caplog.handler.addFilter(logs.RunIdFilter())  # as `logs.setup` does on the real handler
+    with caplog.at_level(logging.INFO):
+        run = triage.run_account(ctx, account, Mode.ACT)
+        logging.getLogger("inbox_jev.test").info("after the pass")
+    assert gmail.closes == 1
+    lines = {r.getMessage(): r for r in caplog.records}
+    processed = [r for r in caplog.records if r.getMessage() == "message processed"]
+    assert len(processed) == 4 and {r.run_id for r in processed} == {run.id}
+    assert lines["run finished"].run_id == run.id
+    assert not hasattr(lines["after the pass"], "run_id")
+
+
+def test_a_failed_pass_still_closes_its_gmail_client(triage_setup, monkeypatch):
+    ctx, gmail, account = triage_setup
+
+    def list_inbox_ids(lookback, limit):
+        raise HttpError(503)
+
+    monkeypatch.setattr(gmail, "list_inbox_ids", list_inbox_ids)
+    with pytest.raises(HttpError):
+        triage.run_account(ctx, account, Mode.ACT)
+    assert gmail.closes == 1

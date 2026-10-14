@@ -1,5 +1,6 @@
 import pytest
 from fakes import FakeLabels
+from sqlalchemy import select
 
 from inbox_jev import labels
 from inbox_jev.config import Mode
@@ -117,3 +118,32 @@ def test_rename_allows_case_only_change(session):
 def test_rename_refuses_same_name(session):
     with pytest.raises(labels.LabelRenameRefused):
         labels.rename(FakeLabels([]), session, "me@x.com", "Jev/Spam", "Jev/Spam")
+
+
+@pytest.mark.parametrize("old", ["Jev/Café", "Jev/50%_off", 'Jev/"quoted"\\x'])
+def test_rename_finds_labels_the_sql_prefilter_must_encode(factory, rows, old):
+    """The prefilter matches the stored JSON text: non-ASCII (escaped by `json.dumps`), LIKE
+    wildcards and JSON escapes must still reach the exact check."""
+    with factory() as s:
+        s.add(_msg("me@x.com", "9", [old, "Jev/Spam"], [old]))
+        s.commit()
+        labels.rename(FakeLabels([]), s, "me@x.com", old, "Jev/New")
+    stored = rows()["9"]
+    assert (stored.labels_added, stored.decided_labels) == (["Jev/New", "Jev/Spam"], ["Jev/New"])
+
+
+def test_rename_prefilter_narrows_rows_and_the_exact_check_keeps_lookalikes(session, rows):
+    lowered = "jev/revisar"  # SQLite's LIKE ignores ASCII case: the prefilter lets it through
+    session.add(_msg("me@x.com", "8", ["Jev/Revisar/Old"], ["Jev/Revisa"]))
+    session.add(_msg("me@x.com", "9", None, [lowered]))
+    session.commit()
+    holding = select(Message.gmail_id).where(labels._may_hold("Jev/Revisar"))
+    assert sorted(session.scalars(holding)) == ["1", "2", "3", "9"]  # not 8: no '"Jev/Revisar"'
+    labels.rename(FakeLabels([]), session, "me@x.com", "Jev/Revisar", "Jev/Review")
+    stored = rows()
+    assert (stored["8"].labels_added, stored["8"].decided_labels) == (
+        ["Jev/Revisar/Old"],
+        ["Jev/Revisa"],
+    )
+    assert stored["9"].decided_labels == [lowered]  # let through, then left by the exact check
+    assert stored["2"].decided_labels == ["Jev/Review"]

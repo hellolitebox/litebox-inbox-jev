@@ -70,7 +70,7 @@ def test_correction_on_old_group_row_creates_rule_on_author(setup, monkeypatch):
     ctx.classifier.answers["Pitch"] = make_classification("cold_outreach", 0.99)
     # Simulate a row stored before authors were recovered: sender was the group.
     with monkeypatch.context() as m:
-        m.setattr(triage, "signals_for", lambda email, account: email.signals)
+        m.setattr(triage, "signals_for", lambda email, account: email.extract_signals())
         triage.run_account(ctx, account, Mode.ACT)
     with ctx.sessions() as s:
         assert s.query(Message).filter_by(gmail_id="6").one().sender == "hello@acme.com"
@@ -92,7 +92,7 @@ def test_process_refreshes_stored_sender_before_checking_user_edits(setup, monke
     ctx.classifier.answers["Pitch"] = make_classification("cold_outreach", 0.99)
     # A row stored before authors were recovered: the group (on the allowlisted own domain).
     with monkeypatch.context() as m:
-        m.setattr(triage, "signals_for", lambda email, account: email.signals)
+        m.setattr(triage, "signals_for", lambda email, account: email.extract_signals())
         triage.run_account(ctx, account, Mode.LABEL)
     with ctx.sessions() as s:
         # corrections.check already looked at it this hour: process's own check catches it.
@@ -110,7 +110,7 @@ def _old_group_rows(ctx, gmail, account, monkeypatch, ids):
     for i in ids:
         ctx.classifier.answers[f"Pitch {i}"] = make_classification("cold_outreach", 0.99)
     with monkeypatch.context() as m:
-        m.setattr(triage, "signals_for", lambda email, account: email.signals)
+        m.setattr(triage, "signals_for", lambda email, account: email.extract_signals())
         triage.run_account(ctx, account, Mode.LABEL)
 
 

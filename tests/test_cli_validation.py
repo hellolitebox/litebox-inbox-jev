@@ -4,6 +4,7 @@ category from categories.yaml (restore also one its stored emails still carry)."
 from pathlib import Path
 
 import pytest
+from fakes import FakeGmail
 from typer.testing import CliRunner
 
 from inbox_jev import cli, triage
@@ -130,7 +131,7 @@ def test_restore_accepts_a_removed_category_its_emails_still_carry(db, monkeypat
         )
         s.commit()
     monkeypatch.setattr(cli.gmail_mod, "load_credentials", lambda d, e: None)
-    monkeypatch.setattr(cli.gmail_mod, "Gmail", lambda creds: "gmail")
+    monkeypatch.setattr(cli.gmail_mod, "Gmail", lambda creds: FakeGmail([]))
     seen = []
 
     def restore(session, gmail, account, since, category):

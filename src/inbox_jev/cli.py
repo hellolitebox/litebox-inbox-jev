@@ -6,6 +6,7 @@ import logging
 import os
 import re
 from collections.abc import Callable
+from contextlib import closing
 from datetime import timedelta
 from functools import partial
 from typing import Annotated
@@ -260,8 +261,8 @@ def restore(
     with open_sessions(s.database_url) as sessions, sessions() as session:
         if category is not None and not _stored_category(session, account, category):
             _category(load_categories(s.categories_file), category, "--category")
-        gmail = gmail_mod.connect(s.google_tokens_dir, account)
-        result = triage.restore(session, gmail, account, window, category)
+        with closing(gmail_mod.connect(s.google_tokens_dir, account)) as gmail:
+            result = triage.restore(session, gmail, account, window, category)
     deleted = f" Skipped {result.deleted} deleted in Gmail." if result.deleted else ""
     typer.echo(f"Restored {result.restored} emails.{deleted} Unsubscribes cannot be undone.")
 
@@ -320,8 +321,7 @@ def unsubscribe_retry(account: AccountOpt = None) -> None:
     ):
 
         def retry(acc: Account) -> None:
-            gmail = ctx.gmail(acc.email)
-            with ctx.sessions() as session:
+            with closing(ctx.gmail(acc.email)) as gmail, ctx.sessions() as session:
                 for list_key, outcome in triage.retry_unsubscribes(ctx, session, gmail, acc):
                     typer.echo(f"{acc.email} {list_key}: {outcome}")
 
@@ -341,8 +341,10 @@ def senders_backfill(account: AccountOpt = None) -> None:
     with open_sessions(s.database_url) as sessions:
 
         def backfill(acc: Account) -> None:
-            gmail = gmail_mod.connect(s.google_tokens_dir, acc.email)
-            with sessions() as session:
+            with (
+                closing(gmail_mod.connect(s.google_tokens_dir, acc.email)) as gmail,
+                sessions() as session,
+            ):
                 checked, updated, skipped = triage.backfill_senders(session, gmail, acc)
             typer.echo(
                 f"{acc.email}: {checked} group emails checked, {updated} senders updated, "
@@ -441,8 +443,10 @@ def labels_rename(old: str, new: str, account: AccountOpt = None) -> None:
     with open_sessions(s.database_url) as sessions:
 
         def rename(acc: Account) -> None:
-            gmail = gmail_mod.connect(s.google_tokens_dir, acc.email)
-            with sessions() as session:
+            with (
+                closing(gmail_mod.connect(s.google_tokens_dir, acc.email)) as gmail,
+                sessions() as session,
+            ):
                 outcome = labels.rename(gmail, session, acc.email, old, new)
             typer.echo(f"{acc.email}: {old} -> {new}: {outcome}")
 

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from typing import Protocol
 
-from sqlalchemy import select, update
+from sqlalchemy import ColumnElement, String, cast, or_, select, update
 from sqlalchemy.orm import Session
 
 from .db import Message
@@ -40,6 +41,23 @@ def _check(existing: dict[str, str], user: set[str], old: str, new: str) -> None
         raise LabelRenameRefused(f"{new!r} conflicts with the existing label {clash!r}")
 
 
+def _may_hold(label: str) -> ColumnElement[bool]:
+    """SQL prefilter: stored label lists whose JSON text contains `label` as a JSON string.
+
+    Never misses a row: the label is looked for encoded both ways `json.dumps` can store it
+    (non-ASCII escaped or not), with LIKE wildcards escaped. It can let through rows without it
+    (SQLite's LIKE ignores ASCII case), so the caller still checks the parsed list.
+    """
+    needles = {json.dumps(label), json.dumps(label, ensure_ascii=False)}
+    return or_(
+        *(
+            cast(column, String).contains(needle, autoescape=True)
+            for column in (Message.labels_added, Message.decided_labels)
+            for needle in needles
+        )
+    )
+
+
 def rename(gmail: LabelApi, session: Session, account: str, old: str, new: str) -> str:
     """Rename OLD to NEW in Gmail and in the stored label lists. Safe to re-run.
 
@@ -72,10 +90,10 @@ def rename(gmail: LabelApi, session: Session, account: str, old: str, new: str) 
 
     rows = session.execute(
         select(Message.id, Message.labels_added, Message.decided_labels).where(
-            Message.account == account
+            Message.account == account, _may_hold(old)
         )
     )
-    changes = []
+    changes = []  # the prefilter only narrows the rows: this checks the exact label
     for row_id, added, decided in rows:
         if (added and old in added) or (decided and old in decided):
             changes.append(

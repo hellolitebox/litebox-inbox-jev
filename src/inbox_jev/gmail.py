@@ -15,7 +15,8 @@ from email.message import EmailMessage as MimeMessage
 from enum import StrEnum
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Protocol
+from types import TracebackType
+from typing import Any, Protocol, Self
 
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
@@ -183,8 +184,9 @@ class Email:
     def header(self, name: str) -> str:
         return signals.first_header(self.headers, name.lower()) or ""
 
-    @property
-    def signals(self) -> signals.Signals:
+    def extract_signals(self) -> signals.Signals:
+        """The sender signals parsed from the headers, unresolved (no group relay): parsed
+        again on every call, so keep the result. Decisions use `triage.signals_for` instead."""
         return signals.extract(self.headers)
 
 
@@ -527,6 +529,9 @@ class _ScanCheck:
 
 
 class Gmail:
+    """One account's Gmail API client. Close it (`close`, or use it as a context manager) when
+    the account's work ends: it holds the HTTP connections of the googleapiclient service."""
+
     def __init__(self, creds: Credentials) -> None:
         self._service = build("gmail", "v1", credentials=creds, cache_discovery=False)
         self._svc = self._service.users()
@@ -534,6 +539,21 @@ class Gmail:
         self._user_labels: set[str] = set()
         self._written: dict[str, bool] = {}
         self._scans = MemoryScans()
+
+    def close(self) -> None:
+        """Close the service's HTTP connections. Safe to call more than once."""
+        self._service.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        self.close()
 
     def list_inbox_ids(self, lookback: str, limit: int) -> list[str]:
         """Ids of inbox emails newer than `lookback` (a Gmail `newer_than` value), newest first."""

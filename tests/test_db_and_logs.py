@@ -1,6 +1,7 @@
 """Schema upgrade for existing databases, SQLite settings and log filtering."""
 
 import contextlib
+import json
 import logging
 from unittest import mock
 
@@ -250,3 +251,36 @@ def test_enum_members_are_stored_as_their_plain_value(engines):
         raw = session.execute(text("SELECT status, source, mode FROM messages")).one()
     assert tuple(raw) == ("error", "allowlist", "dry_run")
     assert all(type(value) is str for value in raw)
+
+
+def test_run_context_tags_records_inside_it_and_an_explicit_run_id_wins():
+    f = logs.RunIdFilter()
+    outside = _record("before")
+    assert f.filter(outside) and not hasattr(outside, "run_id")
+    with logs.run_context(7):
+        inside, explicit = _record("during"), _record("explicit")
+        explicit.run_id = 3
+        assert f.filter(inside) and f.filter(explicit)
+        with logs.run_context(8):  # nested: the inner run, then back to the outer one
+            nested = _record("nested")
+            f.filter(nested)
+        again = _record("again")
+        f.filter(again)
+    after = _record("after")
+    f.filter(after)
+    assert (inside.run_id, explicit.run_id, nested.run_id, again.run_id) == (7, 3, 8, 7)
+    assert not hasattr(after, "run_id")
+
+
+def test_setup_writes_the_run_id_in_the_json_line(monkeypatch, capsys):
+    root = logging.getLogger()
+    monkeypatch.setattr(root, "handlers", list(root.handlers))
+    monkeypatch.setattr(root, "level", root.level)
+    sdk = logging.getLogger("typesafe_sdk")
+    monkeypatch.setattr(sdk, "filters", list(sdk.filters))
+    monkeypatch.setattr(sdk, "level", sdk.level)
+    logs.setup(LogLevel.INFO)
+    with logs.run_context(42):
+        logging.getLogger("inbox_jev.test").info("message processed", extra={"id": "m1"})
+    line = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert (line["msg"], line["id"], line["run_id"]) == ("message processed", "m1", 42)

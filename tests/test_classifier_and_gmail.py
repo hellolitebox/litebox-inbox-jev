@@ -764,3 +764,21 @@ def test_has_written_to_domain_without_sent_mail(monkeypatch):
     svc = SentMailService({})
     assert not sent_mail_gmail(monkeypatch, svc).has_written_to("corp.com")
     assert svc.reads == []
+
+
+def test_gmail_closes_its_service_connections(monkeypatch):
+    closed = []
+
+    class Service:
+        def users(self) -> None:
+            return None
+
+        def close(self) -> None:
+            closed.append(True)
+
+    monkeypatch.setattr(gmail_module, "build", lambda *args, **kwargs: Service())
+    with Gmail(creds=None) as gmail:
+        assert closed == []
+    assert closed == [True]
+    gmail.close()  # again: harmless
+    assert closed == [True, True]

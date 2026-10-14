@@ -330,3 +330,42 @@ def test_pinned_one_click_verifies_tls_against_the_hostname(tls_server):
         bad = one_click(f"https://other.test:{port}/u", ["127.0.0.1"], client)
     assert bad.status == "failed" and "ConnectError" in bad.error
     assert hosts == [f"unsub.test:{port}"]  # the mismatched certificate stopped the request
+
+
+def test_a_failed_mailto_send_is_a_failed_attempt_logged_with_its_traceback(caplog):
+    """Whatever `send_mail` raises (a Gmail error or a bug) is stored as a failed attempt, and
+    its traceback is logged so a bug doesn't pass for an ordinary failure."""
+
+    def send(to, subject, body):
+        raise TypeError("send() got an unexpected keyword argument")
+
+    r = unsubscribe(make_signals(one_click=False), send)
+    assert (r.method, r.status, r.target) == (
+        "mailto",
+        "failed",
+        "mailto:unsub@shop.com?subject=unsubscribe",
+    )
+    assert r.error == "TypeError: send() got an unexpected keyword argument"
+    [record] = [x for x in caplog.records if x.getMessage() == "unsubscribe mail failed"]
+    assert record.exc_info is not None and record.exc_info[0] is TypeError
+    assert record.target == "unsub@shop.com"
+
+
+def test_one_click_without_a_client_opens_its_own_and_closes_it(monkeypatch):
+    own = client_returning(200)
+    monkeypatch.setattr(unsub, "_client", lambda: own)
+    r = unsubscribe(make_signals(), lambda *a: None, url_guard=allow)
+    assert (r.method, r.status) == ("one_click", "ok")
+    assert own.is_closed
+
+
+def test_one_click_leaves_a_given_client_open_and_opens_none_when_every_url_is_blocked(
+    monkeypatch,
+):
+    monkeypatch.setattr(unsub, "_client", lambda: pytest.fail("no client is needed"))
+    given = client_returning(200)
+    assert unsubscribe(make_signals(), lambda *a: None, given, url_guard=allow).status == "ok"
+    assert not given.is_closed
+    given.close()
+    r = unsubscribe(make_signals(), lambda *a: None, url_guard=lambda u: [])
+    assert r.method == "mailto"

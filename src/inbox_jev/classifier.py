@@ -139,7 +139,7 @@ def build_state(
     sig: Signals | None = None,
 ) -> JevState:
     """`sig` is triage.signals_for's answer; defaults to the raw (unresolved) signals."""
-    sig = sig or email.signals
+    sig = sig or email.extract_signals()
     state: JevState = {
         "recipient": account_email,
         "from": email.header("From"),

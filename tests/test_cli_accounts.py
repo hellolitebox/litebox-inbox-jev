@@ -4,6 +4,7 @@ exits 1; `run` needs TYPESAFE_API_KEY, the commands that never ask Jev don't."""
 from pathlib import Path
 
 import pytest
+from fakes import FakeGmail
 from typer.testing import CliRunner
 
 from inbox_jev import cli, labels, triage
@@ -31,10 +32,19 @@ def env(monkeypatch, tmp_path):
     return db
 
 
-def _gmail_failing_for_a(tokens_dir, email):
-    if email == "a@acme.com":
-        raise OSError("token file unreadable")
-    return object()
+@pytest.fixture
+def opened(monkeypatch):
+    """`gmail.connect` failing for a@acme.com; the clients it opened for the others."""
+    clients: list[FakeGmail] = []
+
+    def connect(tokens_dir, email):
+        if email == "a@acme.com":
+            raise OSError("token file unreadable")
+        clients.append(FakeGmail([]))
+        return clients[-1]
+
+    monkeypatch.setattr(cli.gmail_mod, "connect", connect)
+    return clients
 
 
 def test_digest_goes_on_after_a_failed_account(env, monkeypatch):
@@ -61,8 +71,7 @@ def test_digest_needs_no_jev_key(env, monkeypatch):
     assert (result.exit_code, sent) == (0, ["UA", "UB"])
 
 
-def test_unsubscribe_retry_goes_on_after_a_failed_account_and_closes_jev(env, monkeypatch):
-    monkeypatch.setattr(cli.gmail_mod, "connect", _gmail_failing_for_a)
+def test_unsubscribe_retry_goes_on_after_a_failed_account_and_closes_jev(env, monkeypatch, opened):
     monkeypatch.setattr(triage, "retry_unsubscribes", lambda ctx, s, g, acc: [("news.x", "ok")])
     closed = []
     monkeypatch.setattr(triage.Context, "close", lambda self: closed.append(True))
@@ -70,15 +79,16 @@ def test_unsubscribe_retry_goes_on_after_a_failed_account_and_closes_jev(env, mo
     assert "b@acme.com news.x: ok" in result.output
     assert "a@acme.com: unsubscribe retry failed: OSError: token file unreadable" in result.output
     assert (result.exit_code, closed) == (1, [True])
+    assert [g.closes for g in opened] == [1]  # b's Gmail client is closed once its work ends
 
 
-def test_senders_backfill_goes_on_after_a_failed_account(env, monkeypatch):
-    monkeypatch.setattr(cli.gmail_mod, "connect", _gmail_failing_for_a)
+def test_senders_backfill_goes_on_after_a_failed_account(env, monkeypatch, opened):
     monkeypatch.setattr(triage, "backfill_senders", lambda s, g, acc: (2, 1, 0))
     result = CliRunner().invoke(cli.app, ["senders", "backfill"])
     assert "b@acme.com: 2 group emails checked, 1 senders updated" in result.output
     assert "a@acme.com: senders backfill failed: OSError" in result.output
     assert result.exit_code == 1
+    assert [g.closes for g in opened] == [1]
 
 
 def test_run_without_jev_key_fails_every_account_before_gmail(env, monkeypatch):
@@ -100,7 +110,7 @@ def test_run_without_jev_key_fails_every_account_before_gmail(env, monkeypatch):
 def test_labels_rename_tells_refusals_from_failures(env, monkeypatch, caplog):
     """Only `LabelRenameRefused` is reported as refused; any other error (even a ValueError from
     a library) is a failure, logged with its traceback."""
-    monkeypatch.setattr(cli.gmail_mod, "connect", lambda tokens_dir, email: object())
+    monkeypatch.setattr(cli.gmail_mod, "connect", lambda tokens_dir, email: FakeGmail([]))
 
     def rename(gmail, session, account, old, new):
         if account == "a@acme.com":

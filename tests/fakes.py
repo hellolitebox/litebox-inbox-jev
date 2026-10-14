@@ -47,6 +47,7 @@ class FakeGmail:
         self.written_queries: list[str] = []
         self.header_errors: dict[str, Exception] = {}
         self.label_batches: list[list[str]] = []
+        self.closes = 0  # `close` calls: whoever opened the client must close it
         self._labels = {"INBOX": "INBOX", "SPAM": "SPAM"}
 
     def ensure_labels(self, names: list[str]) -> dict[str, str]:
@@ -83,6 +84,9 @@ class FakeGmail:
 
     def send(self, to: str, subject: str, body: str) -> None:
         self.sent.append(to)
+
+    def close(self) -> None:
+        self.closes += 1
 
     written = frozenset({"c@client.com"})
 

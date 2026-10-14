@@ -157,9 +157,9 @@ or post email bodies.
 - `policy.py` stays pure (no I/O). Gmail access goes in `gmail.py` and orchestration in `triage.py`.
 - New categories or labels go in `categories.yaml`, not in code.
 - Anything keyed on the sender (rules, corrections, `previous_contact`, allowlist) uses
-  `triage.signals_for()` (resolved signals), never `Email.signals` directly. Rules for trusted
-  groups (`group_domains`) key on the author; untrusted groups stay keyed on the group address,
-  never on the author they claim.
+  `triage.signals_for()` (resolved signals), never `Email.extract_signals()` directly. Rules for
+  trusted groups (`group_domains`) key on the author; untrusted groups stay keyed on the group
+  address, never on the author they claim.
 - Every new path that can unsubscribe must go through the same checks and respect what the user
   decided since (sender rules, corrections, restore, star). Unsubscribes are irreversible. The
   sender checks (category, allowlist, verified, group, known contact) are

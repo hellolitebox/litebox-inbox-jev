@@ -661,7 +661,8 @@ unsubscribe checks, `dmarc_pass` also gates the Google Groups author recovery ([
      fails and a `mailto:` exists, go to step 3; if it fails and none exists, `failed`. URLs that
      fail the guard are skipped.
   3. The first `mailto:` with an `@` gets an email from your Gmail (subject and body from the
-     URI, default `unsubscribe`). Sent → `ok`; error → `failed`.
+     URI, default `unsubscribe`). Sent → `ok`; any error → `failed` (its traceback is logged as
+     `unsubscribe mail failed`).
   4. Otherwise `manual_pending` with the first `https` URL as target (listed in the digest).
 - **URL guard** (`resolve_public_https`): scheme `https`, a hostname, and every address it
   resolves to is global (no private, loopback or link-local IPs); a DNS failure rejects it. The

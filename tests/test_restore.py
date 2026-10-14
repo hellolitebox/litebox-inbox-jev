@@ -4,7 +4,7 @@ from datetime import timedelta
 
 import pytest
 from conftest import make_classification
-from fakes import HttpError, email
+from fakes import FakeGmail, HttpError, email
 from typer.testing import CliRunner
 
 from inbox_jev import cli, triage
@@ -128,7 +128,8 @@ def test_restored_emails_are_not_reprocessed_or_learned_as_corrections(acted):
 def test_cli_restore_is_a_thin_wrapper(monkeypatch, tmp_path):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'db.sqlite'}")
     monkeypatch.setattr(cli.logs, "setup", lambda level: None)
-    monkeypatch.setattr(cli.gmail_mod, "connect", lambda d, e: "gmail")
+    gmail = FakeGmail([])
+    monkeypatch.setattr(cli.gmail_mod, "connect", lambda d, e: gmail)
     seen = []
 
     def restore(session, gmail, account, since, category):
@@ -139,7 +140,8 @@ def test_cli_restore_is_a_thin_wrapper(monkeypatch, tmp_path):
     args = ["restore", "-a", "me@acme.com", "--since", "12h", "--category", "marketing"]
     result = CliRunner().invoke(cli.app, args)
     assert result.exit_code == 0, result.output
-    assert seen == [("gmail", "me@acme.com", timedelta(hours=12), "marketing")]
+    assert seen == [(gmail, "me@acme.com", timedelta(hours=12), "marketing")]
+    assert gmail.closes == 1  # closed once the restore is done
     assert "Restored 3 emails. Unsubscribes cannot be undone." in result.output
 
     bad = CliRunner().invoke(cli.app, ["restore", "-a", "me@acme.com", "--since", "2w"])
@@ -181,7 +183,7 @@ def test_restore_raises_other_gmail_errors(acted, monkeypatch, error):
 def test_cli_restore_reports_deleted_emails(monkeypatch, tmp_path):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'db.sqlite'}")
     monkeypatch.setattr(cli.logs, "setup", lambda level: None)
-    monkeypatch.setattr(cli.gmail_mod, "connect", lambda d, e: "gmail")
+    monkeypatch.setattr(cli.gmail_mod, "connect", lambda d, e: FakeGmail([]))
     monkeypatch.setattr(triage, "restore", lambda *a: triage.RestoreResult(restored=2, deleted=1))
     result = CliRunner().invoke(cli.app, ["restore", "-a", "me@acme.com"])
     assert result.exit_code == 0, result.output

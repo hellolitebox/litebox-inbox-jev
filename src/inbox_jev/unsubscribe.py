@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 import socket
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -13,6 +14,8 @@ import httpx
 
 from . import __version__
 from .signals import Signals
+
+log = logging.getLogger(__name__)
 
 USER_AGENT = f"inbox-jev/{__version__} (+List-Unsubscribe one-click)"
 TIMEOUT = httpx.Timeout(15.0)
@@ -132,6 +135,22 @@ def _client() -> httpx.Client:
     return httpx.Client(timeout=TIMEOUT, follow_redirects=False, trust_env=False)
 
 
+def _first_one_click(
+    sig: Signals, client: httpx.Client | None, url_guard: UrlGuard
+) -> Result | None:
+    """The one-click POST to the first https URL the guard accepts, through `client` or a
+    client of its own (closed after it); None when the guard accepts none."""
+    for url in sig.unsubscribe_https:
+        addresses = url_guard(url)
+        if not addresses:
+            continue
+        if client is not None:
+            return one_click(url, addresses, client)
+        with _client() as own:
+            return one_click(url, addresses, own)
+    return None
+
+
 def unsubscribe(
     sig: Signals,
     send_mail: SendMail,
@@ -146,20 +165,12 @@ def unsubscribe(
         )
 
     if sig.one_click:
-        for url in sig.unsubscribe_https:
-            addresses = url_guard(url)
-            if not addresses:
-                continue
-            own_client = client is None
-            client = client or _client()
-            try:
-                result = one_click(url, addresses, client)
-            finally:
-                if own_client:
-                    client.close()
-            if result.status == UnsubscribeStatus.OK or not sig.unsubscribe_mailto:
-                return result
-            break  # one-click failed: fall through to mailto
+        result = _first_one_click(sig, client, url_guard)
+        # One-click failed: fall through to mailto, when there is one.
+        if result is not None and (
+            result.status == UnsubscribeStatus.OK or not sig.unsubscribe_mailto
+        ):
+            return result
 
     for uri in sig.unsubscribe_mailto:
         to, subject, body = parse_mailto(uri)
@@ -168,6 +179,10 @@ def unsubscribe(
         try:
             send_mail(to, subject, body)
         except Exception as exc:
+            # Any failure (Gmail HTTP, auth, transport, or a bug) is a failed attempt that
+            # `unsubscribe-retry` can retry; the traceback is logged so a bug doesn't hide as
+            # an ordinary failure.
+            log.warning("unsubscribe mail failed", extra={"target": to}, exc_info=True)
             return Result(
                 UnsubscribeMethod.MAILTO,
                 UnsubscribeStatus.FAILED,

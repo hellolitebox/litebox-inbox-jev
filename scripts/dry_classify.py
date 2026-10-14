@@ -198,29 +198,29 @@ def main() -> None:
     if account is None:
         sys.exit(f"{args.account} is not in {s.accounts_file}")
 
-    gmail = connect(s.google_tokens_dir, account.email)
-    ids = list(args.ids)
-    if args.query:
-        ids += [i for i in gmail.list_ids(args.query, args.limit) if i not in ids]
+    with connect(s.google_tokens_dir, account.email) as gmail:
+        ids = list(args.ids)
+        if args.query:
+            ids += [i for i in gmail.list_ids(args.query, args.limit) if i not in ids]
 
-    classifier = Classifier(s.typesafe_api_key, s.typesafe_model, cfg)
-    engine = _read_only_engine(s.database_url)
-    try:
-        with Session(engine) as session:
-            Checker(
-                session,
-                gmail,
-                classifier,
-                cfg,
-                account,
-                triage.effective_mode(s, account, None),
-                s.body_chars,
-                args.ignore_rules,
-            ).run(ids)
-            session.rollback()
-    finally:
-        engine.dispose()
-        classifier.close()
+        classifier = Classifier(s.typesafe_api_key, s.typesafe_model, cfg)
+        engine = _read_only_engine(s.database_url)
+        try:
+            with Session(engine) as session:
+                Checker(
+                    session,
+                    gmail,
+                    classifier,
+                    cfg,
+                    account,
+                    triage.effective_mode(s, account, None),
+                    s.body_chars,
+                    args.ignore_rules,
+                ).run(ids)
+                session.rollback()
+        finally:
+            engine.dispose()
+            classifier.close()
 
 
 if __name__ == "__main__":
