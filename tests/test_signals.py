@@ -1,3 +1,7 @@
+import itertools
+import random
+import re
+
 import pytest
 from fakes import GMAIL_PASS
 
@@ -10,7 +14,9 @@ from inbox_jev.signals import (
     mailbox_key,
     on_domain,
     parse_list_unsubscribe,
+    reply_without_thread,
     resolve_relay,
+    sender_auth,
     wrote_to_address,
     wrote_to_person_at,
 )
@@ -448,3 +454,582 @@ def test_mailbox_key(address, key):
 )
 def test_wrote_to_address(headers, expected):
     assert wrote_to_address(headers, "ana@corp.com") is expected
+
+
+# --- phishing signals for Jev (reply_without_thread, sender_auth) ---------------------------
+
+
+@pytest.mark.parametrize(
+    "subject",
+    [
+        "RE: Contract renewal",
+        "Re: Re: Contract renewal",
+        "re:Contract renewal",
+        "  RE : Contract renewal",
+        "Re[2]: Contract renewal",
+        "FW: Contract renewal",
+        "Fwd: Re: Contract renewal",
+        "AW: Vertrag",
+        "WG: Vertrag",
+        "RV: Contrato",
+        "RES: Contrato",
+        "TR: Contrat",
+        "SV: Kontrakt",
+        "ANTW: Contract",
+        "Odp: Umowa",
+        "Re\uff1a 合同",
+    ],
+)
+def test_reply_without_thread_flags_a_reply_prefix_with_no_thread_headers(subject):
+    assert reply_without_thread(subject, {"subject": [subject]})
+
+
+@pytest.mark.parametrize(
+    "subject",
+    ["Contract renewal", "Research: findings", "Trip: Monday", "Resumen semanal", "", "[ext] Re"],
+)
+def test_reply_without_thread_ignores_subjects_without_a_reply_prefix(subject):
+    assert not reply_without_thread(subject, {})
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        {"in-reply-to": ["<abc@mail.example>"]},
+        {"references": ["<abc@mail.example> <def@mail.example>"]},
+    ],
+)
+def test_reply_without_thread_is_false_for_a_real_reply(header):
+    assert not reply_without_thread("RE: Contract renewal", header)
+
+
+def test_reply_without_thread_ignores_empty_thread_headers():
+    headers = {"in-reply-to": ["  "], "references": [""]}
+    assert reply_without_thread("RE: Contract renewal", headers)
+
+
+def test_sender_auth_reads_gmails_verdicts():
+    assert sender_auth([GMAIL_PASS]) == {"spf": "pass", "dkim": "pass", "dmarc": "pass"}
+    # Phishing from the attacker's own domain: SPF and DKIM pass, no DMARC result at all.
+    header = (
+        "mx.google.com; dkim=pass header.i=@news-site.example header.s=s1; "
+        "spf=pass (google.com: domain of bounces+1@em1.news-site.example) "
+        "smtp.mailfrom=bounces+1@em1.news-site.example"
+    )
+    assert sender_auth([header]) == {"spf": "pass", "dkim": "pass", "dmarc": "none"}
+    softfail = "mx.google.com; spf=SoftFail smtp.mailfrom=x.example; dmarc=fail"
+    assert sender_auth([softfail]) == {"spf": "softfail", "dkim": "none", "dmarc": "fail"}
+
+
+def test_sender_auth_dkim_passes_with_any_signature_spf_and_dmarc_need_one_verdict():
+    header = "mx.google.com; dkim=fail header.i=@a.example; dkim=pass header.i=@b.example; spf=pass"
+    assert sender_auth([header])["dkim"] == "pass"
+    header = "mx.google.com; dkim=fail header.i=@a.example; dkim=neutral header.i=@b.example"
+    assert sender_auth([header])["dkim"] == "fail"
+    # Gmail writes one SPF and one DMARC resinfo: two that disagree are not trusted (fail closed
+    # for that method), two that agree are that verdict.
+    header = "mx.google.com; dmarc=pass header.from=a.example; dmarc=fail header.from=b.example"
+    assert sender_auth([header]) == {"spf": "none", "dkim": "none", "dmarc": "none"}
+    assert not dmarc_passed([header])
+    header = "mx.google.com; spf=pass smtp.mailfrom=a.example; spf=softfail; dkim=pass"
+    assert sender_auth([header]) == {"spf": "none", "dkim": "pass", "dmarc": "none"}
+    header = "mx.google.com; dmarc=pass header.from=a.example; dmarc=pass header.from=a.example"
+    assert sender_auth([header])["dmarc"] == "pass"
+    assert dmarc_passed([header])
+
+
+# The incident's shape (SPF and DKIM pass, no DMARC record) with the envelope sender chosen to
+# look like verdicts: Gmail names it in the SPF comment and in smtp.mailfrom.
+_INJECTED = "dmarc=pass.dkim=pass"
+
+
+@pytest.mark.parametrize(
+    "mailfrom",
+    [
+        f"{_INJECTED}@attacker.example",
+        f'"{_INJECTED}"@attacker.example',
+        '"a; dmarc=pass"@x.example',
+    ],
+)
+def test_auth_verdicts_ignore_an_envelope_sender_that_looks_like_one(mailfrom):
+    header = (
+        "mx.google.com; dkim=pass header.i=@attacker.example header.s=s1; "
+        f"spf=pass (google.com: domain of {mailfrom} designates 192.0.2.1 as permitted sender) "
+        f"smtp.mailfrom={mailfrom}"
+    )
+    assert sender_auth([header]) == {"spf": "pass", "dkim": "pass", "dmarc": "none"}
+    assert not dmarc_passed([header])
+    assert extract({"authentication-results": [header]}).dmarc_pass is False
+
+
+def test_an_injected_dkim_pass_does_not_hide_a_real_dkim_fail():
+    header = (
+        "mx.google.com; dkim=fail header.i=@bank.example header.s=s1; "
+        'spf=pass (google.com: domain of "dkim=pass"@bank.example designates 192.0.2.1 as '
+        'permitted sender) smtp.mailfrom="dkim=pass"@bank.example; '
+        "dmarc=fail (p=REJECT sp=REJECT dis=NONE) header.from=bank.example"
+    )
+    assert sender_auth([header]) == {"spf": "pass", "dkim": "fail", "dmarc": "fail"}
+    # Unquoted (and in a comment with an escaped parenthesis), the same.
+    header = (
+        "mx.google.com; dkim=fail (bad \\) dkim=pass) header.i=@bank.example; "
+        "spf=pass smtp.mailfrom=dkim=pass@bank.example"
+    )
+    assert sender_auth([header])["dkim"] == "fail"
+
+
+def _gmail_shaped(envelope, real_tail, header_i="@attacker.example", *, helo=False):
+    """Gmail's Authentication-Results for SPF and DKIM fail, with the envelope sender where Gmail
+    writes it (the SPF comment and smtp.mailfrom), then Gmail's own `real_tail`. With `helo`,
+    `envelope` is the HELO name, Gmail's SPF identity for a null MAIL FROM (a bounce)."""
+    identity = f"smtp.helo={envelope}" if helo else f"smtp.mailfrom={envelope}"
+    return (
+        f"mx.google.com; dkim=fail header.i={header_i} header.s=s1 header.b=AbC+/=; "
+        f"spf=fail (google.com: domain of {envelope} does not designate 192.0.2.1 as permitted "
+        f"sender) {identity}{real_tail}"
+    )
+
+
+_NO_VERDICTS = dict.fromkeys(("spf", "dkim", "dmarc"), "none")
+
+
+def test_a_quoted_local_part_cant_close_the_spf_comment():
+    # RFC 5321 lets a quoted local part hold "(", ")" and ";"; inside Gmail's SPF comment it is
+    # still a quoted string, so its ")" can't end the comment and start a resinfo.
+    envelope = '"x); dmarc=pass (y"@attacker.example'
+    header = (
+        "mx.google.com; dkim=pass header.i=@attacker.example header.s=s1; "
+        f"spf=pass (google.com: domain of {envelope} designates 192.0.2.1 as permitted sender) "
+        f"smtp.mailfrom={envelope}"
+    )
+    assert sender_auth([header]) == {"spf": "pass", "dkim": "pass", "dmarc": "none"}
+    assert not dmarc_passed([header])
+    # An extra "(" can't hide Gmail's real DMARC fail behind it either.
+    envelope = '"x); dmarc=pass (("@attacker.example'
+    header = (
+        "mx.google.com; dkim=pass header.i=@attacker.example header.s=s1; "
+        f"spf=pass (google.com: domain of {envelope} designates 192.0.2.1 as permitted sender) "
+        f"smtp.mailfrom={envelope}; dmarc=fail (p=NONE sp=NONE dis=NONE) header.from=bank.example"
+    )
+    assert sender_auth([header]) == {"spf": "pass", "dkim": "pass", "dmarc": "fail"}
+    assert not dmarc_passed([header])
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        # An unbalanced quote in DKIM's header.i (DKIM VALCHAR allows it) would hide the rest.
+        'mx.google.com; dkim=pass header.i="x@attacker.example header.s=s1; '
+        "spf=pass smtp.mailfrom=x@attacker.example; dmarc=fail header.from=bank.example",
+        "mx.google.com; dkim=pass header.i=(x@attacker.example; spf=pass; dmarc=fail",
+        # A ")" that closes nothing, and a backslash outside a comment or quoted string.
+        "mx.google.com; dkim=pass header.i=x)@attacker.example; spf=pass; dmarc=pass",
+        "mx.google.com; dkim=pass header.i=x\\@attacker.example; spf=pass; dmarc=pass",
+        # Ending inside an escape.
+        "mx.google.com; dkim=pass; spf=pass; dmarc=pass (p=NONE \\",
+    ],
+)
+def test_a_malformed_gmail_header_has_no_verdicts(header):
+    # Fail closed: nothing from a header that doesn't parse, not even what came before the break.
+    assert sender_auth([header]) == _NO_VERDICTS
+    assert not dmarc_passed([header])
+    # The lower header is still never read: the topmost Gmail one is the only one trusted.
+    assert not dmarc_passed([header, GMAIL_PASS])
+
+
+# What a sender can put in its envelope local part (RFC 5321 4.1.2): a Dot-string of atext, or a
+# Quoted-string of qtextSMTP (any printable but `"` and `\`) and `\` pairs. In its envelope
+# domain or HELO name, an address literal (RFC 5321 4.1.3): `[IPv4]`, `[IPv6:…]` or a general one,
+# `[tag:` + dcontent (any printable but `[`, `]` and `\`) + `]`. In DKIM's header.i, any VALCHAR
+# but `;` (RFC 6376 3.2), so also stray `"`, `(`, `)` and `\`; header.from, the same.
+_QUOTED_PIECES = ["(", ")", ";", "=", " ", "@", "x", "dmarc=pass", "dkim=pass", "spf=pass"]
+_QUOTED_PIECES += ['\\"', "\\\\", "\\(", "\\)", "\\;"]
+_ATOM_PIECES = ["x", "=", ".", "+", "'", "!", "dmarc=pass", "dkim=pass", "spf=pass"]
+_HEADER_I_PIECES = ['"', "(", ")", "\\", "=", "x", "@", "dmarc=pass"]
+_LITERAL_PIECES = ["(", ")", ";", "=", '"', "dmarc=pass", "dmarc=passx", " "]
+_IP_LITERALS = ["[192.0.2.1]", "[IPv6:2001:db8::1]", "[IPv6:::ffff:192.0.2.1]"]
+
+
+def _literals(rng):
+    """Address literals: the IP ones, every general one up to 4 pieces, then random longer
+    ones."""
+    yield from _IP_LITERALS
+    for size in range(5):
+        for pieces in itertools.product(_LITERAL_PIECES[:6], repeat=size):
+            yield "[t:" + "".join(pieces) + "]"
+    for _ in range(1000):
+        yield "[t:" + "".join(rng.choices(_LITERAL_PIECES, k=rng.randint(1, 10))) + "]"
+
+
+def _local_parts():
+    rng = random.Random(8601)
+    for size in range(4):
+        for pieces in itertools.product(_QUOTED_PIECES, repeat=size):
+            yield '"' + "".join(pieces) + '"', ""
+    for size in range(1, 4):
+        for pieces in itertools.product(_ATOM_PIECES, repeat=size):
+            yield "".join(pieces), ""
+    for _ in range(5000):
+        if rng.random() < 0.7:
+            local = '"' + "".join(rng.choices(_QUOTED_PIECES, k=rng.randint(0, 10))) + '"'
+        else:
+            local = "".join(rng.choices(_ATOM_PIECES, k=rng.randint(1, 8)))
+        yield local, "".join(rng.choices(_HEADER_I_PIECES, k=rng.randint(0, 5)))
+
+
+def _sender_controlled_headers():
+    """Gmail-shaped headers with real SPF and DKIM fails, either no DMARC verdict or a real
+    `dmarc=fail`, holding generated sender-chosen text, each with its real verdicts."""
+    no_dmarc = {"spf": "fail", "dkim": "fail", "dmarc": "none"}
+    dmarc_fail = {"spf": "fail", "dkim": "fail", "dmarc": "fail"}
+
+    def tails(header_from="bank.example"):
+        yield "", no_dmarc
+        yield f"; dmarc=fail (p=REJECT sp=REJECT dis=NONE) header.from={header_from}", dmarc_fail
+
+    for local, header_i in _local_parts():
+        for tail, real in tails():
+            yield (
+                _gmail_shaped(f"{local}@attacker.example", tail, f"{header_i}@attacker.example"),
+                real,
+            )
+    rng = random.Random(5321)
+    for literal in _literals(rng):
+        local, _ = rng.choice([("x", ""), ('"x;)"', ""), ("dmarc=pass", "")])
+        for tail, real in tails():
+            yield _gmail_shaped(f"{local}@{literal}", tail), real
+            yield _gmail_shaped(literal, tail, helo=True), real
+            yield _gmail_shaped("x@attacker.example", tail, f"x@{literal}"), real
+        for tail, real in tails(header_from=literal):
+            yield _gmail_shaped("x@attacker.example", tail), real
+    for size in range(1, 4):  # header.from: the From domain, a dot-atom or a literal
+        for pieces in itertools.product(_ATOM_PIECES, repeat=size):
+            for tail, real in tails(header_from="".join(pieces)):
+                yield _gmail_shaped("x@attacker.example", tail), real
+
+
+def test_no_sender_chosen_text_forges_a_verdict():
+    """Property: whatever a sender puts in its envelope local part or domain (address literals
+    included), its HELO name, DKIM header.i or From domain, the parsed verdicts are Gmail's real
+    ones, or none at all (a header that doesn't parse): never a pass it forged, never a real fail
+    hidden, never a verdict word it chose (`passx`)."""
+    forged = []
+    count = 0
+    for header, real in _sender_controlled_headers():
+        count += 1
+        if sender_auth([header]) not in (real, _NO_VERDICTS) or dmarc_passed([header]):
+            forged.append(header)
+    assert forged == []
+    assert count > 25_000
+
+
+def test_a_from_domain_outside_rfc_5322_never_forges_a_pass():
+    """Gmail writes header.from only in its DMARC resinfo, so text there that splits off a
+    resinfo of its own (a raw `;`, which no RFC 5322 domain holds) meets Gmail's real DMARC
+    verdict: a pass it forged disagrees with that verdict, and two DMARC verdicts that disagree
+    are none. At worst a real fail reads as none; never a pass."""
+    rng = random.Random(5322)
+    pieces = [*_HEADER_I_PIECES, *_LITERAL_PIECES, "[t:", "]"]
+    for _ in range(3000):
+        header_from = "".join(rng.choices(pieces, k=rng.randint(1, 6)))
+        tail = f"; dmarc=fail (p=REJECT sp=REJECT dis=NONE) header.from={header_from}"
+        header = _gmail_shaped("x@attacker.example", tail)
+        assert not dmarc_passed([header]), header
+        assert sender_auth([header])["dmarc"] in ("fail", "none"), header
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        "x@[t:;dmarc=pass;]",
+        'x@[t:);dmarc=pass"]',
+        "x@[t:;dmarc=pass()]",
+        "x@[t:;dmarc=passx;]",
+    ],
+)
+def test_an_address_literal_cant_forge_a_verdict(envelope):
+    # RFC 5321 lets a general address literal hold `;`, `=`, `(`, `)` and `"` (dcontent): it is
+    # read as one opaque piece, so it can't split off a resinfo of its own.
+    header = _gmail_shaped(envelope, "")
+    assert sender_auth([header]) == {"spf": "fail", "dkim": "fail", "dmarc": "none"}
+    assert not dmarc_passed([header])
+    real_fail = "; dmarc=fail (p=NONE sp=NONE dis=NONE) header.from=bank.example"
+    assert sender_auth([_gmail_shaped(envelope, real_fail)])["dmarc"] == "fail"
+    # The same through the HELO name, Gmail's SPF identity for a bounce.
+    helo = envelope.removeprefix("x@")
+    assert sender_auth([_gmail_shaped(helo, "", helo=True)])["dmarc"] == "none"
+    assert not dmarc_passed([_gmail_shaped(helo, "", helo=True)])
+
+
+def test_a_genuine_address_literal_still_parses():
+    for envelope in ("x@[192.0.2.1]", "x@[IPv6:2001:db8::1]", '"a b"@[192.0.2.1]'):
+        tail = "; dmarc=pass header.from=a.example"
+        assert sender_auth([_gmail_shaped(envelope, tail)]) == {
+            "spf": "fail",
+            "dkim": "fail",
+            "dmarc": "pass",
+        }
+    assert dmarc_passed([_gmail_shaped("[192.0.2.1]", "; dmarc=pass header.from=a", helo=True)])
+
+
+# The 23 shapes of the topmost mx.google.com header on 400 recent production emails, as their
+# resinfos (C: a comment, V: a property value), each filled in below with invented values of the
+# real kind.
+_GMAIL_SHAPES = [
+    (
+        "dkim=pass header.i=V header.s=V header.b=V",
+        "spf=pass (C) smtp.mailfrom=V",
+        "dmarc=pass (C) header.from=V",
+    ),
+    (
+        "dkim=pass header.i=V header.s=V header.b=V",
+        "arc=pass (C)",
+        "spf=pass (C) smtp.mailfrom=V",
+        "dmarc=pass (C) header.from=V",
+        "dara=neutral header.i=V",
+    ),
+    (
+        "dkim=pass header.i=V header.s=V header.b=V",
+        "dkim=pass header.i=V header.s=V header.b=V",
+        "spf=pass (C) smtp.mailfrom=V",
+        "dmarc=pass (C) header.from=V",
+    ),
+    (
+        "dkim=pass header.i=V header.s=V header.b=V",
+        "spf=pass (C) smtp.mailfrom=V",
+        "dmarc=pass (C) header.from=V",
+        "dara=neutral header.i=V",
+    ),
+    (
+        "dkim=pass header.i=V header.s=V header.b=V",
+        "arc=pass (C)",
+        "spf=pass (C) smtp.mailfrom=V",
+        "dmarc=pass (C) header.from=V",
+    ),
+    (
+        "dkim=pass header.i=V header.s=V header.b=V",
+        "arc=pass (C)",
+        "spf=pass (C) smtp.mailfrom=V",
+        "dmarc=fail (C) header.from=V",
+        "dara=neutral header.i=V",
+    ),
+    (
+        "dkim=pass header.i=V header.s=V header.b=V",
+        "dkim=pass header.i=V header.s=V header.b=V",
+        "spf=pass (C) smtp.mailfrom=V",
+        "dmarc=pass (C) header.from=V",
+        "dara=neutral header.i=V",
+    ),
+    (
+        "dkim=pass header.i=V header.s=V header.b=V",
+        "dkim=pass header.i=V header.s=V header.b=V",
+        "arc=pass (C)",
+        "spf=none (C) smtp.mailfrom=V",
+        "dmarc=pass (C) header.from=V",
+        "dara=neutral header.i=V",
+    ),
+    (
+        "dkim=pass header.i=V header.s=V header.b=V",
+        "arc=pass (C)",
+        "spf=pass (C) smtp.mailfrom=V",
+        "dara=neutral header.i=V",
+    ),
+    (
+        "dkim=pass header.i=V header.s=V header.b=V",
+        "spf=pass (C) smtp.mailfrom=V",
+        "dmarc=fail (C) header.from=V",
+    ),
+    (
+        "dkim=permerror (C) header.i=V header.s=V header.b=V",
+        "spf=none (C) smtp.mailfrom=V",
+        "dara=neutral header.i=V",
+    ),
+    (
+        "dkim=permerror (C) header.i=V header.s=V header.b=V",
+        "arc=pass (C)",
+        "spf=pass (C) smtp.mailfrom=V",
+        "dmarc=pass (C) header.from=V",
+    ),
+    (
+        "arc=pass (C)",
+        "spf=pass (C) smtp.mailfrom=V",
+        "dmarc=pass (C) header.from=V",
+    ),
+    (
+        "dkim=pass header.i=V header.s=V header.b=V",
+        "arc=pass (C)",
+        "spf=pass (C) smtp.mailfrom=V",
+        "dmarc=fail (C) header.from=V",
+        "dara=fail header.i=V",
+    ),
+    (
+        "dkim=pass header.i=V header.s=V header.b=V",
+        "spf=pass (C) smtp.mailfrom=V",
+    ),
+    (
+        "dkim=pass header.i=V header.s=V header.b=V",
+        "arc=pass (C)",
+        "spf=pass (C) smtp.mailfrom=V",
+        "dmarc=pass (C) header.from=V",
+        "dara=fail header.i=V",
+    ),
+    (
+        "spf=pass (C) smtp.mailfrom=V",
+        "dmarc=pass (C) header.from=V",
+    ),
+    (
+        "dkim=pass header.i=V header.s=V header.b=V",
+        "spf=pass (C) smtp.mailfrom=V",
+        "dara=neutral header.i=V",
+    ),
+    (
+        "dkim=pass header.i=V header.s=V header.b=V",
+        "dkim=pass header.i=V header.s=V header.b=V",
+        "spf=pass (C) smtp.mailfrom=V",
+        "dara=neutral header.i=V",
+    ),
+    (
+        "dkim=permerror (C) header.i=V header.s=V header.b=V",
+        "dkim=pass header.i=V header.s=V header.b=V",
+        "spf=pass (C) smtp.mailfrom=V",
+        "dmarc=fail (C) header.from=V",
+    ),
+    (
+        "dkim=pass header.i=V header.s=V header.b=V",
+        "dkim=pass header.i=V header.s=V header.b=V",
+        "dkim=pass header.i=V header.s=V header.b=V",
+        "dkim=pass header.i=V header.s=V header.b=V",
+        "spf=pass (C) smtp.mailfrom=V",
+        "dmarc=pass (C) header.from=V",
+    ),
+    (
+        "arc=pass (C)",
+        "spf=pass (C) smtp.mailfrom=V",
+        "dmarc=fail (C) header.from=V",
+        "dara=neutral header.i=V",
+    ),
+    (
+        "dkim=pass header.i=V header.s=V header.b=V",
+        "spf=none (C) smtp.mailfrom=V",
+        "dmarc=fail (C) header.from=V",
+        "dara=neutral header.i=V",
+    ),
+]
+_SHAPE_VALUES = {
+    "header.i": "@news.example",
+    "header.s": "s2048",
+    "header.b": "Kp7Zl/9w+qA=",
+    "smtp.mailfrom": "bounces+116531456-d8e0-user=domain.example@em1234.news.example",
+    "header.from": "news.example",
+}
+_SHAPE_COMMENTS = {
+    "dkim": "(no key for signature)",
+    "arc": "(i=1 spf=pass spfdomain=em.news.example dkim=pass dkdomain=news.example dmarc=pass "
+    "fromdomain=news.example)",
+    "spf": "(google.com: domain of bounces+116531456-d8e0-user=domain.example@em1234.news.example "
+    "designates 2001:db8::1 as permitted sender)",
+    "dmarc": "(p=REJECT sp=QUARANTINE dis=NONE)",
+}
+
+
+def _fill_shape_word(word, method):
+    """One word of a `_GMAIL_SHAPES` resinfo with its comment or value filled in."""
+    if word == "(C)":
+        return _SHAPE_COMMENTS[method]
+    prop, _, value = word.partition("=")
+    return f"{prop}={_SHAPE_VALUES[prop]}" if value == "V" else word
+
+
+@pytest.mark.parametrize("shape", _GMAIL_SHAPES)
+def test_real_gmail_header_shapes_parse(shape):
+    expected = dict.fromkeys(("spf", "dkim", "dmarc"), "none")
+    resinfos = []
+    for resinfo in shape:
+        method, result = resinfo.split()[0].split("=")
+        if method in expected and expected[method] != "pass":  # DKIM: any signature passing
+            expected[method] = result
+        resinfos.append(" ".join(_fill_shape_word(word, method) for word in resinfo.split()))
+    header = "mx.google.com;\r\n       " + ";\r\n       ".join(resinfos)
+    assert sender_auth([header]) == expected
+    assert dmarc_passed([header]) is (expected["dmarc"] == "pass")
+    # A quoted envelope local part, as Gmail writes one that needs quoting, parses too.
+    quoted = re.sub(r"smtp\.mailfrom=(\S+)@", r'smtp.mailfrom="\1"@', header)
+    assert sender_auth([quoted]) == expected
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        # Anything outside RFC 8601's grammar, anywhere: no verdicts at all (fail closed).
+        "mx.google.com; dmarc=passx header.from=a.example",  # not an RFC 8601 result
+        "mx.google.com; spf=pass; dmarc=pass; dkim=bogus",
+        "mx.google.com; dmarc=pass header.from",  # a property with no value
+        "mx.google.com; dmarc=pass header.from=",
+        "mx.google.com; dmarc=pass header.from=a.example x",  # a stray word
+        "mx.google.com; dmarc=pass header.from=a@b@c.example",
+        "mx.google.com; dmarc=pass;",  # an empty resinfo
+        "mx.google.com; ; dmarc=pass",
+        "mx.google.com; spf=pass smtp.mailfrom=x@[192.0.2.1; dmarc=pass",  # unbalanced `[`
+        "mx.google.com; spf=pass smtp.mailfrom=x@192.0.2.1]; dmarc=pass",  # stray `]`
+        "mx.google.com; spf=pass smtp.mailfrom=x@[a\\]]; dmarc=pass",  # `\` in a literal
+        "mx.google.com; none; dmarc=pass",
+        "mx.google.com extra; dmarc=pass",  # an authserv-id version is a number
+        "mx.google.com",  # no resinfo and no "none"
+    ],
+)
+def test_a_header_outside_the_grammar_has_no_verdicts(header):
+    assert sender_auth([header]) == _NO_VERDICTS
+    assert not dmarc_passed([header])
+    assert not dmarc_passed([header, GMAIL_PASS])
+
+
+def test_unknown_methods_parse_and_are_ignored():
+    header = "mx.google.com 1; dara=whatever header.i=@gmail.com; x-new/2=ok; dmarc=pass"
+    assert sender_auth([header]) == {"spf": "none", "dkim": "none", "dmarc": "pass"}
+
+
+def test_a_verdict_word_ends_at_whitespace_or_the_resinfo():
+    # `dmarc=pass@x.example` is part of an address, not a verdict (outside the grammar).
+    for header in (
+        "mx.google.com; dmarc=pass@x.example",
+        "mx.google.com; dmarc=pass.dkim=pass@x.example; dkim=pass+x",
+    ):
+        assert not dmarc_passed([header])
+        assert sender_auth([header])["dmarc"] == "none"
+    assert sender_auth(["mx.google.com; dkim=pass+x"])["dkim"] == "none"
+    assert dmarc_passed(["mx.google.com; dmarc=pass\t; dmarc=pass"])
+
+
+def test_auth_verdicts_read_rfc_8601_resinfos():
+    # Comments between tokens, a method version, any case, a reason and properties.
+    header = (
+        "mx.google.com (Google) ; DKIM/1 = Pass (good) header.i=@a.example; "
+        'spf=pass reason="x; dmarc=pass" smtp.mailfrom=a.example; '
+        "dmarc=pass (p=NONE) header.from=a.example"
+    )
+    assert sender_auth([header]) == {"spf": "pass", "dkim": "pass", "dmarc": "pass"}
+    assert dmarc_passed([header])
+    # A nested comment ends only at its outer parenthesis.
+    nested = "mx.google.com; spf=fail (a (b) ; dmarc=pass) smtp.mailfrom=x.example; dkim=none"
+    assert sender_auth([nested]) == {"spf": "fail", "dkim": "none", "dmarc": "none"}
+    # "none": the server checked nothing.
+    assert sender_auth(["mx.google.com; none"]) == dict.fromkeys(("spf", "dkim", "dmarc"), "none")
+
+
+def test_auth_verdicts_trust_only_gmails_exact_authserv_id():
+    lookalike = "mx.google.com.attacker.example; dmarc=pass header.from=bank.example"
+    assert sender_auth([lookalike]) is None
+    assert not dmarc_passed([lookalike])
+    assert not dmarc_passed([lookalike, "mx.google.com; dmarc=fail header.from=bank.example"])
+    assert dmarc_passed(["MX.Google.com ; dmarc=pass header.from=a.example"])
+
+
+def test_sender_auth_trusts_only_the_topmost_gmail_header():
+    injected = "mx.google.com; spf=pass; dkim=pass; dmarc=pass header.from=bank.example"
+    gmail = "mx.google.com; spf=fail smtp.mailfrom=bank.example; dmarc=fail"
+    assert sender_auth([gmail, injected]) == {"spf": "fail", "dkim": "none", "dmarc": "fail"}
+    # Another server's header (or one the sender wrote) is never read, even when first.
+    other = "relay.example; spf=fail; dkim=fail; dmarc=fail"
+    assert sender_auth([other, GMAIL_PASS])["spf"] == "pass"
+    assert sender_auth([other]) is None
+    assert sender_auth([]) is None

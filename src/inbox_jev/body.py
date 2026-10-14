@@ -1,12 +1,21 @@
-"""An email's readable text from its MIME payload (`extract_body`)."""
+"""An email's readable text (`extract_body`) and where its links go (`extract_link_domains`),
+from its MIME payload."""
 
 from __future__ import annotations
 
 import base64
 import html
+import ipaddress
 import re
+import unicodedata
+from collections import Counter
+from collections.abc import Iterator
 from html.parser import HTMLParser
 from typing import Any
+from urllib.parse import unquote, urlsplit
+
+from . import psl
+from .signals import DOMAIN
 
 # Elements whose text isn't part of the readable body.
 _SKIPPED_TAGS = frozenset({"script", "style", "head"})
@@ -108,3 +117,166 @@ def extract_body(payload: dict[str, Any]) -> str:
     if not text and rich:
         return _normalize(html_to_text("\n".join(rich)))
     return text
+
+
+# How many link domains Jev gets (`extract_link_domains`): enough for a lure's few targets next
+# to a signature's links, few enough to keep the state small.
+LINK_DOMAINS_MAX = 8
+# A URL in plain text: up to whitespace, quotes or brackets; trailing punctuation is dropped.
+_TEXT_URL = re.compile(r"https?://[^\s<>\"'()\[\]{}]+", re.IGNORECASE)
+_LINK_TAGS = frozenset({"a", "area"})
+
+
+class _LinkExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.hrefs: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in _LINK_TAGS:
+            self.hrefs += [v.strip() for k, v in attrs if k == "href" and v]
+
+
+def _text_parts(part: dict[str, Any]) -> Iterator[tuple[str, str]]:
+    """(mime type, decoded text) of every text/plain and text/html part that isn't an
+    attachment, in tree order."""
+    if part.get("filename"):
+        return
+    mime = part.get("mimeType", "")
+    if mime in ("text/plain", "text/html"):
+        yield mime, _decode(part.get("body", {}).get("data"))
+    for child in part.get("parts", []) or []:
+        yield from _text_parts(child)
+
+
+# RFC 1035 2.3.4 (with RFC 1123 2.1): a host name is at most 253 characters, each label at most
+# 63. A longer name resolves nowhere, and without the bound a link could make `link_domains`
+# (and Jev's state) as long as the email itself.
+HOSTNAME_MAX = 253
+LABEL_MAX = 63
+# What a browser does with an http(s) URL before reading its host (WHATWG URL Standard): leading
+# and trailing C0 controls and spaces are stripped, tabs and newlines removed, and for these
+# special schemes any run of `/` and `\` after the scheme ends at the host (`https:\\h`,
+# `https:/h`, `https:h`). Without a scheme, two slashes start a host (`//h`): the webmail page's
+# scheme, https.
+_URL_TRIM = "".join(map(chr, range(0x21)))
+_URL_TAB_NEWLINE = str.maketrans("", "", "\t\n\r")
+_SPECIAL_URL = re.compile(r"(https?):[\\/]*(.*)", re.IGNORECASE | re.DOTALL)
+_SCHEME_RELATIVE = re.compile(r"[\\/]{2}(.*)", re.DOTALL)
+# The label separators IDNA maps to "." (UTS #46, as browsers apply it): ideographic, full-width
+# and half-width ideographic full stops. NFKC turns the full-width one into "." and the half-width
+# one into the ideographic one, which it keeps.
+_IDNA_DOTS = str.maketrans(dict.fromkeys("\u3002\uff0e\uff61", "."))
+# The code points UTS #46 maps to nothing ("ignored"), as browsers drop them from a host: soft
+# hyphen, combining grapheme joiner, Mongolian free variation selectors, zero-width space, word
+# joiner, variation selectors and the zero-width no-break space (byte order mark).
+_IDNA_IGNORED = str.maketrans(
+    dict.fromkeys(
+        "\u00ad\u034f\u180b\u180c\u180d\u200b\u2060\ufeff"
+        + "".join(map(chr, range(0xFE00, 0xFE10)))
+    )
+)
+# A host whose last label is a number (`0x7f.1`, `2130706433`, `10.1`): browsers read it as IPv4.
+_NUMERIC_LABEL = re.compile(r"(?:0x[0-9a-f]*|[0-9]+)", re.IGNORECASE)
+
+
+def _normalise_url(url: str) -> str | None:
+    """`url` as `scheme://rest` the way a browser reads an http(s) link (`_SPECIAL_URL`), with
+    `\\` as `/`; None for any other scheme or a relative link."""
+    url = url.strip(_URL_TRIM).translate(_URL_TAB_NEWLINE)
+    if match := _SPECIAL_URL.fullmatch(url):
+        scheme, rest = match.group(1).lower(), match.group(2)
+    elif match := _SCHEME_RELATIVE.fullmatch(url):
+        scheme, rest = "https", match.group(1)
+    else:
+        return None
+    return f"{scheme}://{rest.replace(chr(92), '/')}"
+
+
+def _ipv4_number(host: str) -> str | None:
+    """The IPv4 address a browser reads in a host whose last label is a number (WHATWG IPv4
+    parser: 1 to 4 parts, each decimal, `0x` hex or `0`-leading octal, the last filling the
+    remaining bytes): `0x7f.1` → `127.0.0.1`. None when that parse fails (the URL is invalid)."""
+    parts = host.split(".")  # no trailing dot: `psl.to_ascii` strips it
+    if len(parts) > 4:
+        return None
+    numbers: list[int] = []
+    for part in parts:
+        if not _NUMERIC_LABEL.fullmatch(part):
+            return None
+        if part[:2].lower() == "0x":
+            numbers.append(int(part[2:] or "0", 16))
+        elif len(part) > 1 and part.startswith("0"):
+            if not set(part) <= set("01234567"):
+                return None
+            numbers.append(int(part, 8))
+        else:
+            numbers.append(int(part))
+    *head, last = numbers
+    if any(n > 255 for n in head) or last >= 256 ** (5 - len(numbers)):
+        return None
+    value = last + sum(n << (8 * (3 - i)) for i, n in enumerate(head))
+    return str(ipaddress.IPv4Address(value))
+
+
+def link_domain(url: str) -> str | None:
+    """The registrable domain (`psl.registrable_domain`) an http(s) `url` points to, or its IP
+    address when the host is one; None for any other scheme (`mailto:`, `tel:`, `#anchor`), a
+    malformed URL, a host longer than DNS allows (`HOSTNAME_MAX`, `LABEL_MAX`) or one nobody owns
+    (a public suffix, a single label).
+
+    The URL is read as a browser reads it (`_normalise_url`): backslashes, one or no slash after
+    the scheme and scheme-relative `//host` links all reach a host, and so does a numeric one
+    (`_ipv4_number`). UTS #46's ignored code points (`_IDNA_IGNORED`) are dropped from the host,
+    which is then NFKC-normalised, and IDNA's other full stops (`_IDNA_DOTS`) count as dots, as
+    browsers map them. On a private suffix of the list (`github.io`, `web.app`)
+    the registrable domain is the site's own label, which can name a person or carry a
+    per-recipient token.
+    """
+    normalised = _normalise_url(url)
+    if normalised is None:
+        return None
+    try:
+        host = urlsplit(normalised).hostname
+    except ValueError:  # e.g. an unbalanced "[" in the host
+        return None
+    if not host:
+        return None
+    host = unquote(host)
+    if len(host) > HOSTNAME_MAX:  # cheap check before any work on a huge name
+        return None
+    # As a browser maps it (UTS #46): a full-width `e` is `e`, an ideographic full stop a dot.
+    # NFKC can lengthen a name, so the limits are checked again on the punycode below.
+    host = unicodedata.normalize("NFKC", host.translate(_IDNA_IGNORED)).translate(_IDNA_DOTS)
+    try:
+        return str(ipaddress.ip_address(host))
+    except ValueError:
+        pass
+    ascii_host = psl.to_ascii(host)
+    labels = ascii_host.split(".")
+    if len(ascii_host) > HOSTNAME_MAX or any(len(label) > LABEL_MAX for label in labels):
+        return None
+    if _NUMERIC_LABEL.fullmatch(labels[-1]):
+        return _ipv4_number(ascii_host)
+    domain = psl.registrable_domain(ascii_host)
+    return domain if domain and DOMAIN.match(domain) else None
+
+
+def extract_link_domains(payload: dict[str, Any], limit: int = LINK_DOMAINS_MAX) -> list[str]:
+    """The distinct domains (`link_domain`) the email's links point to, most frequent first
+    (ties in order of appearance), at most `limit`.
+
+    Links are the `href` of `<a>` and `<area>` tags in HTML parts and the http(s) URLs in plain
+    text parts; attachments are skipped. Only domains, never a URL: a path or query string can
+    carry the recipient's address or a login token.
+    """
+    urls: list[str] = []
+    for mime, text in _text_parts(payload):
+        if mime == "text/html":
+            parser = _LinkExtractor()
+            parser.feed(text)
+            urls += parser.hrefs
+        else:
+            urls += [u.rstrip(".,;:!?") for u in _TEXT_URL.findall(text)]
+    counts = Counter(d for d in map(link_domain, urls) if d)
+    return [domain for domain, _ in counts.most_common(limit)]

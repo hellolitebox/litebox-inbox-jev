@@ -37,7 +37,7 @@ from typesafe_sdk import (
 
 from inbox_jev import digest, jev_guard, rules, scan_rows, triage
 from inbox_jev import unsubscribe as unsub
-from inbox_jev.body import extract_body
+from inbox_jev.body import extract_body, extract_link_domains
 from inbox_jev.classification import Classification, PreviousContact
 from inbox_jev.classifier import build_state
 from inbox_jev.config import Account, DigestLanguage, Mode, Settings
@@ -1453,3 +1453,238 @@ def test_ex37_a_scan_read_out_of_date_order_is_not_trusted(
     svc.ordered = True
     assert one_run() == PreviousContact.NEVER
     assert svc.queries[-1] == "in:sent to:vendor.example"  # from the newest match again
+
+
+# --- EX-38 -----------------------------------------------------------------------------------
+
+# A fake "voice letter" whose play button goes through an unrelated brand's click tracker, then a
+# conversation between other people pasted below it. Every name and domain is invented.
+VOICE_LURE_HTML = (
+    "<p>Voice Letter &#9654; Duration: 1 min 30 sec</p>"
+    '<a href="https://links.notify.bigbrand.example/ls/click?upn=TOKEN&amp;r=me%40example.com">'
+    "Play</a>"
+    "<p>Hi Alex and Sam, please find the revised permit schedule below.</p>"
+    "<p>Robin Doe, Permits Officer, County Works</p>"
+    '<a href="https://www.countyworks-gov.example/permits">Permits</a> '
+    '<a href="https://countyworks-gov.example/contact">Contact</a>'
+    "<p>From: Alex Roe Sent: Monday To: Sam Poe Subject: Permit schedule</p>"
+)
+
+
+def test_ex38_a_fake_reply_with_a_voicemail_lure_is_spam(spec):
+    """EX-38 (docs/how-it-decides.md §5, §4.7 what Jev receives, ADR 0042)."""
+    ctx, gmail, account = spec
+    payload = {"mimeType": "text/html", "body": {"data": _b64(VOICE_LURE_HTML)}}
+    subject = "RE: Updated permit schedule for review"
+    mail = email(
+        "1",
+        "Daily Wire <noreply@dailywire-news.example>",
+        subject,
+        return_path="<bounces+77@em1234.dailywire-news.example>",
+        authentication_results=(
+            "mx.google.com; dkim=pass header.i=@dailywire-news.example header.s=s1; "
+            "spf=pass smtp.mailfrom=bounces+77@em1234.dailywire-news.example"
+        ),
+    )
+    mail.body = extract_body(payload)
+    mail.link_domains = extract_link_domains(payload)
+    gmail.emails = {"1": mail}
+    ctx.classifier.answers[subject] = answer("spam", needs_reply=0.10, spam=0.95, important=0.03)
+    triage.run_account(ctx, account, Mode.ACT)
+
+    (state,) = ctx.classifier.states
+    assert state["reply_without_thread"] is True  # RE: with no In-Reply-To or References
+    assert state["link_domains"] == ["countyworks-gov.example", "bigbrand.example"]
+    assert state["sender_auth"] == {"spf": "pass", "dkim": "pass", "dmarc": "none"}
+    assert "upn=TOKEN" not in str(state) and "me%40example.com" not in str(state)
+    row = _row(ctx, "1")
+    assert (row.category, row.spammed, row.archived) == ("spam", True, False)
+    _, add, remove = gmail.modified[-1]
+    assert "SPAM" in add and remove == ["INBOX"]
+
+    # The criteria tell Jev what these keys mean, and keep such mail out of important/Needs Reply.
+    spam = ctx.cfg.by_key["spam"].criteria
+    assert all(k in spam for k in ("sender_auth", "reply_without_thread", "link_domains"))
+    assert "conversation between other people" in ctx.cfg.by_key["important"].criteria
+    assert "phishing" in ctx.cfg.needs_reply.question
+
+
+# --- EX-39 -----------------------------------------------------------------------------------
+
+# A tax-return portal's notice: sent from its mail domain, linking to its own brand and portal
+# domains (not the sending domain). Every name and domain is invented.
+TAX_PORTAL_HTML = (
+    "<p>Your 2025 tax return is ready for your review and signature.</p>"
+    '<a href="https://app.taxreturnsend.example/review?token=TOKEN">Review and sign</a> '
+    '<a href="https://www.taxportal-sign.example/help">Help</a> '
+    '<a href="https://taxreturnsend.example/privacy">Privacy</a>'
+)
+
+
+def test_ex39_a_tax_portal_notice_with_dmarc_pass_is_not_spam(spec):
+    """EX-39 (docs/how-it-decides.md §5, §4.7 what Jev receives, ADR 0042)."""
+    ctx, gmail, account = spec
+    payload = {"mimeType": "text/html", "body": {"data": _b64(TAX_PORTAL_HTML)}}
+    subject = "Action Required: Your 2025 Tax Return is Ready for Review"
+    mail = email(
+        "1",
+        "Tax Return Desk <noreply@taxreturnsend-mail.example>",
+        subject,
+        authentication_results=(
+            "mx.google.com; dkim=pass header.i=@taxreturnsend-mail.example; "
+            "spf=pass smtp.mailfrom=bounce@taxreturnsend-mail.example; "
+            "dmarc=pass header.from=taxreturnsend-mail.example"
+        ),
+    )
+    mail.body = extract_body(payload)
+    mail.link_domains = extract_link_domains(payload)
+    gmail.emails = {"1": mail}
+    ctx.classifier.answers[subject] = answer(
+        "action_required", needs_reply=0.85, action_required=0.88, transactional=0.06, spam=0.03
+    )
+    triage.run_account(ctx, account, Mode.ACT)
+
+    (state,) = ctx.classifier.states
+    assert "reply_without_thread" not in state  # not a reply subject
+    assert state["link_domains"] == ["taxreturnsend.example", "taxportal-sign.example"]
+    assert state["sender_auth"] == {"spf": "pass", "dkim": "pass", "dmarc": "pass"}
+    row = _row(ctx, "1")
+    assert (row.category, row.spammed, row.archived) == ("action_required", False, False)
+    _, add, remove = gmail.modified[-1]
+    assert remove == [] and "SPAM" not in add
+    assert {"Label_Jev/Action", "Label_Jev/Needs Reply"} <= set(add)
+
+    # The criteria make the phishing signs about mismatch, not about the kind of service.
+    spam = ctx.cfg.by_key["spam"].criteria
+    assert "Not spam" in spam and "own brand domains" in spam and "dmarc none or fail" in spam
+    assert "e-signature" in ctx.cfg.by_key["action_required"].criteria
+
+
+# --- EX-40 -----------------------------------------------------------------------------------
+
+
+def test_ex40_an_envelope_sender_that_looks_like_dmarc_pass_does_not_verify(spec):
+    """EX-40 (docs/how-it-decides.md §5, §4.2 DMARC, §3.3 condition 3)."""
+    ctx, gmail, account = spec
+    bounce = "dmarc=pass@bounce.shop.example"
+    gmail.emails = {
+        "1": email(
+            "1",
+            "Shop <promo@shop.example>",
+            "Flash sale",
+            authentication_results=(
+                "mx.google.com; dkim=pass header.i=@shop.example header.s=s1; "
+                f"spf=pass (google.com: domain of {bounce} designates 192.0.2.1 as permitted "
+                f"sender) smtp.mailfrom={bounce}"
+            ),
+            list_unsubscribe="<https://shop.example/u/1>",
+            list_unsubscribe_post="List-Unsubscribe=One-Click",
+        )
+    }
+    ctx.classifier.answers["Flash sale"] = answer("marketing", marketing=0.97)
+    posts = _one_click_posts(ctx)
+    triage.run_account(ctx, account, Mode.ACT)
+
+    (state,) = ctx.classifier.states
+    assert state["sender_auth"] == {"spf": "pass", "dkim": "pass", "dmarc": "none"}
+    assert gmail.modified[-1][2] == ["INBOX"] and "SPAM" not in gmail.modified[-1][1]
+    assert posts == [] and gmail.sent == []
+    row = _row(ctx, "1")
+    assert (row.category, row.archived, row.downgraded_to_spam) == ("marketing", True, True)
+    with ctx.sessions() as s:
+        assert s.query(Unsubscribe).count() == 0
+
+
+def test_ex41_a_quoted_envelope_sender_cant_hide_a_real_dmarc_fail(spec):
+    """EX-41 (docs/how-it-decides.md §5, §4.2 DMARC, §3.3 condition 3)."""
+    ctx, gmail, account = spec
+    bounce = '"x); dmarc=pass (("@bounce.attacker.example'
+    gmail.emails = {
+        "1": email(
+            "1",
+            "Bank <offers@bank.example>",
+            "Your statement",
+            authentication_results=(
+                "mx.google.com; dkim=pass header.i=@attacker.example header.s=s1; "
+                f"spf=pass (google.com: domain of {bounce} designates 192.0.2.1 as permitted "
+                f"sender) smtp.mailfrom={bounce}; "
+                "dmarc=fail (p=NONE sp=NONE dis=NONE) header.from=bank.example"
+            ),
+            list_unsubscribe="<https://bank.example/u/1>",
+            list_unsubscribe_post="List-Unsubscribe=One-Click",
+        )
+    }
+    ctx.classifier.answers["Your statement"] = answer("marketing", marketing=0.97)
+    posts = _one_click_posts(ctx)
+    triage.run_account(ctx, account, Mode.ACT)
+
+    (state,) = ctx.classifier.states
+    assert state["sender_auth"] == {"spf": "pass", "dkim": "pass", "dmarc": "fail"}
+    assert gmail.modified[-1][2] == ["INBOX"] and "SPAM" not in gmail.modified[-1][1]
+    assert posts == [] and gmail.sent == []
+    row = _row(ctx, "1")
+    assert (row.category, row.archived, row.downgraded_to_spam) == ("marketing", True, True)
+    with ctx.sessions() as s:
+        assert s.query(Unsubscribe).count() == 0
+
+
+def test_ex42_a_malformed_gmail_authentication_header_verifies_nothing(spec):
+    """EX-42 (docs/how-it-decides.md §5, §4.2 DMARC, §3.3 condition 3)."""
+    ctx, gmail, account = spec
+    gmail.emails = {
+        "1": email(
+            "1",
+            "Shop <promo@shop.example>",
+            "Flash sale",
+            authentication_results=(
+                "mx.google.com; dkim=pass header.i=promo)@shop.example header.s=s1; "
+                "spf=pass smtp.mailfrom=bounce@shop.example; dmarc=pass header.from=shop.example"
+            ),
+            list_unsubscribe="<https://shop.example/u/1>",
+            list_unsubscribe_post="List-Unsubscribe=One-Click",
+        )
+    }
+    ctx.classifier.answers["Flash sale"] = answer("marketing", marketing=0.97)
+    posts = _one_click_posts(ctx)
+    triage.run_account(ctx, account, Mode.ACT)
+
+    (state,) = ctx.classifier.states
+    assert state["sender_auth"] == {"spf": "none", "dkim": "none", "dmarc": "none"}
+    assert gmail.modified[-1][2] == ["INBOX"] and "SPAM" not in gmail.modified[-1][1]
+    assert posts == [] and gmail.sent == []
+    row = _row(ctx, "1")
+    assert (row.category, row.archived, row.downgraded_to_spam) == ("marketing", True, True)
+    with ctx.sessions() as s:
+        assert s.query(Unsubscribe).count() == 0
+
+
+def test_ex43_an_address_literal_cant_forge_a_dmarc_pass(spec):
+    """EX-43 (docs/how-it-decides.md §5, §4.2 DMARC, §3.3 condition 3)."""
+    ctx, gmail, account = spec
+    bounce = "x@[t:;dmarc=pass;]"
+    gmail.emails = {
+        "1": email(
+            "1",
+            "Shop <promo@shop.example>",
+            "Flash sale",
+            authentication_results=(
+                "mx.google.com; dkim=fail header.i=@shop.example header.s=s1; "
+                f"spf=fail (google.com: domain of {bounce} does not designate 192.0.2.1 as "
+                f"permitted sender) smtp.mailfrom={bounce}"
+            ),
+            list_unsubscribe="<https://shop.example/u/1>",
+            list_unsubscribe_post="List-Unsubscribe=One-Click",
+        )
+    }
+    ctx.classifier.answers["Flash sale"] = answer("marketing", marketing=0.97)
+    posts = _one_click_posts(ctx)
+    triage.run_account(ctx, account, Mode.ACT)
+
+    (state,) = ctx.classifier.states
+    assert state["sender_auth"] == {"spf": "fail", "dkim": "fail", "dmarc": "none"}
+    assert gmail.modified[-1][2] == ["INBOX"] and "SPAM" not in gmail.modified[-1][1]
+    assert posts == [] and gmail.sent == []
+    row = _row(ctx, "1")
+    assert (row.category, row.archived, row.downgraded_to_spam) == ("marketing", True, True)
+    with ctx.sessions() as s:
+        assert s.query(Unsubscribe).count() == 0

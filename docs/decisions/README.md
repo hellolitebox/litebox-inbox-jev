@@ -52,3 +52,5 @@ decision changes: add a new one and mark the old one `Superseded by NNNN`.
 | [0039](0039-address-search-reads-recipients.md) | The address search reads the recipients of its matches | Accepted | #39 |
 | [0040](0040-domain-scan-kept-across-runs.md) | The domain search's scan is kept across runs until every match is read | Accepted | #39 |
 | [0041](0041-accounts-checked-against-categories-at-start.md) | Check the accounts file against the categories file when a command starts | Accepted | #41 |
+| [0042](0042-phishing-signals-for-jev.md) | Give Jev phishing signals; passing authentication is not legitimacy | Accepted | #50 |
+| [0043](0043-authentication-results-parsed-per-rfc-8601.md) | Authentication-Results is parsed per RFC 8601 | Accepted | #50 |

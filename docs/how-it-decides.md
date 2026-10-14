@@ -228,14 +228,14 @@ load).
 
 | Category | Label | `action` | `min_confidence` | Notes |
 | -- | -- | -- | -- | -- |
-| `important` | `Jev/Important` | keep | 0.0 | Allowlist target. Also the fallback for an answer naming an unknown category. Not mass mail that only greets you by name. |
-| `action_required` | `Jev/Action` | keep | 0.0 | Own digest section. Includes a held message pending your approval. Excludes surveys, feedback or review requests and promotional calls to action ([ADR 0038](decisions/0038-surveys-are-not-a-personal-action.md)). |
-| `transactional` | `Jev/Transactional` | archive | 0.80 |  |
+| `important` | `Jev/Important` | keep | 0.0 | Allowlist target. Also the fallback for an answer naming an unknown category. Not mass mail that only greets you by name, nor a conversation between other people pasted into a message from an unrelated sender. |
+| `action_required` | `Jev/Action` | keep | 0.0 | Own digest section. Includes a held message pending your approval, and a document, tax return or agreement to review or sign through a document, e-signature or client-portal service ([EX-39](#ex-39--a-tax-portal-notice-that-passes-dmarc)). Excludes surveys, feedback or review requests and promotional calls to action ([ADR 0038](decisions/0038-surveys-are-not-a-personal-action.md)). |
+| `transactional` | `Jev/Transactional` | archive | 0.80 | Includes copies of documents you already signed or filed. |
 | `notification` | `Jev/Notifications` | archive | 0.80 | Includes groups' held-spam reports. |
 | `newsletter` | `Jev/Newsletters` | archive | 0.80 |  |
 | `marketing` | `Jev/Marketing` | archive_unsubscribe | 0.90 | `unsubscribe_known_contacts: true` (default). |
 | `cold_outreach` | `Jev/Outreach` | archive_unsubscribe | 0.90 | `unsubscribe_known_contacts: false`. |
-| `spam` | `Jev/Spam` | spam | 0.90 | Fraud only: scams, phishing, forged authentication. |
+| `spam` | `Jev/Spam` | spam | 0.90 | Fraud only: scams, phishing, forged authentication. Passing SPF/DKIM is not proof of legitimacy. The signs of phishing are mismatches: links to a brand unrelated to the sender, a fake reply, a copied conversation between other people, made stronger by DMARC `none` or `fail`. A document, e-signature, tax-return or client-portal notice that passes DMARC and links to the service's own brand domains is not spam ([EX-39](#ex-39--a-tax-portal-notice-that-passes-dmarc), [ADR 0042](decisions/0042-phishing-signals-for-jev.md)). |
 
 Extra labels:
 
@@ -289,10 +289,11 @@ What counts as "a reply or an action" is spelled out in the question itself (`ne
 [4.7](#47-what-jev-receives)): yes for a person writing to you or something only you can do (pay,
 sign, approve, authorize, confirm an appointment, renew an expiring document, secure your account);
 no for company or bulk mail (surveys, feedback, ratings or reviews, promotions, webinars or events),
-even if it asks you to reply or click. A person's own "can you give feedback on this?" or invitation
-is a person writing to you. `action_required` excludes the same calls to action, and `important`
-excludes mass mail that only greets you by name, so a survey's keep probability stays low too
-([EX-33](#ex-33--a-satisfaction-survey-from-a-no-reply-sender),
+even if it asks you to reply or click, a conversation between other people that isn't addressed to
+you, and phishing ([EX-38](#ex-38--a-fake-reply-with-a-voicemail-lure)). A person's own "can you
+give feedback on this?" or invitation is a person writing to you. `action_required` excludes the
+same calls to action, and `important` excludes mass mail that only greets you by name, so a survey's
+keep probability stays low too ([EX-33](#ex-33--a-satisfaction-survey-from-a-no-reply-sender),
 [ADR 0038](decisions/0038-surveys-are-not-a-personal-action.md)).
 
 ### 3.3 Unsubscribe conditions
@@ -636,12 +637,50 @@ The value is logged on the "message processed" line; it isn't stored in the DB.
 
 `signals.dmarc_passed(Authentication-Results headers)`: Gmail prepends its own
 `Authentication-Results`, and a sender can inject more (even ones claiming `mx.google.com`). Only
-the **topmost** header that starts with `mx.google.com` is trusted. Every `dmarc=` verdict in it
-must be `pass`, and there must be at least one. If no header starts with `mx.google.com`, DMARC
-doesn't pass: Gmail stamps every inbound email, so any other header could be the sender's own
+the **topmost** header whose authserv-id (the token before the first `;`) is exactly `mx.google.com`
+is trusted; `mx.google.com.attacker.example` is another server. Its `dmarc` verdict must be `pass`
+(and not contradicted by another `dmarc` verdict). If there is no such header, DMARC doesn't pass:
+Gmail stamps every inbound email, so any other header could be the sender's own
 ([EX-17](#ex-17--an-unsubscribe-header-without-gmails-authentication-results)). Besides the
 unsubscribe checks, `dmarc_pass` also gates the Google Groups author recovery
 ([4.5](#45-x-original-sender-trust)).
+
+The header is read as RFC 8601 defines it (`signals._parse_auth_results`), as an **allowlist**: the
+whole header must match the RFC's grammar, or nothing in it counts
+([ADR 0043](decisions/0043-authentication-results-parsed-per-rfc-8601.md)).
+
+- **Opaque pieces**: comments (`(...)`, nested), quoted strings and domain literals (`[...]`) are
+  each read as one piece, with `\` escaping the next character in a comment or quoted string. This
+  holds inside a comment too, so a quoted envelope sender such as
+  `"x); dmarc=pass ("@attacker.example`
+  ([EX-41](#ex-41--a-quoted-envelope-sender-cant-hide-a-real-dmarc-fail)) or an address literal such
+  as `x@[t:;dmarc=pass;]` ([EX-43](#ex-43--an-address-literal-cant-forge-a-dmarc-pass)), in Gmail's
+  SPF comment, `smtp.mailfrom` or `smtp.helo`, can't close the comment or start a resinfo.
+- **Grammar**: what remains must be `authserv-id [version]; resinfo; …` (or `authserv-id; none`),
+  each resinfo `method[/version]=result [reason=…] [ptype.property=value …]`. A value is a run
+  without whitespace, `;`, `@` or the delimiters above (so `header.b`'s base64 and an envelope local
+  part's `=` and `+` fit), an address `[local-part]@domain`, or a literal; a quoted string or
+  literal may stand for the local part or domain. Only the `method=result` that starts each resinfo
+  is a verdict: properties such as `smtp.mailfrom=`, which name the envelope sender the sender
+  chooses, are never read, so `dmarc=pass@attacker.example` there is no verdict
+  ([EX-40](#ex-40--an-envelope-sender-that-looks-like-a-dmarc-pass)).
+- **Vocabulary**: an `spf`, `dkim` or `dmarc` result must be an RFC 8601 word (`pass`, `fail`,
+  `softfail`, `hardfail`, `neutral`, `none`, `temperror`, `permerror`, `policy`). Other methods
+  (`arc`, `dara`) must parse but are ignored.
+- **Fails closed**: a header with anything else (an unbalanced comment, quote or literal, a stray
+  `]` or `\`, a property without a value, a stray word, an empty resinfo, `dmarc=passx`) has no
+  verdicts at all, not even those before the break: DMARC doesn't pass, and every method is `none`
+  for Jev ([EX-42](#ex-42--a-malformed-gmail-authentication-header-verifies-nothing)). The trusted
+  header is still the topmost `mx.google.com` one, malformed or not; a later one is never read
+  instead.
+- **One SPF and one DMARC verdict**: Gmail writes one of each; two that disagree are not trusted
+  (`none` for that method, so DMARC doesn't pass).
+
+`signals.sender_auth` reads the same trusted header, parsed the same way, for Jev's `sender_auth`
+([4.7](#47-what-jev-receives)): the `spf`, `dkim` and `dmarc` verdicts, lowercased, `none` for a
+method the header doesn't mention. DKIM is `pass` when any signature passes, else its first verdict;
+SPF and DMARC are their one verdict, or `none` when two disagree. Without a trusted header it is
+unknown and the key is left out. It only informs Jev; no rule acts on it.
 
 ### 4.3 `List-Unsubscribe`, one-click and `mailto:`
 
@@ -711,6 +750,27 @@ candidate, trusted or not, makes the email a group for the unsubscribe check.
 
 If the body is empty after all that, Jev gets Gmail's `snippet` (HTML-unescaped) instead.
 
+The stripped text has no link targets, so `body.extract_link_domains(payload)` collects them
+separately for Jev's `link_domains`: the `href` of every `<a>` and `<area>` in the HTML parts and
+every `http(s)://` URL in the plain parts (trailing punctuation dropped), attachments skipped. Each
+becomes its registrable domain ([4.9](#49-public-suffix-list)), or the address itself for an IP
+host; other schemes (`mailto:`, `tel:`, anchors), malformed URLs and hosts nobody owns are dropped.
+A URL is read as a browser reads it (WHATWG URL Standard): surrounding spaces and control
+characters, tabs and newlines are removed, `\` counts as `/`, `https:/host`, `https:host` and
+`https:\\host` reach the host, a scheme-relative `//host` is `https`, a percent-encoded host is
+decoded, the host is mapped as IDNA (UTS #46) maps it: the code points it ignores (soft hyphen,
+zero-width space, word joiner, variation selectors, byte order mark…) are dropped, then NFKC with
+`。`, `．` and `｡` as dots (`ｅvil。example` is `evil.example`, and so is `evil.example` with a U+200B
+inside, `１２７.0.0.1` is `127.0.0.1`), and a host whose last label is a number is read as IPv4 the way
+browsers read it (`0x7f.1` and `2130706433` are `127.0.0.1`). A host longer than DNS allows, over
+**253** characters or with a label over **63** (`HOSTNAME_MAX`, `LABEL_MAX`, measured in punycode),
+is dropped, so no link can make the state longer than a domain. The distinct domains are sorted most
+frequent first (ties in order of appearance) and capped at **8** (`LINK_DOMAINS_MAX`). Only domains
+leave the module, never a path or query string: those can carry the recipient's address or a login
+token. One caveat: on a private suffix of the list (`github.io`, `web.app`, `workers.dev`) the
+registrable domain includes the site's own label, which can name a person (`jane.github.io`) or be a
+per-recipient token (`<token>.workers.dev`); Jev already gets `recipient`, so this adds little.
+
 ### 4.7 What Jev receives
 
 `classifier.build_state` sends:
@@ -725,10 +785,18 @@ If the body is empty after all that, Jev gets Gmail's `snippet` (HTML-unescaped)
 | `body` | Extracted body, else the snippet, first `BODY_CHARS` (3000) characters |
 | `original_sender`, `sent_via_group` | Only for a trusted group relay: the author and the group |
 | `previous_contact` | Only when known (`None` leaves the key out); always left out of the flags-only call for allowlist and keep-rule emails |
+| `reply_without_thread` | `true` when the subject starts with a reply or forward prefix (`RE:`, `Fwd:`, `AW:`, `WG:`, `RV:`, `RES:`, `TR:`, `SV:`, `VS:`, `ANTW:`, `ODP:`, `ENC:`, any case, numbered or repeated) and the email has neither `In-Reply-To` nor `References` (`signals.reply_without_thread`); left out otherwise |
+| `link_domains` | The domains the body's links point to, most frequent first, at most 8 ([4.6](#46-body-extraction)); left out when there is none |
+| `sender_auth` | `{"spf", "dkim", "dmarc"}` verdicts from Gmail's own `Authentication-Results` ([4.2](#42-dmarc)); left out without one |
 
 Questions (`build_questions`): one `Choice` over the categories, with each category's `criteria` and
 the instruction to judge by who wrote it and why, explaining `previous_contact` ("a personal-looking
-pitch from a sender I never wrote to is usually cold outreach"); one `Noul` for `needs_reply`, whose
+pitch from a sender I never wrote to is usually cold outreach") and the phishing signals (a passing
+`sender_auth` only proves which domain sent the email, and DMARC `none` or `fail` strengthens other
+signs; `reply_without_thread` is a reply subject answering nothing; links to a brand unrelated to
+the sender are a sign of phishing, while a service linking to its own brand or portal domains, even
+ones that differ from the sending domain, is normal,
+[ADR 0042](decisions/0042-phishing-signals-for-jev.md)); one `Noul` for `needs_reply`, whose
 instructions are `needs_reply.question` with its yes / no examples
 ([3.2](#32-confidence-outcomes-jev-path)); one `Noul` per tag. The answer gives the category, its
 confidence, every category's probability, `needs_reply` and the tag probabilities.
@@ -1332,6 +1400,121 @@ probabilities that matter are shown; the rest are ~0.
   check can't conclude that no person was written to
   ([ADR 0040](decisions/0040-domain-scan-kept-across-runs.md)).
 
+### EX-38 — A fake reply with a voicemail lure
+
+- **Test**: `test_ex38_a_fake_reply_with_a_voicemail_lure_is_spam`
+- **Input**: "RE: Updated permit schedule for review" from `noreply@dailywire-news.example`, sent
+  through an ESP (`Return-Path: bounces+…@em1234.dailywire-news.example`). Gmail's
+  `Authentication-Results` has `spf=pass` and `dkim=pass` for that domain and no `dmarc=` at all. No
+  `In-Reply-To`, no `References`. HTML only: "Voice Letter ▶ Duration: 1 min 30 sec" with a Play
+  link to `links.notify.bigbrand.example/ls/click?upn=…`, then a pasted conversation between other
+  people ("Hi Alex and Sam", a county official's signature, a quoted From/Sent/To/Subject block)
+  with two links to `countyworks-gov.example`. Jev: spam 0.95, important 0.03; `needs_reply` 0.10.
+- **Outcome**: Jev's state carries `reply_without_thread: true`,
+  `link_domains: ["countyworks-gov.example", "bigbrand.example"]` (no path or query string) and
+  `sender_auth: {"spf": "pass", "dkim": "pass", "dmarc": "none"}`. Moved to Spam with `Jev/Spam`
+  (0.95 ≥ 0.90), no `Jev/Needs Reply`.
+- **Why**: before, Jev saw a "RE:" subject, a polite thread and a body without link targets, and the
+  spam criterion only named failing authentication: a real case went to `important` at 0.92 with
+  `Jev/Needs Reply`. Now it sees that the "reply" answers nothing, that the links go to a brand and
+  an agency unrelated to a news sender, and that passing SPF/DKIM only proves who sent it; the
+  criteria name these signs and keep a conversation between other people out of `important` and
+  `needs_reply`. Jev's answer is still what decides: the test pins the state and the outcome of a
+  spam answer, not Jev's judgement ([ADR 0042](decisions/0042-phishing-signals-for-jev.md)).
+
+### EX-39 — A tax-portal notice that passes DMARC
+
+- **Test**: `test_ex39_a_tax_portal_notice_with_dmarc_pass_is_not_spam`
+- **Input**: "Action Required: Your 2025 Tax Return is Ready for Review" from
+  `noreply@taxreturnsend-mail.example`, a tax-return delivery service used by accounting firms.
+  Gmail's `Authentication-Results` has `spf=pass`, `dkim=pass` and `dmarc=pass` for that domain. No
+  reply prefix. HTML: a "Review and sign" link to `app.taxreturnsend.example`, a help link to
+  `taxportal-sign.example` and a privacy link to `taxreturnsend.example`: the service's own brand
+  and portal domains, neither of them the sending domain. Jev: action_required 0.88, transactional
+  0.06, spam 0.03; `needs_reply` 0.85.
+- **Outcome**: Jev's state carries
+  `link_domains: ["taxreturnsend.example", "taxportal-sign.example"]` and
+  `sender_auth: {"spf": "pass", "dkim": "pass", "dmarc": "pass"}`, no `reply_without_thread`. Stays
+  in the inbox with `Jev/Action` and `Jev/Needs Reply`; not spammed.
+- **Why**: the first wording of the phishing signs (any "open or sign" lure, any link to a domain
+  other than the sender's) pulled real e-signature and tax-portal notices toward spam in the
+  real-mail check. The signs are now about mismatch: links to a brand unrelated to the sender, a
+  fake reply, a conversation between other people, made stronger by DMARC `none` or `fail`. The spam
+  criterion says that a document, e-signature, tax-return or client-portal notice that passes DMARC
+  and links to that service's own brand domains is not spam, and `action_required` names reviewing
+  or signing through such a service. As in EX-38, the test pins the state and the outcome of Jev's
+  answer, not the judgement ([ADR 0042](decisions/0042-phishing-signals-for-jev.md)).
+
+### EX-40 — An envelope sender that looks like a DMARC pass
+
+- **Test**: `test_ex40_an_envelope_sender_that_looks_like_dmarc_pass_does_not_verify`
+- **Input**: `promo@shop.example` with `List-Unsubscribe: <https://shop.example/u/1>` and one-click.
+  Its envelope sender is `dmarc=pass@bounce.shop.example` and its domain publishes no DMARC record,
+  so Gmail's header is
+  `mx.google.com; dkim=pass header.i=@shop.example …; spf=pass (google.com: domain of dmarc=pass@bounce.shop.example designates …) smtp.mailfrom=dmarc=pass@bounce.shop.example`,
+  with no `dmarc` verdict of its own. Jev: marketing 0.97.
+- **Outcome**: Jev's state carries `sender_auth: {"spf": "pass", "dkim": "pass", "dmarc": "none"}`.
+  Archived with `Jev/Marketing`, `unsubscribe_skipped_unverified = true`; no one-click `POST`, no
+  `unsubscribes` row.
+- **Why**: before, any `dmarc=` text anywhere in the trusted header counted, the SPF comment and
+  `smtp.mailfrom` included, so this sender passed DMARC: it was verified and unsubscribed, a group
+  sender could have had its `X-Original-Sender` trusted, and Jev saw `dmarc: pass`, the very sign
+  the spam criterion uses to clear a document notice. Now only the verdict that starts each resinfo
+  counts ([4.2](#42-dmarc),
+  [ADR 0043](decisions/0043-authentication-results-parsed-per-rfc-8601.md)).
+
+### EX-41 — A quoted envelope sender can't hide a real DMARC fail
+
+- **Test**: `test_ex41_a_quoted_envelope_sender_cant_hide_a_real_dmarc_fail`
+- **Input**: `offers@bank.example` (a spoofed `From`) with
+  `List-Unsubscribe: <https://bank.example/u/1>` and one-click. Its envelope sender is the quoted
+  local part `"x); dmarc=pass (("@bounce.attacker.example` (RFC 5321 allows `(`, `)` and `;` inside
+  quotes), SPF and DKIM pass for `attacker.example`, and Gmail's own verdict is `dmarc=fail` for
+  `bank.example`. Gmail writes the envelope sender raw in its SPF comment and in `smtp.mailfrom`.
+  Jev: marketing 0.97.
+- **Outcome**: Jev's state carries `sender_auth: {"spf": "pass", "dkim": "pass", "dmarc": "fail"}`.
+  Archived with `Jev/Marketing`, `unsubscribe_skipped_unverified = true`; no one-click `POST`, no
+  `unsubscribes` row.
+- **Why**: before, a `"` inside a comment was plain text, so the quoted `)` closed Gmail's SPF
+  comment, `dmarc=pass` became a resinfo of its own, and the extra `(` hid Gmail's real `dmarc=fail`
+  in a comment that never closed: the spoofed bank sender passed DMARC and was unsubscribed. Now the
+  quoted string stays one inside the comment, and a header that never closes a comment or quote has
+  no verdicts ([4.2](#42-dmarc),
+  [ADR 0043](decisions/0043-authentication-results-parsed-per-rfc-8601.md)).
+
+### EX-42 — A malformed Gmail authentication header verifies nothing
+
+- **Test**: `test_ex42_a_malformed_gmail_authentication_header_verifies_nothing`
+- **Input**: `promo@shop.example` with `List-Unsubscribe: <https://shop.example/u/1>` and one-click.
+  Gmail's header is
+  `mx.google.com; dkim=pass header.i=promo)@shop.example …; spf=pass …; dmarc=pass header.from=shop.example`:
+  the DKIM identity, which the sender chooses, has a `)` that closes no comment. Jev: marketing
+  0.97.
+- **Outcome**: Jev's state carries `sender_auth: {"spf": "none", "dkim": "none", "dmarc": "none"}`.
+  Archived with `Jev/Marketing`, `unsubscribe_skipped_unverified = true`; no one-click `POST`, no
+  `unsubscribes` row.
+- **Why**: a header the parser can't balance is one whose structure a sender may have bent (EX-41),
+  so it fails closed: no verdict is trusted, not even those before the break. Before, a stray `)`
+  was ignored and this sender passed DMARC ([4.2](#42-dmarc),
+  [ADR 0043](decisions/0043-authentication-results-parsed-per-rfc-8601.md)).
+
+### EX-43 — An address literal can't forge a DMARC pass
+
+- **Test**: `test_ex43_an_address_literal_cant_forge_a_dmarc_pass`
+- **Input**: `promo@shop.example` with `List-Unsubscribe: <https://shop.example/u/1>` and one-click.
+  Its envelope sender is `x@[t:;dmarc=pass;]`, a general address literal (RFC 5321 4.1.3 lets
+  dcontent hold `;`, `=`, `(`, `)` and `"`), its domain publishes no DMARC record and SPF and DKIM
+  fail, so Gmail's header is
+  `mx.google.com; dkim=fail …; spf=fail (google.com: domain of x@[t:;dmarc=pass;] does not designate …) smtp.mailfrom=x@[t:;dmarc=pass;]`,
+  with no `dmarc` verdict of its own. Jev: marketing 0.97.
+- **Outcome**: Jev's state carries `sender_auth: {"spf": "fail", "dkim": "fail", "dmarc": "none"}`.
+  Archived with `Jev/Marketing`, `unsubscribe_skipped_unverified = true`; no one-click `POST`, no
+  `unsubscribes` row.
+- **Why**: before, the literal's `;` in `smtp.mailfrom` split off `dmarc=pass` as a resinfo of its
+  own, so this sender passed DMARC and was unsubscribed (the same through `smtp.helo` for a bounce).
+  Now a literal is one opaque piece and the header must match RFC 8601's grammar ([4.2](#42-dmarc),
+  [ADR 0043](decisions/0043-authentication-results-parsed-per-rfc-8601.md)).
+
 ## 6. Glossary
 
 - **Action**: what a category does: `keep`, `archive`, `archive_unsubscribe`, `spam`.
@@ -1433,6 +1616,27 @@ Behaviour found while writing this spec, documented as it is today:
 - Machine addresses that need context to recognise (`notifications@`, `updates@`, opaque VERP tokens
   on a normal host, a ticketing system's `support+123@`) are not detected: they still make a known
   contact. Being wrong there keeps more mail, the safe side.
+- The phishing signals only inform Jev ([ADR 0042](decisions/0042-phishing-signals-for-jev.md)): no
+  rule spams on them. `reply_without_thread` is also set for a genuine forward from a client that
+  leaves out `In-Reply-To` and `References`, so the criteria present it as one sign among others.
+  `link_domains` sees the link as written: an ESP that rewrites every link through its click tracker
+  shows only the tracker's domain, and a lure's single link can fall outside the 8 most frequent
+  domains of a long newsletter. In plain-text parts only `http://` and `https://` URLs are found
+  (the WHATWG forms are read in `href`s). On a private suffix (`github.io`, `workers.dev`) a link
+  domain keeps the site's own label, which can name a person or carry a per-recipient token
+  ([4.6](#46-body-extraction)). The host mapping is UTS #46's ignored code points, NFKC and IDNA's
+  full stops, not the whole UTS #46 table (its few other non-NFKC mappings, such as deviation
+  characters, are left as written).
+- Reading `Authentication-Results` per RFC 8601 ([4.2](#42-dmarc)) relies on Gmail writing the
+  envelope sender and HELO name as SMTP accepted them: an unquoted local part can't hold `;`, `(`,
+  `)`, `"`, `\`, `[` or `]` (RFC 5321 refuses it at `MAIL FROM`), a quoted one keeps its quotes and
+  an address literal its brackets. A server that dropped them could let one add a verdict; this
+  assumes Gmail keeps them. A raw `;` in `header.from` (no RFC 5322 domain holds one) meets Gmail's
+  real DMARC verdict, so at worst a real `fail` reads as `none`, never a pass.
+- The grammar is strict (an allowlist): if Gmail starts writing something it doesn't accept (a new
+  SPF, DKIM or DMARC result word, a trailing `;`), those emails lose their verdicts, unverified and
+  never unsubscribed, until the grammar is widened. Every shape Gmail wrote on 400 recent production
+  emails parses (`test_real_gmail_header_shapes_parse`).
 - An email processed again in a stronger mode (`label`, then `act`, or after `reprocess`) is still
   sent to Jev again (its stored answer isn't reused). Its new answer adds no auto-rule hit even when
   the first answer didn't count (e.g. 0.93 then 0.97): the sender just needs another email. And an

@@ -20,7 +20,8 @@ categories:
     criteria: >-
       Written by a real person specifically to me: clients, teammates, partners, investors,
       candidates, decisions, questions or requests addressed to me. Not mass mail that only
-      greets me by name.
+      greets me by name, and not a conversation between other people that an unrelated sender
+      pasted into a message to me (see spam).
     action: keep
     min_confidence: 0.0
 
@@ -29,10 +30,11 @@ categories:
     criteria: >-
       Automated email from a service I use that needs me to do something: approve a payment,
       a request or a message held for moderation that is pending my approval, update a payment
-      method or expiring card, verify my account or domain, act on a security alert, or fix or
-      renew something before a deadline. Not receipts, reminders of things already done, FYI
-      alerts, held-spam reports, surveys, feedback or review requests, or promotional calls to
-      action.
+      method or expiring card, verify my account or domain, act on a security alert, review
+      or sign a document, tax return or agreement sent through a document, e-signature or
+      client-portal service, or fix or renew something before a deadline. Not receipts,
+      reminders of things already done, FYI alerts, held-spam reports, surveys, feedback or
+      review requests, or promotional calls to action.
     action: keep
     min_confidence: 0.0
 
@@ -41,7 +43,7 @@ categories:
     criteria: >-
       Automated record of something I did or bought, with nothing left for me to do: receipts,
       paid invoices, payment or order confirmations, bookings, shipping updates, password
-      resets, verification codes.
+      resets, verification codes, copies of documents I already signed or filed.
     action: archive
     min_confidence: 0.80
 
@@ -89,8 +91,19 @@ categories:
   - key: spam
     label: Jev/Spam
     criteria: >-
-      Fraudulent or malicious email: scams, phishing, fake invoices or account alerts, malware,
-      impersonation, or bulk mail with forged or failing sender authentication.
+      Fraudulent or malicious email: scams, phishing, fake invoices or account alerts,
+      voicemail, document or e-signature notices that impersonate a service, malware, or bulk
+      mail with forged or failing sender authentication. Passing SPF or DKIM (sender_auth)
+      only proves which domain sent it, not that it is legitimate: phishing often passes them
+      for the attacker's own domain. Signs of phishing are mismatches: links (link_domains) to
+      a brand unrelated to the sender (a notice that claims to be from one brand while its
+      action link goes to another), a reply subject (RE:) with no earlier message
+      (reply_without_thread), a copied conversation between other people that I am not part
+      of; dmarc none or fail makes them stronger. Not
+      spam: a notice from an established document, e-signature, tax-return or client-portal
+      service whose sender passes DMARC and whose links go to that service's own brand
+      domains (they can differ from the sending domain); that is action_required or
+      transactional.
     action: spam
     min_confidence: 0.90
 
@@ -122,7 +135,8 @@ needs_reply:
     Does the sender expect a reply or an action from me personally? Yes: a person writing to
     me, or something only I can do (pay, sign, approve, authorize, confirm an appointment, renew
     an expiring document, secure my account). No: company or bulk mail (surveys, feedback,
-    ratings or reviews, promotions, webinars or events), even if it asks me to reply or click.
+    ratings or reviews, promotions, webinars or events), even if it asks me to reply or click,
+    a conversation between other people that isn't addressed to me, and phishing.
   threshold: 0.7
 
 review_label: Jev/Review

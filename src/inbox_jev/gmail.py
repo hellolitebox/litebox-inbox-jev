@@ -8,7 +8,7 @@ import logging
 import os
 import tempfile
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from email.message import EmailMessage as MimeMessage
 from pathlib import Path
 from types import TracebackType
@@ -21,7 +21,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 from . import signals
-from .body import extract_body
+from .body import extract_body, extract_link_domains
 from .sent_scan import (
     RECIPIENT_HEADERS,
     DomainScans,
@@ -165,6 +165,9 @@ class Email:
     snippet: str
     body: str
     internal_date_ms: int
+    # Domains the body's links point to (`body.extract_link_domains`); empty for a header-only
+    # read (`Gmail.get_headers`).
+    link_domains: list[str] = field(default_factory=list)
 
     def header(self, name: str) -> str:
         return signals.first_header(self.headers, name.lower()) or ""
@@ -175,7 +178,9 @@ class Email:
         return signals.extract(self.headers)
 
 
-def _to_email(msg: dict[str, Any], snippet: str, body: str) -> Email:
+def _to_email(
+    msg: dict[str, Any], snippet: str, body: str, link_domains: list[str] | None = None
+) -> Email:
     """An `Email` from a messages.get response; its headers keyed by lowercased name."""
     headers: dict[str, list[str]] = {}
     for h in msg.get("payload", {}).get("headers", []):
@@ -188,6 +193,7 @@ def _to_email(msg: dict[str, Any], snippet: str, body: str) -> Email:
         snippet=snippet,
         body=body,
         internal_date_ms=int(msg.get("internalDate", 0)),
+        link_domains=link_domains or [],
     )
 
 
@@ -267,10 +273,12 @@ class Gmail:
 
     def get(self, message_id: str) -> Email:
         msg = self._svc.messages().get(userId="me", id=message_id, format="full").execute()
+        payload = msg.get("payload", {})
         return _to_email(
             msg,
             snippet=html.unescape(msg.get("snippet", "")),
-            body=extract_body(msg.get("payload", {})),
+            body=extract_body(payload),
+            link_domains=extract_link_domains(payload),
         )
 
     def get_headers(self, message_id: str, names: list[str], num_retries: int = 0) -> Email:

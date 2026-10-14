@@ -9,7 +9,6 @@ from email.utils import getaddresses, parseaddr
 from . import psl
 
 _ANGLE = re.compile(r"<([^>]+)>")
-_DMARC = re.compile(r"\bdmarc=(\w+)", re.IGNORECASE)
 # A plain lowercase address, safe to put in a Gmail search query or trust as a group's author.
 ADDRESS = re.compile(r"^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$")
 # A plain lowercase domain name (example.org, mail.example.co.uk): dot-separated labels of
@@ -194,17 +193,190 @@ def parse_list_unsubscribe(value: str | None) -> tuple[tuple[str, ...], tuple[st
     return tuple(https), tuple(mailto)
 
 
-def dmarc_passed(authentication_results: list[str]) -> bool:
-    """True if Gmail's Authentication-Results reports dmarc=pass.
+# The authserv-id Gmail stamps on its own Authentication-Results header.
+GMAIL_AUTHSERV_ID = "mx.google.com"
+AUTH_METHODS = ("spf", "dkim", "dmarc")
+# The result words RFC 8601 2.7 defines for these methods, plus "hardfail", the legacy synonym of
+# SPF "fail" (RFC 5451). A Gmail header that gives one of them any other word is not trusted
+# (`_parse_auth_results`).
+AUTH_RESULTS = frozenset(
+    {"pass", "fail", "softfail", "hardfail", "neutral", "none", "temperror", "permerror", "policy"}
+)
+
+# The opaque pieces of an Authentication-Results header, which can carry text a sender chose: a
+# quoted string (with `\` pairs) and a domain literal (RFC 5321 `[...]`, whose dcontent excludes
+# `[`, `]` and `\` but includes `;`, `(`, `)` and `"`); then a `\` pair, a parenthesis, or a run
+# of anything else. An unterminated quoted string or literal, a stray `]` or a final lone `\`
+# matches none of them.
+_HEADER_PIECE = re.compile(r'"(?:[^"\\]|\\.)*"|\[[^\[\]\\]*\]|\\.|[()]|[^"\\()\[\]]+', re.DOTALL)
+
+
+def _reduce_free_text(value: str) -> tuple[str, bool]:
+    """`value` with every comment (`(...)`, nested) replaced by a space, every quoted string by
+    `""` and every domain literal by `[]`, and whether `value` is well-formed.
+
+    These are the parts of an Authentication-Results header that carry free text, such as the
+    envelope sender in the SPF comment and in `smtp.mailfrom`. Each is read as one opaque piece,
+    in a comment or not, so text a sender chose can't close the comment around it or split off a
+    resinfo of its own. A header that ends inside a comment, a quoted string, a literal or an
+    escape, closes a comment it never opened, or has a stray `]` or a `\\` outside all three is
+    not well-formed; the text returned then stops at the break.
+    """
+    out: list[str] = []
+    depth = pos = 0
+    for match in _HEADER_PIECE.finditer(value):
+        piece = match.group()
+        if match.start() != pos:  # an unterminated quoted string or literal, a `]`, a final `\`
+            break
+        pos = match.end()
+        if piece == "(":
+            depth += 1
+        elif piece == ")":
+            if not depth:
+                return "".join(out), False
+            depth -= 1
+            if not depth:
+                out.append(" ")
+        elif depth:
+            continue
+        elif piece[0] == '"':
+            out.append('""')
+        elif piece[0] == "[":
+            out.append("[]")
+        elif piece[0] == "\\":  # no RFC 8601 token holds one (RFC 2045 tspecials)
+            return "".join(out), False
+        else:
+            out.append(piece)
+    return "".join(out), pos == len(value) and not depth
+
+
+# RFC 8601 2.2's grammar, over `_reduce_free_text`'s output with whitespace collapsed to one
+# space (so " ?" is an optional CFWS and " " a required one). A value is a run without
+# whitespace, `;`, `@` or a delimiter `_reduce_free_text` keeps paired: wider than RFC 2045's
+# token, because Gmail's `header.b` is base64 (`/`, `+`, `=`) and envelope local parts hold `=`
+# and `+` (`bounces+1-user=domain.example@…`). It can never hold a `;`, so it can't end a resinfo.
+_KEYWORD = r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
+_VALUE = r'(?:""|[^\s;()"\\\[\]@]+)'
+_DOMAIN = r'(?:\[\]|[^\s;()"\\\[\]@=/]+)'
+_PVALUE = rf"(?:\[\]|{_VALUE}?@{_DOMAIN}|{_VALUE})"
+_AUTHSERV = re.compile(rf" ?({_VALUE})(?: [0-9]+)? ?")
+_RESINFO = re.compile(
+    rf" ?(?P<method>{_KEYWORD}) ?(?:/ ?[0-9]+ ?)?= ?(?P<result>{_KEYWORD})"
+    rf"(?: reason ?= ?{_VALUE})?"
+    rf"(?: {_KEYWORD} ?\. ?{_KEYWORD} ?= ?{_PVALUE})* ?"
+)
+
+
+def _parse_auth_results(header: str) -> tuple[str, list[tuple[str, str]]]:
+    """An Authentication-Results header's authserv-id (lowercased) and its (method, result)
+    verdicts for `AUTH_METHODS`, lowercased, in order (RFC 8601 2.2).
+
+    The header must match RFC 8601's grammar exactly (an allowlist, not a search for verdicts):
+    `authserv-id [version] ; resinfo ; …` or `authserv-id ; none`, each resinfo being
+    `method[/version]=result [reason=…] [ptype.property=pvalue …]`, once comments, quoted
+    strings and domain literals are reduced to opaque pieces (`_reduce_free_text`). Only the
+    `method=result` that starts a resinfo is a verdict, and an SPF, DKIM or DMARC result must be
+    an RFC 8601 word (`AUTH_RESULTS`). A header with anything else anywhere (a stray `;` or
+    delimiter, a property with no value, `dmarc=passx`) has no verdicts at all: fail closed,
+    never what came before the break. The authserv-id is still read from such a header, so a
+    malformed Gmail header is still the one trusted (`_gmail_verdicts`), with nothing in it.
+    Other methods (`arc`, `dara`) must parse but are dropped.
+    """
+    text, well_formed = _reduce_free_text(header)
+    authserv, *resinfos = re.sub(r"\s+", " ", text).split(";")
+    id_tokens = authserv.split()
+    authserv_id = id_tokens[0].lower() if id_tokens else ""
+    if not well_formed or not _AUTHSERV.fullmatch(authserv) or not resinfos:
+        return authserv_id, []
+    if len(resinfos) == 1 and resinfos[0].strip().lower() == "none":
+        return authserv_id, []
+    verdicts: list[tuple[str, str]] = []
+    for resinfo in resinfos:
+        match = _RESINFO.fullmatch(resinfo)
+        if match is None:
+            return authserv_id, []
+        method, result = match["method"].lower(), match["result"].lower()
+        if method in AUTH_METHODS:
+            if result not in AUTH_RESULTS:
+                return authserv_id, []
+            verdicts.append((method, result))
+    return authserv_id, verdicts
+
+
+def _gmail_verdicts(authentication_results: list[str]) -> list[tuple[str, str]] | None:
+    """The verdicts (`_parse_auth_results`) of the one Authentication-Results header to trust:
+    the topmost one whose authserv-id is exactly `GMAIL_AUTHSERV_ID`; None without one.
 
     A sender can inject its own Authentication-Results header, even one claiming to be
-    mx.google.com. Gmail prepends its own, so only the topmost mx.google.com header is trusted;
-    every verdict in it must be "pass". Without one, nothing is trusted: Gmail stamps every
-    inbound email, and any other header could have been written by the sender.
+    mx.google.com. Gmail prepends its own, so only the topmost mx.google.com header is trusted.
+    Without one, nothing is trusted: Gmail stamps every inbound email, and any other header
+    (`mx.google.com.attacker.example` included) could have been written by the sender.
     """
-    gmail = [h for h in authentication_results if h.strip().lower().startswith("mx.google.com")]
-    verdicts = [m.lower() for h in gmail[:1] for m in _DMARC.findall(h)]
-    return bool(verdicts) and all(v == "pass" for v in verdicts)
+    for header in authentication_results:
+        authserv_id, verdicts = _parse_auth_results(header)
+        if authserv_id == GMAIL_AUTHSERV_ID:
+            return verdicts
+    return None
+
+
+def _method_verdict(verdicts: list[tuple[str, str]], method: str) -> str:
+    """One method's verdict among `verdicts`: "none" when it has none. DKIM is "pass" when any
+    signature passes (one valid signature authenticates the message), else its first verdict.
+    SPF and DMARC are checked once per message (Gmail writes one resinfo each), so two that
+    disagree are not trusted: "none", fail closed for that method.
+    """
+    found = [result for m, result in verdicts if m == method]
+    if not found:
+        return "none"
+    if method == "dkim":
+        return "pass" if "pass" in found else found[0]
+    return found[0] if len(set(found)) == 1 else "none"
+
+
+def dmarc_passed(authentication_results: list[str]) -> bool:
+    """True if Gmail's Authentication-Results (`_gmail_verdicts`) reports dmarc=pass, and no
+    other DMARC verdict (`_method_verdict`)."""
+    return _method_verdict(_gmail_verdicts(authentication_results) or [], "dmarc") == "pass"
+
+
+def sender_auth(authentication_results: list[str]) -> dict[str, str] | None:
+    """SPF, DKIM and DMARC verdicts from Gmail's own Authentication-Results, for Jev.
+
+    Only the header `_gmail_verdicts` trusts is read; None without one (the verdicts are
+    unknown, which is not the same as failing). Each method's verdict is `_method_verdict`'s:
+    "none" when the header has none for it, and for every method when that header doesn't parse
+    (`_parse_auth_results`). A verdict is one lowercased RFC 8601 result word, never free text
+    from the header.
+    """
+    parsed = _gmail_verdicts(authentication_results)
+    if parsed is None:
+        return None
+    return {method: _method_verdict(parsed, method) for method in AUTH_METHODS}
+
+
+# Reply and forward prefixes in the languages mail clients localise them to: RE, FW, FWD; AW and
+# WG (German), RV and RES (Spanish, Portuguese), TR (French), SV and VS (Nordic), ANTW (Dutch),
+# ODP (Polish), ENC (Portuguese). Case-insensitive, optionally numbered (`Re[2]:`, `RE(3):`),
+# with a colon or a full-width colon, possibly repeated ("Re: Fwd: ").
+_REPLY_PREFIX = re.compile(
+    r"^\s*(?:re|fwd?|aw|wg|rv|res|tr|sv|vs|antw|odp|enc)\s*(?:[\[(]\d+[\])])?\s*[:\uff1a]",
+    re.IGNORECASE,
+)
+
+
+def reply_without_thread(subject: str, headers: dict[str, list[str]]) -> bool:
+    """Whether `subject` claims a reply or forward (`_REPLY_PREFIX`) but the message names no
+    earlier one: no In-Reply-To and no References header (`headers` keyed by lowercased name).
+
+    A real reply carries them (RFC 5322 3.6.4); a "RE:" with neither is a fake reply, a
+    phishing trick to look like an ongoing conversation. Some clients forward without them,
+    so it is a signal for Jev, not a verdict.
+    """
+    if not _REPLY_PREFIX.match(subject):
+        return False
+    return not any(
+        (first_header(headers, name) or "").strip() for name in ("in-reply-to", "references")
+    )
 
 
 def sender_address(from_header: str | None) -> str:

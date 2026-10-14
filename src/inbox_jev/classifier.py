@@ -21,15 +21,17 @@ from typesafe_sdk import (
 from .classification import Classification, PreviousContact
 from .config import CategoriesConfig
 from .gmail import Email
-from .signals import Signals
+from .signals import Signals, reply_without_thread, sender_auth
 
 CATEGORY_Q = "category"
 NEEDS_REPLY_Q = "needs_reply"
 TAG_PREFIX = "tag_"
 
 # One email as Jev sees it (`build_state`): header text, flags, the body excerpt and, when
-# known, `previous_contact`. A plain mapping, as the SDK's `state` is any JSON object.
-JevState: TypeAlias = dict[str, str | bool | None]
+# known, `previous_contact` and the phishing signals (`link_domains`, `sender_auth`). A plain
+# mapping, as the SDK's `state` is any JSON object.
+JevValue: TypeAlias = str | bool | list[str] | dict[str, str] | None
+JevState: TypeAlias = dict[str, JevValue]
 
 # What a failed Jev call raises (API, connection, invalid answer). Callers that can do without
 # Jev's answer catch this, not Exception.
@@ -127,7 +129,14 @@ CATEGORY_INSTRUCTIONS = (
     f"({PreviousContact.WROTE_TO_SENDER}), to someone else at their company domain "
     f"({PreviousContact.WROTE_TO_THEIR_DOMAIN}) or never ({PreviousContact.NEVER}); it is "
     "missing when unknown. A personal-looking pitch from a sender I never wrote to is usually "
-    "cold outreach, not important."
+    "cold outreach, not important. "
+    "sender_auth holds Gmail's SPF, DKIM and DMARC verdicts: a pass only proves which domain "
+    "sent the email, not that it is legitimate, while dmarc none or fail strengthens other "
+    "signs of phishing. reply_without_thread means the subject says it is a reply or forward "
+    "(RE:, FW:) but the email answers no earlier message. link_domains lists the domains its "
+    "links point to, most frequent first: links to a brand unrelated to the sender are a sign "
+    "of phishing, while a service linking to its own brand or portal domains (which can differ "
+    "from the sending domain) is normal."
 )
 
 
@@ -138,7 +147,12 @@ def build_state(
     previous_contact: PreviousContact | None = None,
     sig: Signals | None = None,
 ) -> JevState:
-    """`sig` is triage.signals_for's answer; defaults to the raw (unresolved) signals."""
+    """`sig` is triage.signals_for's answer; defaults to the raw (unresolved) signals.
+
+    Optional keys are left out when they say nothing: `original_sender` / `sent_via_group`
+    (no trusted group), `previous_contact` (unknown), `reply_without_thread` (false),
+    `link_domains` (no link) and `sender_auth` (no Authentication-Results from Gmail).
+    """
     sig = sig or email.extract_signals()
     state: JevState = {
         "recipient": account_email,
@@ -157,6 +171,14 @@ def build_state(
         state["sent_via_group"] = sig.relayed_by
     if previous_contact is not None:
         state["previous_contact"] = previous_contact.value
+    # Phishing signals, each only when there is something to say (a small state).
+    if reply_without_thread(email.header("Subject"), email.headers):
+        state["reply_without_thread"] = True
+    if email.link_domains:
+        state["link_domains"] = email.link_domains
+    auth = sender_auth(email.headers.get("authentication-results", []))
+    if auth is not None:
+        state["sender_auth"] = auth
     return state
 
 

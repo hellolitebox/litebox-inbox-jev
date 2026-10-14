@@ -6,7 +6,14 @@ import pytest
 from fakes import SENT_BASE_S, HttpError, SentMailService, sent_mail_gmail
 
 from inbox_jev import gmail as gmail_module
-from inbox_jev.body import extract_body
+from inbox_jev.body import (
+    HOSTNAME_MAX,
+    LABEL_MAX,
+    LINK_DOMAINS_MAX,
+    extract_body,
+    extract_link_domains,
+    link_domain,
+)
 from inbox_jev.classification import PreviousContact
 from inbox_jev.classifier import (
     CATEGORY_INSTRUCTIONS,
@@ -83,6 +90,188 @@ def test_build_state_truncates_body():
     assert "previous_contact" not in state
     state = build_state(email, "me@acme.com", 100, PreviousContact.NEVER)
     assert state["previous_contact"] == "never" and type(state["previous_contact"]) is str
+
+
+def _bare_email(headers, link_domains=None) -> Email:
+    return Email("1", "t", ["INBOX"], headers, "", "body", 0, link_domains or [])
+
+
+def test_build_state_adds_phishing_signals_only_when_they_say_something():
+    """A fake reply gets `reply_without_thread`; a real reply with no Gmail
+    Authentication-Results and no links gets none of the three keys."""
+    state = build_state(_bare_email({"from": ["A <a@b.com>"], "subject": ["RE: Hi"]}), "m@x.com", 9)
+    assert state["reply_without_thread"] is True
+    state = build_state(
+        _bare_email({"subject": ["RE: Hi"], "in-reply-to": ["<1@b.com>"]}), "m@x.com", 9
+    )
+    assert not {"reply_without_thread", "link_domains", "sender_auth"} & state.keys()
+
+
+def test_build_state_carries_link_domains_and_sender_auth():
+    headers = {
+        "from": ["News <noreply@news-site.example>"],
+        "subject": ["Weekly"],
+        "authentication-results": [
+            "mx.google.com; dkim=pass header.i=@news-site.example; spf=pass"
+        ],
+    }
+    state = build_state(_bare_email(headers, ["brand.example", "gov.example"]), "m@x.com", 9)
+    assert state["link_domains"] == ["brand.example", "gov.example"]
+    assert state["sender_auth"] == {"spf": "pass", "dkim": "pass", "dmarc": "none"}
+    assert "reply_without_thread" not in state
+
+
+def test_category_instructions_explain_the_phishing_signals():
+    for key in ("sender_auth", "reply_without_thread", "link_domains"):
+        assert key in CATEGORY_INSTRUCTIONS
+
+
+def _html(markup: str) -> dict:
+    return {"mimeType": "text/html", "body": {"data": b64(markup)}}
+
+
+def test_extract_link_domains_counts_registrable_domains_most_frequent_first():
+    markup = (
+        '<a href="https://links.notification.brand.example/ls/click?upn=TOKEN&amp;u=me%40x.com">'
+        "Play</a>"
+        '<a href="https://www.agency.gov.example/a">1</a>'
+        '<a href="https://agency.gov.example/b?x=1">2</a>'
+        '<a href="mailto:someone@agency.gov.example">mail</a>'
+        '<a href="tel:+1555">call</a><a href="#top">top</a><a>no href</a>'
+        '<area href="HTTP://Maps.Other.example/p">'
+    )
+    assert extract_link_domains(_html(markup)) == [
+        "gov.example",
+        "brand.example",
+        "other.example",
+    ]
+
+
+def test_extract_link_domains_returns_domains_only_never_paths_or_queries():
+    markup = '<a href="https://track.example/c/u=me%40x.com?token=SECRET">x</a>'
+    (domain,) = extract_link_domains(_html(markup))
+    assert domain == "track.example"
+
+
+def test_extract_link_domains_reads_plain_text_urls_and_skips_attachments():
+    payload = {
+        "mimeType": "multipart/mixed",
+        "parts": [
+            {
+                "mimeType": "text/plain",
+                "body": {"data": b64("See https://docs.example.org/x, or (http://a.example).")},
+            },
+            {
+                "mimeType": "text/html",
+                "filename": "invite.html",
+                "body": {"data": b64('<a href="https://evil.example">x</a>')},
+            },
+        ],
+    }
+    assert extract_link_domains(payload) == ["example.org", "a.example"]
+
+
+def test_extract_link_domains_is_capped():
+    markup = "".join(f'<a href="https://d{i}.example">x</a>' for i in range(20))
+    assert len(extract_link_domains(_html(markup))) == LINK_DOMAINS_MAX
+    assert extract_link_domains(_html(markup), limit=2) == ["d0.example", "d1.example"]
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://a.b.example.co.uk/x", "example.co.uk"),
+        ("http://192.0.2.7/login", "192.0.2.7"),
+        ("https://[2001:db8::1]/", "2001:db8::1"),
+        ("https://co.uk/", None),  # a public suffix: nobody's domain
+        ("https://localhost/", None),
+        ("https://[bad/", None),
+        ("https://exa_mple.com/", None),
+        ("ftp://files.example/", None),
+        ("javascript:alert(1)", None),
+        # Read as a browser reads them (WHATWG URL Standard).
+        ("https:\\\\evil.example/x", "evil.example"),
+        ("https:\\/evil.example/x", "evil.example"),
+        ("https:/evil.example", "evil.example"),
+        ("HTTPS:evil.example", "evil.example"),
+        ("//evil.example/x", "evil.example"),
+        (" \thttps://ev\nil.example/ ", "evil.example"),
+        ("https://good.example\\@evil.example/", "good.example"),
+        ("https://evil%2Eexample/", "evil.example"),
+        ("/relative/path", None),
+        ("http://0x7f.1/", "127.0.0.1"),
+        ("http://2130706433/", "127.0.0.1"),
+        ("http://010.0.0.1/", "8.0.0.1"),
+        ("http://192.0.2.7./", "192.0.2.7"),
+        ("http://256.1.1.1/", None),
+        ("http://1.2.3.4.5/", None),
+        ("http://09.1/", None),
+        ("http://evil.1/", None),  # a numeric last label makes the host IPv4, and this isn't
+        ("https://?q=1", None),  # no host
+        # Mapped as a browser maps a host (UTS #46): NFKC, and IDNA's other full stops are dots.
+        ("https://evil\u3002example/", "evil.example"),
+        ("https://evil\uff0eexample/", "evil.example"),
+        ("https://evil\uff61example/", "evil.example"),
+        ("http://\uff11\uff12\uff17.0.0.1/", "127.0.0.1"),
+        ("https://\uff45vil.example/", "evil.example"),
+        # 15 characters that NFKC turns into 270: over LABEL_MAX once mapped.
+        ("https://" + "\ufdfa" * 15 + ".example/", None),
+        # UTS #46's ignored code points are dropped, as a browser drops them.
+        ("https://ev\u200bil.example/", "evil.example"),
+        ("https://evil\u00adexample.com/", "evilexample.com"),
+        ("https://e\u034fv\u180bi\u180dl\u2060.\ufeffexample/", "evil.example"),
+        ("https://evil\ufe00\ufe0f.example/", "evil.example"),
+    ],
+)
+def test_link_domain(url, expected):
+    assert link_domain(url) == expected
+
+
+def test_link_domain_drops_hosts_longer_than_dns_allows():
+    label = "a" * LABEL_MAX
+    assert link_domain(f"https://{label}.example/") == f"{label}.example"
+    assert link_domain(f"https://{label}a.example/") is None
+    assert link_domain(f"https://{label}a.ok.example/") is None  # a long subdomain label too
+    name = ".".join(["a" * 60] * 4) + ".example"  # every label fits, 251 characters
+    assert len(name) <= HOSTNAME_MAX and link_domain(f"https://{name}/") == "a" * 60 + ".example"
+    assert link_domain(f"https://aaa.{name}/") is None  # 255 characters
+    # A long Unicode label is measured as the punycode DNS carries.
+    cjk = "".join(chr(0x4E00 + 37 * i) for i in range(30))  # 30 characters, 72 in punycode
+    assert len(cjk) <= LABEL_MAX and link_domain(f"https://{cjk}.example/") is None
+
+
+def test_extract_link_domains_stays_small_with_huge_hosts():
+    markup = "".join(f'<a href="https://{"a" * 100_000}{i}.com/">x</a>' for i in range(8))
+    markup += '<a href="https://real.example/">x</a>'
+    assert extract_link_domains(_html(markup)) == ["real.example"]
+
+
+class _FullGetService:
+    """messages().get(format="full") answering one message."""
+
+    def __init__(self, msg):
+        self.msg = msg
+
+    def users(self):
+        return self
+
+    def messages(self):
+        return self
+
+    def get(self, userId, id, format):
+        assert (userId, id, format) == ("me", self.msg["id"], "full")
+        return type("Req", (), {"execute": lambda _: self.msg})()
+
+
+def test_gmail_get_reads_body_and_link_domains(monkeypatch):
+    msg = {
+        "id": "1",
+        "threadId": "t",
+        "snippet": "a &amp; b",
+        "payload": _html('<p>Hi</p><a href="https://site.example/x">x</a>'),
+    }
+    email = _gmail(monkeypatch, _FullGetService(msg)).get("1")
+    assert (email.body, email.snippet, email.link_domains) == ("Hi x", "a & b", ["site.example"])
 
 
 def test_previous_contact_wire_values_are_the_ones_jev_is_told_about():
