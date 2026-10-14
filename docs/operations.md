@@ -10,6 +10,7 @@ deploys. What the tool does is in the [README](../README.md); how it decides, in
 ```bash
 git clone <repo> /opt/inbox-jev && cd /opt/inbox-jev
 # copy .env, accounts.yaml, secrets/client_secret.json and secrets/tokens/*.json from your laptop
+# (and your own categories file if .env's CATEGORIES_FILE names one: see "Your own categories")
 # The container runs as APP_UID:APP_GID. Make sure .env sets both (see .env.example): an older
 # .env without them falls back to 1000:1000 and the app gets PermissionError on data/ and secrets/.
 # Pick ids no host user has. Read them from .env (no sourcing: other values may contain spaces):
@@ -63,11 +64,11 @@ instead of misbehaving later:
   `DEPLOY_BACKUPS_KEEP`) aren't the app's: the scripts that read them check them when they run (a
   count that isn't a whole number in range exits 2, which the watchdog and backup services turn into
   an alert).
-- `categories.yaml`: every `min_confidence`, `threshold`, `max_keep_probability` and
-  `archive_group_*` value is between 0 and 1, `auto_rule.hits` at least 1, plus the checks in its
-  comments.
+- the categories file (`CATEGORIES_FILE`, `categories.yaml` by default): every `min_confidence`,
+  `threshold`, `max_keep_probability` and `archive_group_*` value is between 0 and 1,
+  `auto_rule.hits` at least 1, plus the checks in its comments.
 - `accounts.yaml`: an account's `min_confidence` values are between 0 and 1, and its
-  `act_categories` and `min_confidence` keys must be categories in `categories.yaml`. That
+  `act_categories` and `min_confidence` keys must be categories in the categories file. That
   cross-check covers the whole file, whatever `-a` names, in every command that reads it (`run`,
   `digest`, `unsubscribe-retry`, `senders backfill`, `labels rename`): the command exits 2 before
   opening the database or Gmail, with one message listing every unknown key of every account. No
@@ -145,6 +146,52 @@ shows the whole backlog, including re-listed "needs reply" and low-confidence em
 
 ## Changing categories
 
+### Your own categories
+
+The shipped [`categories.yaml`](../categories.yaml) is a default starting point that reflects one
+inbox owner's preferences: website form leads and meetings booked with them are `action_required`,
+newsletters are archived, and so on. Tune it, in your own copy (below), to how you want your mail
+sorted. The brand names in its criteria (HubSpot, Calendly, Typeform, SafeSend…) are examples that
+help Jev recognise a kind of email, not rules: no code matches on them, and you can drop or replace
+them.
+
+Don't edit the tracked file on a deployment: `scripts/deploy.sh` checks out each release over it.
+Keep your own copy next to it instead:
+
+```bash
+cd /opt/inbox-jev
+cp categories.yaml categories.local.yaml        # gitignored, like accounts.yaml
+$EDITOR categories.local.yaml
+echo 'CATEGORIES_FILE=categories.local.yaml' >> .env   # or edit the existing line
+docker compose run --rm app digest --dry-print  # checks both files, sends nothing
+```
+
+`CATEGORIES_FILE` is a file name in the checkout: `docker-compose.yml` mounts it read-only at the
+same path under `/app` and the app reads it from there, so the same line works on the host and in
+the container. Only a plain file name in the checkout (like `categories.local.yaml`) is supported,
+and the file must exist before you set it: `docker compose` refuses to start when it's missing. The
+image's own `categories.yaml` is then unused. Like `accounts.yaml`, the copy isn't in git: back it
+up yourself.
+
+- **Keep the `important` category.** The allowlist and the emails you pull back to the inbox use it,
+  and validation refuses a file without it. Every other category can be renamed, removed or added.
+- **Keep `accounts.yaml` in sync.** Its `act_categories` and `min_confidence` keys must be
+  categories in your file, or every command refuses to start (see
+  [Configuration checks](#configuration-checks)). Rename or remove a category in both files, in the
+  order given in [Rolling out a category change](#rolling-out-a-category-change).
+- **Validate** after every edit with `docker compose run --rm app digest --dry-print`, and check how
+  your criteria sort real mail, read-only, with
+  `scripts/check_branch.sh main --account you@example.com --query 'in:inbox newer_than:7d'`: it runs
+  `main`'s code with your file (see
+  [Checking a branch against real mail](development.md#checking-a-branch-against-real-mail)).
+- **Before an upgrade**, see what changed in the defaults
+  (`git fetch origin && git diff HEAD origin/main -- categories.yaml`) and merge what the release
+  needs and the improvements you want into your copy before running `scripts/deploy.sh`: the shipped
+  criteria get better as mistakes are found, and a release may add a category or a setting that its
+  code expects. `deploy.sh`'s smoke test doesn't read the categories file, so run
+  `docker compose run --rm app digest --dry-print` right after the deploy (afterwards,
+  `diff categories.local.yaml categories.yaml` shows what you haven't taken).
+
 ### Rolling out a category change
 
 - **Deploy first** (`scripts/deploy.sh`), **then** add a new key to `act_categories` (or
@@ -161,8 +208,8 @@ shows the whole backlog, including re-listed "needs reply" and low-confidence em
 
 ### Adding a category / label
 
-Add an entry to `categories.yaml`. No code changes are needed: the Gmail label is created on the
-next run and Jev starts choosing it.
+Add an entry to the categories file (`categories.yaml`, or your own copy). No code changes are
+needed: the Gmail label is created on the next run and Jev starts choosing it.
 
 ```yaml
 - key: recruiting

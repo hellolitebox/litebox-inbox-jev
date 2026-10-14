@@ -20,8 +20,12 @@ Everything is recorded in a database (SQLite by default) so it can be audited an
 
 ## Categories and labels
 
-Defaults from [`categories.yaml`](categories.yaml) (editable, see
-[Adding a category](docs/operations.md#adding-a-category--label)):
+The categories below are a **starting point**, not a fixed taxonomy: they come from
+[`categories.yaml`](categories.yaml) and reflect one person's preferences (for example, a lead from
+your website's form or a meeting someone booked with you is an action; newsletters are archived).
+Tune the criteria, thresholds and actions, or add categories, in your own copy of the file, without
+editing the repo ([Your own categories](docs/operations.md#your-own-categories)). Brand names in the
+criteria (HubSpot, Calendly…) are examples for Jev, not rules. The defaults:
 
 | Category | Label | Action | `min_confidence` |
 | -- | -- | -- | -- |

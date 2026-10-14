@@ -1,6 +1,7 @@
 .env
 .env.*
 accounts.yaml
+categories.local.yaml
 secrets/
 data/
 .venv/

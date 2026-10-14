@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 accounts.yaml
+categories.local.yaml
 secrets/
 data/
 *.db

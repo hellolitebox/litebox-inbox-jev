@@ -43,6 +43,13 @@ and anything moved to Spam can be moved back.
   below.
 - `Jev/Processed`: a marker that Inbox Jev has seen the email. You can ignore it.
 
+**These kinds are a starting point.** The descriptions above are the defaults Inbox Jev comes with,
+written for one person's inbox. Whoever runs Inbox Jev can change them to suit your inbox: for
+example, keep newsletters in the inbox, treat the messages from your website's contact form as
+ordinary notifications, or add a new kind (say, job applications). The company names in the
+descriptions (HubSpot, Calendly and the like) are only examples that help Jev recognise a kind of
+email; an email isn't treated differently just because it comes from one of them.
+
 ## How it decides
 
 **First, who sent it.** If the sender is on your allowlist (a list of people and domains you always

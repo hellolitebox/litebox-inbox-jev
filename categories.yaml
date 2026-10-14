@@ -1,3 +1,16 @@
+# The default categories: a starting point that reflects one inbox owner's preferences (for
+# example, website form leads and meetings booked with me are action_required, and newsletters
+# are archived). Tune them for yours. Brand names in the criteria (HubSpot, Calendly, Typeform…)
+# are examples that help Jev recognise a kind of email, not rules: no code matches on them.
+#
+# To use your own version without editing this tracked file, copy it to categories.local.yaml
+# (gitignored) and set CATEGORIES_FILE=categories.local.yaml in .env; docker compose mounts it.
+# Keep the important category (the allowlist and emails pulled back to the inbox use it);
+# everything else can be renamed, removed or added. Keep accounts.yaml in sync (its
+# act_categories and min_confidence keys must be categories here, or every command refuses to
+# start), and before an upgrade diff your copy against the new version of this file: the
+# defaults improve over time. Details: docs/operations.md, "Your own categories".
+#
 # Categories Jev chooses between (exactly one per email). Add an entry to create a new label —
 # no code changes needed. The Gmail label is created on the next run.
 #

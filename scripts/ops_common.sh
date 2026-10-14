@@ -1,5 +1,6 @@
 # shellcheck shell=bash
-# Helpers shared by the host-side ops scripts (alert.sh, watchdog.sh, backup.sh, deploy.sh).
+# Helpers shared by the host-side ops scripts (alert.sh, watchdog.sh, backup.sh, deploy.sh,
+# check_branch.sh).
 # Sourced, never run. They run on the host from systemd with bash, curl, python3 (standard
 # library only, through ops_message.py), sqlite3 and journalctl: never in the app image, so an
 # alert still goes out when the image is broken or can't be pulled.

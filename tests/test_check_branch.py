@@ -1,6 +1,6 @@
 """scripts/check_branch.sh refuses a branch only when its runtime dependencies differ from the
-deployment's (scripts/runtime_deps.py). Run against real git repositories, with a fake `docker`
-first on PATH."""
+deployment's (scripts/runtime_deps.py), and checks it with the deployment's own categories file
+when .env names one. Run against real git repositories, with a fake `docker` first on PATH."""
 
 import os
 import shutil
@@ -51,10 +51,11 @@ class Checkout:
         self.tmp = tmp
         seed = tmp / "seed"
         (seed / "scripts").mkdir(parents=True)
-        for name in ("check_branch.sh", "runtime_deps.py"):
+        for name in ("check_branch.sh", "ops_common.sh", "runtime_deps.py"):
             shutil.copy2(SCRIPTS / name, seed / "scripts")
         (seed / "pyproject.toml").write_text(PYPROJECT)
         (seed / "uv.lock").write_text("version = 1\n")
+        (seed / "categories.yaml").write_text("categories: {}\n")
         git(seed, "init", "-q", "-b", "main")
         git(seed, "add", ".")
         git(seed, "commit", "-q", "-m", "deployed")
@@ -79,12 +80,18 @@ class Checkout:
         git(self.work, "push", "-q", "origin", name)
         git(self.work, "switch", "-q", "main")
 
-    def check(self, branch: str) -> subprocess.CompletedProcess[str]:
-        env = os.environ | {
-            "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
-            "FAKE_HOME": str(self.tmp),
-            "TMPDIR": str(self.tmp),
-        }
+    def check(
+        self, branch: str, *args: str, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        env = (
+            {k: v for k, v in os.environ.items() if k != "CATEGORIES_FILE"}
+            | {
+                "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
+                "FAKE_HOME": str(self.tmp),
+                "TMPDIR": str(self.tmp),
+            }
+            | (env or {})
+        )
         return subprocess.run(
             [
                 "bash",
@@ -92,6 +99,7 @@ class Checkout:
                 branch,
                 "--account",
                 "a@b.c",
+                *args,
             ],
             env=env,
             capture_output=True,
@@ -126,6 +134,78 @@ def test_a_branch_that_changes_only_tool_config_is_checked(checkout, pyproject):
     [call] = checkout.docker_calls()
     assert "dry_classify.py" in call and "--account a@b.c" in call
     assert not (checkout.tmp / "inbox-jev-check").exists(), "the worktree is removed"
+
+
+def test_the_branch_categories_are_checked_by_default(checkout):
+    checkout.push_branch("criteria", {"pyproject.toml": PYPROJECT + "\n# criteria\n"})
+    (checkout.deploy / ".env").write_text("CATEGORIES_FILE=categories.yaml\n")
+
+    result = checkout.check("criteria")
+
+    assert result.returncode == 0, result.stderr
+    [call] = checkout.docker_calls()
+    assert "--categories /opt/branch/categories.yaml --account a@b.c" in call
+    assert "CATEGORIES_FILE" not in result.stderr
+
+
+@pytest.mark.parametrize("value", ["categories.local.yaml", "./categories.local.yaml"])
+def test_a_deployment_with_its_own_categories_is_checked_with_them(checkout, value):
+    """The file its accounts.yaml is validated against, which compose mounts under /app; an
+    explicit --categories after it still wins (argparse keeps the last)."""
+    checkout.push_branch("criteria", {"pyproject.toml": PYPROJECT + "\n# criteria\n"})
+    (checkout.deploy / ".env").write_text(f"CATEGORIES_FILE={value}\n")
+    (checkout.deploy / "categories.local.yaml").write_text("categories: {}\n")
+
+    result = checkout.check("criteria", "--categories", "/opt/branch/categories.yaml")
+
+    assert result.returncode == 0, result.stderr
+    [call] = checkout.docker_calls()
+    assert (
+        "--categories /app/categories.local.yaml --account a@b.c"
+        " --categories /opt/branch/categories.yaml"
+    ) in call
+    assert "checking with this deployment's categories.local.yaml" in result.stderr
+    assert "WARNING" not in result.stderr, "the branch doesn't change categories.yaml"
+
+
+def test_a_missing_categories_file_is_refused(checkout):
+    """Compose would refuse to mount it: say so before fetching or running anything."""
+    checkout.push_branch("criteria", {"pyproject.toml": PYPROJECT + "\n# criteria\n"})
+    (checkout.deploy / ".env").write_text("CATEGORIES_FILE=categories.local.yaml\n")
+
+    result = checkout.check("criteria")
+
+    assert result.returncode == 2
+    assert "categories.local.yaml not found" in result.stderr
+    assert checkout.docker_calls() == []
+
+
+def test_a_branch_changing_the_categories_warns_when_a_custom_file_is_used(checkout):
+    """A classification branch checked with the deployment's own file doesn't exercise its
+    criteria changes: the warning says so and how to check them."""
+    checkout.push_branch("criteria", {"categories.yaml": "categories: {newsletter: {}}\n"})
+    (checkout.deploy / ".env").write_text("CATEGORIES_FILE=categories.local.yaml\n")
+    (checkout.deploy / "categories.local.yaml").write_text("categories: {}\n")
+
+    result = checkout.check("criteria")
+
+    assert result.returncode == 0, result.stderr
+    assert "WARNING: criteria changes categories.yaml" in result.stderr
+    assert "NOT checked" in result.stderr
+    [call] = checkout.docker_calls()
+    assert "--categories /app/categories.local.yaml" in call
+
+
+def test_an_empty_categories_file_counts_as_unset(checkout):
+    """Like compose's ${CATEGORIES_FILE:-categories.yaml}: an empty value is the default."""
+    checkout.push_branch("criteria", {"pyproject.toml": PYPROJECT + "\n# criteria\n"})
+
+    result = checkout.check("criteria", env={"CATEGORIES_FILE": ""})
+
+    assert result.returncode == 0, result.stderr
+    [call] = checkout.docker_calls()
+    assert "--categories /opt/branch/categories.yaml --account a@b.c" in call
+    assert "CATEGORIES_FILE" not in result.stderr
 
 
 @pytest.mark.parametrize(

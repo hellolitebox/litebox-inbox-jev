@@ -8,7 +8,10 @@
 This is the functional spec of the triage logic: what happens to one email, which signals are
 checked, and why. Everything here describes the code on `main` (`src/inbox_jev/`) and the shipped
 [`categories.yaml`](../categories.yaml). Numbers are the shipped defaults; where a setting can
-change them, the setting is named.
+change them, the setting is named. The categories file itself is a default too: a deployment can
+point `CATEGORIES_FILE` at its own copy with other criteria, thresholds or categories
+([Your own categories](operations.md#your-own-categories)), and the logic below applies to whatever
+that file says.
 
 - The design decisions behind these rules, with the alternatives that were rejected, are in
   [`docs/decisions/`](decisions/README.md).
@@ -229,10 +232,11 @@ Review decision never gets `unsubscribe_skipped_unverified`
 
 ### 3.1 Categories
 
-From `categories.yaml`. An account can raise or lower any threshold with
-`min_confidence: {category: value}` in `accounts.yaml` (a category key, a value between 0 and 1;
-every threshold and probability in `categories.yaml` is between 0 and 1 too, or the file fails to
-load).
+From `categories.yaml` (or the deployment's own file, `CATEGORIES_FILE`); the table shows the
+shipped defaults, and brand names in the criteria are examples for Jev, which no code matches on. An
+account can raise or lower any threshold with `min_confidence: {category: value}` in `accounts.yaml`
+(a category key, a value between 0 and 1; every threshold and probability in `categories.yaml` is
+between 0 and 1 too, or the file fails to load).
 
 | Category | Label | `action` | `min_confidence` | Notes |
 | -- | -- | -- | -- | -- |

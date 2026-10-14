@@ -48,7 +48,12 @@ checkout, does the whole thing: it fetches the branch into a throwaway worktree 
 deployment (never over it: the running app uses `/opt/inbox-jev`), mounts the branch's
 `src/inbox_jev`, `categories.yaml` and `dry_classify.py` into the app image ahead of the installed
 package (the image has it non-editable in site-packages, so a `PYTHONPATH` directory comes first),
-runs it, and removes the worktree:
+runs it, and removes the worktree. On a deployment that runs its own categories file
+(`CATEGORIES_FILE` in `.env`, see [Your own categories](operations.md#your-own-categories)), it
+checks the branch's code with that file, the one its `accounts.yaml` is validated against, and says
+so; add `--categories /opt/branch/categories.yaml` to check the branch's defaults instead. When the
+branch changes `categories.yaml`, it prints a warning that those changes aren't in the run unless
+you add that option, and it stops if the file `.env` names doesn't exist:
 
 ```bash
 cd /opt/inbox-jev

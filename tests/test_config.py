@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 
 import pytest
 import yaml
@@ -191,6 +192,24 @@ def test_env_example_lists_every_setting():
     text = (ROOT / ".env.example").read_text()
     listed = set(re.findall(r"^#?([A-Z][A-Z0-9_]*)=", text, re.MULTILINE))
     assert {name.upper() for name in Settings.model_fields} - listed == set()
+
+
+def test_compose_mounts_the_categories_file_where_the_app_reads_it():
+    """CATEGORIES_FILE names both the host file compose mounts and the path the app reads under
+    /app, so a deployment's own copy (categories.local.yaml) needs no tracked file edited. The
+    long syntax with create_host_path: false makes compose refuse a missing file instead of
+    creating an empty directory in its place."""
+    app = yaml.safe_load((ROOT / "docker-compose.yml").read_text())["services"]["app"]
+    name = "${CATEGORIES_FILE:-categories.yaml}"
+    assert app["environment"]["CATEGORIES_FILE"] == name
+    assert {
+        "type": "bind",
+        "source": f"./{name}",
+        "target": f"/app/{name}",
+        "read_only": True,
+        "bind": {"create_host_path": False},
+    } in app["volumes"]
+    assert Settings.model_fields["categories_file"].default == Path("categories.yaml")
 
 
 def test_allowlist_is_normalised_once_and_matched_ignoring_case():
