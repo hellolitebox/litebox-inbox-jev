@@ -47,3 +47,4 @@ record when the decision changes: add a new one and mark the old one `Superseded
 | [0034](0034-cli-refuses-keys-and-categories-it-cant-use.md) | The CLI refuses rule keys and categories it can't use | Accepted | #35 |
 | [0035](0035-identical-refusals-stop-the-pass.md) | Two identical Jev refusals in a row stop the pass; neither email gives up at once | Accepted | #36 |
 | [0036](0036-auto-rule-hits-count-emails.md) | Auto-rule hits count emails, not answers | Accepted | #36 |
+| [0037](0037-public-suffix-list-for-suffixes-and-registrable-domains.md) | The Public Suffix List decides public suffixes and registrable domains | Accepted | #37 |

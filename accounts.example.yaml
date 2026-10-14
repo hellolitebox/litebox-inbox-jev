@@ -21,8 +21,9 @@ accounts:
     # is used as the sender. Empty or absent = no group is trusted, not even the account's own
     # domain; every group stays keyed on its address. List only domains whose Google Workspace
     # you control (subdomains are included). Public providers (country domains too, e.g.
-    # yahoo.com.ar), googlegroups.com and bare suffixes like co.uk, gouv.fr or com.ai are
-    # rejected, and the file then fails to load. Optional (default: none).
+    # yahoo.com.ar), googlegroups.com and public suffixes from the Public Suffix List (co.uk,
+    # gouv.fr, com.ai, wa.gov.au, github.io) are rejected, and the file then fails to load.
+    # Optional (default: none).
     group_domains:
       - example.com
     # In act mode, only these categories are archived/spammed/unsubscribed; the others just get

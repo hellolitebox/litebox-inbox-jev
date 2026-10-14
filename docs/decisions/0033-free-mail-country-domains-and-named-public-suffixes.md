@@ -1,6 +1,6 @@
 # 0033. Free mail includes country domains; `group_domains` refuses public suffixes by name
 
-- Status: Accepted
+- Status: Accepted (public suffixes by name superseded by [0037](0037-public-suffix-list-for-suffixes-and-registrable-domains.md))
 - Date: 2026-10-13
 - PR: #35
 

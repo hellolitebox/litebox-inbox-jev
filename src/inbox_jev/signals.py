@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass, field, replace
 from email.utils import getaddresses, parseaddr
 
+from . import psl
+
 _ANGLE = re.compile(r"<([^>]+)>")
 _DMARC = re.compile(r"\bdmarc=(\w+)", re.IGNORECASE)
 # A plain lowercase address, safe to put in a Gmail search query or trust as a group's author.
@@ -29,59 +31,10 @@ _MACHINE_LOCAL = re.compile(
     r"|mailer-daemon$|postmaster$)"
 )
 # Subdomain labels of hosts that only take machine replies: m-a175…@bounce.linkedin.com,
-# reply+…@reply.github.com. Only labels left of the registrable domain count (see
-# _registrable_size), so reply.io, reply.co.uk or bounces.com.br themselves don't.
+# reply+…@reply.github.com. Only labels left of the registrable domain count (the Public Suffix
+# List's, `psl.registrable_domain`), so reply.io, reply.co.uk, bounces.com.br or reply.wa.gov.au
+# themselves don't.
 _MACHINE_HOST_LABELS = frozenset({"bounce", "bounces", "reply"})
-# Longest second-level label taken as a ccTLD public suffix: co.uk, com.ar, gob.ar, ac.jp,
-# adv.br, nhs.uk, gouv.fr, govt.nz, asso.fr. Names this short under a ccTLD (sap.de) are then
-# taken as part of the suffix too, which only makes fewer hosts machines: the safe side.
-_PUBLIC_SLD_MAX_LEN = 4
-# Second-level labels known to be ccTLD public suffixes (co.uk, com.ar, ac.jp, gob.ar, gouv.fr,
-# govt.nz, nhs.uk, adv.br, asso.fr): `is_public_suffix` knows these by name, under every
-# two-letter TLD but those in GENERIC_CCTLD_SLDS. Each is at most
-# _PUBLIC_SLD_MAX_LEN long (a test pins it), so `_registrable_size` already counts them as a
-# suffix: the two rules agree on every name listed here.
-PUBLIC_SLDS = frozenset(
-    {
-        "ac",
-        "adv",
-        "asso",
-        "co",
-        "com",
-        "edu",
-        "go",
-        "gob",
-        "gouv",
-        "gov",
-        "govt",
-        "gub",
-        "ltd",
-        "mil",
-        "ne",
-        "net",
-        "nhs",
-        "nom",
-        "or",
-        "org",
-        "plc",
-        "sch",
-    }
-)
-# Country-code TLDs sold as generic names (lume.ai, acme.io, about.me, twitch.tv, angel.co),
-# each with exactly the second-level labels the Public Suffix List's ICANN section lists under it,
-# as of PSL `VERSION: 2026-10-07_07-28-19_UTC`, `COMMIT: 3929462652695bad04f0a27afb600974014a3c8b`
-# (re-diff against https://publicsuffix.org/list/public_suffix_list.dat when touching this).
-# `is_public_suffix` refuses those and nothing else, so a company named adv.ai, plc.io or sch.me
-# is a domain, not a suffix. Each is at most _PUBLIC_SLD_MAX_LEN long too (a test pins it), so
-# `_registrable_size` agrees on every listed one; it still takes a short name there (adv.ai) as
-# a suffix by length, the safe side for machine hosts, as with sap.de.
-GENERIC_CCTLD_SLDS: dict[str, frozenset[str]] = {
-    "ai": frozenset({"com", "net", "off", "org"}),
-    "co": frozenset({"com", "edu", "gov", "mil", "net", "nom", "org"}),
-    "io": frozenset({"co", "com", "edu", "gov", "mil", "net", "nom", "org"}),
-    "me": frozenset({"ac", "co", "edu", "gov", "its", "net", "org", "priv"}),
-    "tv": frozenset(),
-}
 
 
 def is_no_reply_address(address: str) -> bool:
@@ -91,34 +44,6 @@ def is_no_reply_address(address: str) -> bool:
     """
     local, at, _ = address.strip().lower().rpartition("@")
     return bool(at and _NO_REPLY.search(local))
-
-
-def _registrable_size(labels: list[str]) -> int:
-    """How many trailing labels of a host make its registrable domain (no public suffix list).
-
-    Two (acme.com, reply.io), or three under a two-letter TLD whose second-level label is short
-    enough to be a public suffix (acme.com.ar, reply.co.uk). Erring long only means fewer
-    machine hosts, the safe side; deeper suffixes (wa.gov.au) are a known gap.
-    """
-    if len(labels) >= 3 and len(labels[-1]) == 2 and len(labels[-2]) <= _PUBLIC_SLD_MAX_LEN:
-        return 3
-    return 2
-
-
-def is_public_suffix(domain: str) -> bool:
-    """Whether `domain` (lowercase) is itself a ccTLD public suffix, not a name anyone owns:
-    two labels, a two-letter TLD and a second-level label in PUBLIC_SLDS (co.uk, gouv.fr), or,
-    under a ccTLD sold as a generic name, in its GENERIC_CCTLD_SLDS entry (com.ai, com.co, but
-    not adv.ai or plc.io).
-
-    By name, not by `_registrable_size`'s length rule: that one also takes short company names
-    under a ccTLD (sap.de, acme.io) as suffixes, which is the safe side for machine hosts but
-    would reject real domains here. Deeper suffixes (wa.gov.au) aren't recognised, as there.
-    """
-    labels = domain.split(".")
-    if len(labels) != 2 or len(labels[1]) != 2:
-        return False
-    return labels[0] in GENERIC_CCTLD_SLDS.get(labels[1], PUBLIC_SLDS)
 
 
 def is_automated_address(address: str, owner_domain: str = "") -> bool:
@@ -135,8 +60,9 @@ def is_automated_address(address: str, owner_domain: str = "") -> bool:
         return False
     if _NO_REPLY.search(local) or _MACHINE_LOCAL.match(local):
         return True
-    labels = host.split(".")
-    keep = _registrable_size(labels)
+    labels = psl.to_ascii(host).split(".")
+    registrable = psl.registrable_domain(host)
+    keep = registrable.count(".") + 1 if registrable else len(labels)
     if owner_domain and on_domain(host, owner_domain):
         keep = max(keep, owner_domain.count(".") + 1)
     return not _MACHINE_HOST_LABELS.isdisjoint(labels[:-keep])

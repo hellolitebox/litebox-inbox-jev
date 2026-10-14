@@ -2,14 +2,11 @@ import pytest
 from fakes import GMAIL_PASS
 
 from inbox_jev.signals import (
-    GENERIC_CCTLD_SLDS,
-    PUBLIC_SLDS,
     dmarc_passed,
     domain_of,
     extract,
     is_automated_address,
     is_no_reply_address,
-    is_public_suffix,
     on_domain,
     parse_list_unsubscribe,
     resolve_relay,
@@ -266,6 +263,10 @@ def test_not_no_reply_local_parts(address):
         "anything@bounces.example.com",
         "x@em.bounce.shop.co.uk",
         "x@bounce.linkedin.co.uk",  # a bounce subdomain under a ccTLD public suffix
+        # Short names under a ccTLD are domains (the Public Suffix List doesn't list them).
+        "x@bounce.sap.de",
+        "x@bounce.adv.ai",
+        "x@reply.acme.io",
         "x@reply.github.com.br",
         "x@bounces.acme.com.ar",
         "bounce-12345-67@mail.shop.com",
@@ -296,7 +297,13 @@ def test_automated_addresses(address):
         "bob@bounces.com.br",
         "eva@reply.gob.ar",
         "lu@bounce.adv.br",
-        "x@bounce.sap.de",  # a short name under a ccTLD is taken as a suffix: safe side
+        # Under deeper public suffixes (ICANN and PRIVATE sections), reply / bounce is the name.
+        "kim@reply.wa.gov.au",
+        "ola@reply.kommune.no",
+        "lee@reply.blogspot.com",
+        "jo@bounce.github.io",
+        "li@reply.公司.香港",  # an IDN suffix, in Unicode
+        "li@reply.xn--55qx5d.xn--j6w193g",  # and in punycode
         # Shared mailboxes that only start like a bounce or reply token (no 3-digit token).
         "bounce.house@party.com",
         "bounce-rentals@party.com",
@@ -336,7 +343,7 @@ def test_wrote_to_person_at(headers, expected):
         (["jane@reply.co.uk"], "reply.co.uk", True),
         (["bob@bounces.com.br"], "bounces.com.br", True),
         # The domain searched is the sender's: its own labels never make a machine, even past
-        # what the suffix rule knows (wa.gov.au is a three-level public suffix).
+        # what the Public Suffix List knows.
         (["kim@reply.wa.gov.au"], "reply.wa.gov.au", True),
         (["m-1@bounce.linkedin.co.uk"], "linkedin.co.uk", False),
         (["reply+x@reply.github.com.br"], "github.com.br", False),
@@ -348,7 +355,7 @@ def test_wrote_to_person_at_under_two_level_public_suffixes(headers, domain, exp
 
 
 def test_owner_domain_labels_never_make_a_machine():
-    assert is_automated_address("kim@reply.wa.gov.au")  # beyond the suffix rule: a known gap
+    assert is_automated_address("m-1@bounce.acme.co.uk", "acme.co.uk")
     assert not is_automated_address("kim@reply.wa.gov.au", "reply.wa.gov.au")
     assert is_automated_address("m-1@bounce.acme.wa.gov.au", "acme.wa.gov.au")
     assert is_automated_address("m-1@bounce.acme.com", "other.com")  # not on it: ignored
@@ -396,79 +403,3 @@ def test_no_reply_follows_the_trusted_group_author():
     sig = extract(headers)
     assert not sig.no_reply  # the group address
     assert resolve_relay(sig, ["example.com"]).no_reply  # the author it relays
-
-
-def test_every_named_public_suffix_is_one_for_the_registrable_domain_too():
-    """`is_public_suffix` (by name) never calls a suffix what `is_automated_address`'s
-    registrable-domain rule (by length) takes as a name: x.<sld>.<cc> keeps 3 labels for each."""
-    for sld in PUBLIC_SLDS:
-        assert is_public_suffix(f"{sld}.uk")
-        assert not is_automated_address(f"jane@bounce.{sld}.uk")  # bounce is the name here
-    for tld, slds in GENERIC_CCTLD_SLDS.items():
-        for sld in slds:
-            assert is_public_suffix(f"{sld}.{tld}")
-            assert not is_automated_address(f"jane@bounce.{sld}.{tld}")
-
-
-# The Public Suffix List's ICANN entries under each generic-use ccTLD, copied from
-# https://publicsuffix.org/list/public_suffix_list.dat at `VERSION: 2026-10-07_07-28-19_UTC`,
-# `COMMIT: 3929462652695bad04f0a27afb600974014a3c8b`. Tests don't fetch it (no network): when the
-# PSL changes, update this snapshot and GENERIC_CCTLD_SLDS together.
-PSL_SNAPSHOT = {
-    "ai": {"com", "net", "off", "org"},
-    "co": {"com", "edu", "gov", "mil", "net", "nom", "org"},
-    "io": {"co", "com", "edu", "gov", "mil", "net", "nom", "org"},
-    "me": {"ac", "co", "edu", "gov", "its", "net", "org", "priv"},
-    "tv": set(),
-}
-# What `config._PUBLIC_SLD` refused under every two-letter TLD before GENERIC_CCTLD_SLDS.
-OLD_REFUSED_SLDS = {"ac", "co", "com", "edu", "gob", "go", "gov", "ne", "net", "or", "org"}
-
-
-def test_generic_cctld_slds_match_the_public_suffix_list():
-    assert {tld: set(slds) for tld, slds in GENERIC_CCTLD_SLDS.items()} == PSL_SNAPSHOT
-
-
-@pytest.mark.parametrize("tld", sorted(PSL_SNAPSHOT))
-def test_generic_cctld_table_never_accepts_a_listed_suffix_the_old_check_refused(tld):
-    """The table may accept what the old check wrongly refused (adv.ai, plc.io), but never a
-    name the old check refused that the PSL lists as a suffix (org.io, gov.co)."""
-    for sld in OLD_REFUSED_SLDS & PSL_SNAPSHOT[tld]:
-        assert is_public_suffix(f"{sld}.{tld}"), f"{sld}.{tld}"
-
-
-@pytest.mark.parametrize(
-    ("domain", "expected"),
-    [
-        ("co.uk", True),
-        ("gouv.fr", True),
-        ("nhs.uk", True),
-        ("acme.co.uk", False),
-        ("acme.io", False),  # a short name under a ccTLD is a domain
-        ("sap.de", False),
-        ("org.com", False),  # not a ccTLD
-        ("wa.gov.au", False),  # deeper suffixes: the known gap
-        # ccTLDs sold as generic names: only their own PSL second levels are suffixes.
-        ("com.ai", True),
-        ("off.ai", True),
-        ("com.co", True),
-        ("org.co", True),
-        ("web.co", False),  # dropped from the PSL by the .co registry (2024-11-18)
-        ("arts.co", False),
-        ("com.io", True),
-        ("org.io", True),
-        ("co.io", True),
-        ("its.me", True),
-        ("adv.ai", False),
-        ("sch.ai", False),
-        ("gov.ai", False),
-        ("plc.io", False),
-        ("ltd.co", False),
-        ("com.tv", False),
-        ("gouv.me", False),
-        ("plc.uk", True),  # elsewhere PUBLIC_SLDS still applies
-        ("xn--p1ai.xn--p1ai", False),
-    ],
-)
-def test_is_public_suffix(domain, expected):
-    assert is_public_suffix(domain) is expected

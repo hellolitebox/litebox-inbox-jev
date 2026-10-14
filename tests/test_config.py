@@ -87,14 +87,18 @@ def test_group_domains_are_opt_in():
         (" Example.ORG. ", "example.org"),
         ("eu.example.org", "eu.example.org"),
         ("acme.co.uk", "acme.co.uk"),
-        # Short names under a ccTLD are real domains (only listed second levels are suffixes).
+        # Only what the Public Suffix List lists is a suffix: short names under a ccTLD, or
+        # under one sold as a generic name, are real domains.
         ("acme.io", "acme.io"),
         ("sap.de", "sap.de"),
-        # Under a ccTLD sold as a generic name, only its own PSL second levels are suffixes.
         ("adv.ai", "adv.ai"),
         ("sch.ai", "sch.ai"),
         ("plc.io", "plc.io"),
-        ("web.co", "web.co"),  # no longer on the PSL
+        ("web.co", "web.co"),  # dropped from the PSL by the .co registry (2024-11-18)
+        ("sch.gg", "sch.gg"),
+        ("ato.gov.au", "ato.gov.au"),  # an agency's own domain under gov.au
+        ("nsw.gov.au", "nsw.gov.au"),  # removed from the PSL at New South Wales' request
+        ("x.blogspot.com", "x.blogspot.com"),  # a name under a PRIVATE suffix is someone's
         # IDN TLDs in punycode (.рф, .中国).
         ("XN--80AK6AA92E.xn--p1ai", "xn--80ak6aa92e.xn--p1ai"),
         ("example.xn--fiqs8s", "example.xn--fiqs8s"),
@@ -139,6 +143,19 @@ def test_group_domains_rejects_public_domains(domain):
         "org.io",
         "gov.io",
         "org.me",
+        "plc.uk",
+        # Deeper suffixes and other generic-use ccTLDs, from the Public Suffix List.
+        "wa.gov.au",
+        "vic.gov.au",
+        "kommune.no",
+        "plc.ly",
+        "co.gg",
+        # PRIVATE section: platforms where anyone can get a subdomain.
+        "blogspot.com",
+        "github.io",
+        # IDN suffixes in punycode (公司.香港, 個人.hk).
+        "xn--55qx5d.xn--j6w193g",
+        "xn--gmqw5a.hk",
     ],
 )
 def test_group_domains_rejects_public_suffixes(domain):
@@ -146,10 +163,9 @@ def test_group_domains_rejects_public_suffixes(domain):
         account(f"group_domains: ['{domain}']\n")
 
 
-def test_group_domains_deeper_public_suffix_is_a_known_gap():
-    """wa.gov.au is a public suffix too, but no rule without the public suffix list tells it
-    from an agency's own ato.gov.au: accepted (docs/how-it-decides.md, Known gaps)."""
-    assert account("group_domains: [wa.gov.au]\n").group_domains == ["wa.gov.au"]
+def test_production_group_domain_still_loads():
+    """The deployed accounts file has `group_domains: [litebox.ai]`: a domain, not a suffix."""
+    assert account("group_domains: [litebox.ai]\n").group_domains == ["litebox.ai"]
 
 
 @pytest.mark.parametrize(

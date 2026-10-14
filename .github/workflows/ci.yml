@@ -62,8 +62,7 @@ jobs:
           --cov-report=markdown-append:"$GITHUB_STEP_SUMMARY"
 
   # The tests on the oldest supported Python, so code that needs a newer one (syntax, stdlib)
-  # fails here rather than for someone installing on it. Not a required check: the runtime
-  # Python is PYTHON_VERSION (the test job).
+  # fails here rather than for someone installing on it. A required check, like `test`.
   test-min-python:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -118,6 +117,11 @@ jobs:
         run: >-
           docker run --rm --user 10100:10100 --entrypoint python inbox-jev:ci -c
           "import inbox_jev; assert 'site-packages' in inbox_jev.__file__, inbox_jev.__file__; print(inbox_jev.__file__)"
+      # The vendored public suffix list is package data: a wheel without it fails here.
+      - name: Smoke test (public suffix list ships in the image)
+        run: >-
+          docker run --rm --user 10100:10100 --entrypoint python inbox-jev:ci -c
+          "from inbox_jev import psl; assert psl.is_public_suffix('co.uk'); print(len(psl.bundled().rules), 'rules')"
       - name: Image reports the commit it was built from
         run: |
           reported=$(docker run --rm --user 10100:10100 inbox-jev:ci --version)

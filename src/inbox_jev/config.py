@@ -11,7 +11,8 @@ import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from .signals import DOMAIN, domain_of, is_public_suffix, on_domain
+from .psl import is_public_suffix
+from .signals import DOMAIN, domain_of, on_domain
 
 # Gmail `newer_than:` units: days, months, years.
 LOOKBACK_RE = re.compile(r"^\d+[dmy]$")
@@ -124,7 +125,9 @@ PUBLIC_GROUP_HOSTS = frozenset({"googlegroups.com", "groups.google.com"})
 
 
 def normalize_group_domain(value: str) -> str:
-    """Normalised group_domains entry, or ValueError if it isn't a domain someone can own."""
+    """Normalised group_domains entry, or ValueError if it isn't a domain someone can own: not a
+    domain name, a public suffix of the Public Suffix List (ICANN or PRIVATE section: `co.uk`,
+    `wa.gov.au`, `github.io`), or on a public mail or group host."""
     domain = value.strip().lower().rstrip(".").removeprefix("@")
     if not DOMAIN.match(domain):
         raise ValueError(f"group_domains entry {value!r} isn't a domain like example.org")

@@ -339,16 +339,15 @@ Held rows stay `failed`.
 - `group_domains` is opt-in and empty by default, not even the account's own domain. Entries are
   normalised (lowercase, no trailing dot, no leading `@`) and rejected, failing the accounts file
   at load, when they aren't a domain (`signals.DOMAIN`: letters, digits and hyphens, ending in a
-  TLD of 2+ letters or a punycode IDN TLD such as `xn--p1ai`), are a bare ccTLD public suffix
-  (`signals.is_public_suffix`: a two-letter TLD under a second-level label in
-  `signals.PUBLIC_SLDS`, e.g. `co.uk`, `com.ar`, `gouv.fr`, `nhs.uk`, `adv.br`, `govt.nz`), or
-  are (or end in) a public mail provider (`config.FREE_MAIL`, country domains included),
-  `googlegroups.com` or `groups.google.com`. A short name under a ccTLD (`acme.io`, `sap.de`) is a
-  domain. Under the ccTLDs sold as generic names (`signals.GENERIC_CCTLD_SLDS`: `.ai`, `.co`,
-  `.io`, `.me`, `.tv`) only the second levels the Public Suffix List names there are suffixes
-  (`com.ai`, `com.co`, `com.io`, `org.me`; none under `.tv`), so a company at `adv.ai`, `sch.ai`
-  or `plc.io` is a domain. Deeper suffixes (`wa.gov.au`) aren't recognised (see Known gaps). See
-  [EX-27](#ex-27--a-public-suffix-in-group_domains-is-refused).
+  TLD of 2+ letters or a punycode IDN TLD such as `xn--p1ai`), are a public suffix of the
+  [Public Suffix List](#49-public-suffix-list) (`psl.is_public_suffix`, ICANN and PRIVATE
+  sections: `co.uk`, `com.ar`, `gouv.fr`, `com.ai`, `wa.gov.au`, `kommune.no`, `plc.ly`,
+  `github.io`, `blogspot.com`, `xn--55qx5d.xn--j6w193g` for `公司.香港`), or are (or end in) a
+  public mail provider (`config.FREE_MAIL`, country domains included), `googlegroups.com` or
+  `groups.google.com`. A name the list doesn't have as a suffix is a domain, however short or
+  deep: `acme.io`, `sap.de`, `adv.ai`, `plc.io`, `sch.gg`, `ato.gov.au`. See
+  [EX-27](#ex-27--a-public-suffix-in-group_domains-is-refused) and
+  [EX-32](#ex-32--the-public-suffix-list-decides-what-a-domain-is).
 - **Allowlist**: `allow_senders` / `allow_domains` are matched against the resolved sender. For a
   trusted group that is the author, so `allow_domains: [yourco.com]` does **not** trust strangers
   writing to `hello@yourco.com`; put the group's exact address in `allow_senders` to allowlist
@@ -651,26 +650,52 @@ dangerous direction ([ADR 0032](decisions/0032-machine-addresses-make-no-known-c
 | Helper | Yes | No (examples) |
 |---|---|---|
 | `is_no_reply_address` | Local part `noreply`, `no-reply`, `no_reply`, `donotreply`, `do-not-reply`, `do_not_reply`, alone or as one piece of a local part split on `.` `_` `+` `-` (`messages-noreply@`, `noreply-billing@`, `alerts.no-reply@`) | `norah@`, `noreplies@`, `reply@`, `notifications@`, `info@`, `jane@noreply.com` |
-| `is_automated_address` | Any no-reply address; local part `bounce`/`bounces` alone, followed by `+` or `=`, or followed by `.` `_` `-` and a token with 3+ digits (`bounce-12345-67@`); `reply+<token>`; `reply-<token with 3+ digits>`; `mailer-daemon`, `postmaster`; a host with a `bounce`, `bounces` or `reply` label left of its registrable domain (`m-a175…@bounce.linkedin.com`, `reply+…@reply.github.com`, `x@bounce.linkedin.co.uk`) | `reply@company.com`, `reply-team@`, `reply-all2@`, `replies@`, `bouncer@`, `bounce.house@`, `bounce-rentals@`, `sam@reply.io`, `ana@reply.com.ar`, `jane@reply.co.uk`, `notifications@github.com` |
+| `is_automated_address` | Any no-reply address; local part `bounce`/`bounces` alone, followed by `+` or `=`, or followed by `.` `_` `-` and a token with 3+ digits (`bounce-12345-67@`); `reply+<token>`; `reply-<token with 3+ digits>`; `mailer-daemon`, `postmaster`; a host with a `bounce`, `bounces` or `reply` label left of its registrable domain (`m-a175…@bounce.linkedin.com`, `reply+…@reply.github.com`, `x@bounce.linkedin.co.uk`, `x@bounce.sap.de`) | `reply@company.com`, `reply-team@`, `reply-all2@`, `replies@`, `bouncer@`, `bounce.house@`, `bounce-rentals@`, `sam@reply.io`, `ana@reply.com.ar`, `jane@reply.co.uk`, `kim@reply.wa.gov.au`, `lee@reply.blogspot.com`, `notifications@github.com` |
 | `Signals.no_reply` | The (resolved) sender is a no-reply address **and** every `Reply-To` address is too (or there is none) | A `Reply-To` to anything else (a person, a help desk, a reply-by-email token) |
 
-- **Registrable domain** (no public suffix list): the last two labels (`acme.com`, `reply.io`),
-  or the last three when the TLD has two letters and the label before it has at most 4
-  characters, so it can be a ccTLD's public suffix (`reply.com.ar`, `reply.co.uk`,
-  `bounces.com.br`, `x.gob.ar`, `x.adv.br`, `x.gouv.fr`). Erring long only makes fewer machine
-  hosts: a short name under a ccTLD (`bounce.sap.de`) isn't recognised, the safe side. Every
-  second-level label `signals.is_public_suffix` knows by name (`signals.PUBLIC_SLDS` and
-  `signals.GENERIC_CCTLD_SLDS`, used for `group_domains`) is within that length, so the two never
-  disagree on a listed suffix. They differ only on short names the length rule takes as a suffix
-  and `is_public_suffix` doesn't (`adv.ai`, `sap.de`): here that means `bounce.adv.ai` isn't a
-  machine host, the safe side.
+- **Registrable domain**: the host's public suffix in the
+  [Public Suffix List](#49-public-suffix-list) plus one label (`psl.registrable_domain`):
+  `linkedin.com`, `linkedin.co.uk`, `reply.com.ar`, `reply.wa.gov.au`, `reply.blogspot.com`,
+  `sap.de`. A host that is itself a suffix has none, so none of its labels count. Short names
+  under a ccTLD are names (`bounce.sap.de`, `bounce.adv.ai` are machine hosts), and a company
+  named `reply` or `bounce` under any listed suffix, however deep, is a person
+  (`kim@reply.wa.gov.au`, `lee@reply.blogspot.com`).
 - `is_automated_address` is used by `previous_contact`: a machine sender isn't searched for itself,
   and the domain search ignores sent emails whose recipients on the domain are all machines. In
   the domain search the labels of the searched domain (the sender's) never count either, so a
-  person at `reply.com.ar` counts for `reply.com.ar` whatever the suffix rule says.
+  person at `reply.com.ar` counts for `reply.com.ar` whatever the list says.
 - `no_reply` is used by the archive group's needs-reply veto ([3.2](#32-confidence-outcomes-jev-path)).
   `Jev/Needs Reply` itself is unchanged: Jev's question covers "a reply or an action", and a
   no-reply email can still ask for an action.
+
+### 4.9 Public Suffix List
+
+`inbox_jev.psl` answers "is this a public suffix" (`group_domains`, [3.4](#34-groups-and-mailing-lists))
+and "what is this host's registrable domain" (machine hosts, [4.8](#48-machine-and-no-reply-addresses))
+from the [Public Suffix List](https://publicsuffix.org) shipped with the package
+(`src/inbox_jev/public_suffix_list.dat`; its header names the `VERSION` and `COMMIT`). It is read
+once, on first use, and never fetched at runtime
+([ADR 0037](decisions/0037-public-suffix-list-for-suffixes-and-registrable-domains.md)).
+
+| Rule | Example | Effect |
+|---|---|---|
+| Normal | `co.uk`, `wa.gov.au` | the name is a suffix; the longest matching rule wins |
+| Wildcard `*.` | `*.ck` | every child is a suffix: `foo.ck` |
+| Exception `!` | `!www.ck`, `!city.kawasaki.jp` | wins over any other rule; the suffix is the rule without its leftmost label: `www.ck` is a domain |
+| None matches | `example.internal` | the TLD alone is the suffix (the default `*`) |
+
+- **Both sections count, for both uses**: ICANN (registry suffixes: `com.ar`, `wa.gov.au`) and
+  PRIVATE (platforms that hand out subdomains: `github.io`, `blogspot.com`). For `group_domains`
+  a platform suffix is as public as a registry one; for machine hosts it makes the registrable
+  domain longer, so fewer hosts are machines (the safe side).
+- **IDN**: names are compared as lowercase ASCII, each Unicode label as its punycode A-label, so
+  `公司.香港` and `xn--55qx5d.xn--j6w193g` are the same suffix.
+- **Malformed names**: a name with an empty label (`.com`, `.example.com`, `a..com`) has no
+  registrable domain, as the list's own test vectors require: `group_domains` refuses it (its
+  format check already does) and a host like that never makes a machine address.
+- **Freshness**: the weekly `Update public suffix list` workflow (`scripts/update_psl.py
+  --check`) opens an issue labeled `psl-update` when a newer list is out; a session ships it as a
+  normal PR. Until that merges, the shipped version decides.
 
 ## 5. Worked examples
 
@@ -1050,9 +1075,10 @@ the probabilities that matter are shown; the rest are ~0.
 - **Why**: `gouv.fr` is a suffix every French public body registers under, not a domain anyone
   controls: trusting it would trust every `*.gouv.fr` group's claim about its author. Before,
   only `co.uk`-style suffixes from a short list were refused
-  ([ADR 0033](decisions/0033-free-mail-country-domains-and-named-public-suffixes.md)). Under
-  `.ai`, `.co`, `.io`, `.me` and `.tv` only the Public Suffix List's own names are suffixes, so a
-  real company there isn't refused.
+  ([ADR 0033](decisions/0033-free-mail-country-domains-and-named-public-suffixes.md)). Only
+  what the Public Suffix List lists is a suffix, so a real company under a ccTLD sold as a
+  generic name isn't refused
+  ([ADR 0037](decisions/0037-public-suffix-list-for-suffixes-and-registrable-domains.md)).
 
 ### EX-28 — Jev refuses every request the same way
 
@@ -1118,6 +1144,27 @@ the probabilities that matter are shown; the rest are ~0.
   consistent. Switching the rule to marketing at 1 hit would count the email a second time;
   leaving the hits as they were would ignore the disagreement
   ([ADR 0036](decisions/0036-auto-rule-hits-count-emails.md)).
+
+### EX-32 — The Public Suffix List decides what a domain is
+
+- **Test**: `test_ex32_the_public_suffix_list_decides_what_a_domain_is`
+- **Input**: "Your weekly report" from `updates@acme.de`. Your sent mail has 12 emails to
+  `m-77x…@bounce.acme.de` (replies to its notifications), none to a person at `acme.de`. Jev as
+  EX-24: notification 0.62, newsletter 0.36, important 0.01; `needs_reply` 0.75. Also
+  `kim@reply.wa.gov.au`, whom you wrote to, and accounts with `group_domains: [wa.gov.au]`,
+  `[blogspot.com]`, `[sch.gg]`.
+- **Outcome**: `bounce.acme.de` is a machine host (`acme.de` is the registrable domain), so
+  `previous_contact` = `never` and the email is archived as `notification` through the archive
+  group, without Review or `Jev/Needs Reply`. `kim@reply.wa.gov.au` is a person and is searched
+  for herself: `wrote_to_sender`. `wa.gov.au` and `blogspot.com` fail the accounts file at load
+  ("is a public suffix"); `sch.gg` loads.
+- **Why**: before, a length rule guessed the registrable domain: `acme` (4 letters under a
+  two-letter TLD) was taken as a suffix like `co.uk`, so `bounce.acme.de` was a company called
+  "bounce" and the replies made `acme.de` a known contact (Review, as EX-24 before its fix); and
+  `reply` under the three-level `wa.gov.au` was a machine label. `group_domains` refused only
+  suffixes known by name, so `wa.gov.au` and `blogspot.com` loaded while `sch.gg` didn't. The
+  vendored list answers each from what registries and platforms publish
+  ([ADR 0037](decisions/0037-public-suffix-list-for-suffixes-and-registrable-domains.md)).
 
 ## 6. Glossary
 
@@ -1191,19 +1238,11 @@ Behaviour found while writing this spec, documented as it is today:
 - A domain you wrote to only at machine addresses more than 25 times (e.g. many replies to
   GitHub notifications at `reply.github.com`) still counts as known: only the newest 25 matches
   are read, and the rest is assumed to hold a person.
-- The registrable domain is a heuristic, not the public suffix list: under a deeper or longer
-  public suffix (`wa.gov.au`, `kommune.no`, `blogspot.com`), a company whose own name is `reply`,
-  `bounce` or `bounces` (`kim@reply.wa.gov.au`) is taken as a machine sender and isn't searched
-  for itself (its domain search is unaffected). Rare enough not to need a dependency.
-- `group_domains` only refuses public suffixes it knows by name (`signals.PUBLIC_SLDS`, two
-  labels): a deeper one (`wa.gov.au`, `nsw.gov.au`) is accepted, since without the public
-  suffix list nothing tells it from an agency's own `ato.gov.au`. `PUBLIC_SLDS` applies under
-  every two-letter TLD except the generic-use ones in `signals.GENERIC_CCTLD_SLDS` (`.ai`, `.co`,
-  `.io`, `.me`, `.tv`, which use their own Public Suffix List names), so a company whose domain
-  is one of those names under another ccTLD sold as a generic name (`plc.ly`, `sch.gg`) is
-  refused: add that TLD to `GENERIC_CCTLD_SLDS` with its PSL names. IDN ccTLD suffixes in
-  punycode (`xn--…`) are never refused. `group_domains` is opt-in; list only domains whose Google
-  Workspace you control.
+- The Public Suffix List is the version shipped with the code: a suffix added upstream since is
+  unknown until the update from the weekly `psl-update` issue merges, and an update that makes
+  an existing `group_domains` entry a suffix fails the accounts file at load (the PSL lane checks
+  production's entries before the update PR merges). `group_domains` is opt-in; list only
+  domains whose Google Workspace you control.
 - `FREE_MAIL` is a list: a free-mail provider missing from it (a small regional one) is still
   searched as a company domain, so writing to one person there makes its other users known
   contacts. Adding one is always safe.

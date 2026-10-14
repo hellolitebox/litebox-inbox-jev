@@ -116,8 +116,8 @@ tests.
 
 **Decision-logic docs** (see CLAUDE.md, "Decision logic docs"): if the PR changes
 `categories.yaml`, `policy.py`, `triage.py`, `rules.py`, `corrections.py`, `signals.py`,
-`unsubscribe.py`, the classifier state/questions, `gmail.extract_body`, `gmail.has_written_to`,
-`config.py` (`FREE_MAIL`, `PUBLIC_GROUP_HOSTS`, `group_domains` / `act_categories` /
+`psl.py`, `unsubscribe.py`, the classifier state/questions, `gmail.extract_body`,
+`gmail.has_written_to`, `config.py` (`FREE_MAIL`, `PUBLIC_GROUP_HOSTS`, `group_domains` / `act_categories` /
 `archive_group_reply_keep_probability` validation, the `Settings` defaults `MODE`, `LOOKBACK`,
 `MAX_MESSAGES_PER_RUN`, `MAX_UNSUBSCRIBES_PER_RUN`, `BODY_CHARS`) or the `cli.py` commands
 `restore`, `reprocess`, `rules set` / `rules delete`, `unsubscribe-retry`, check that
@@ -127,6 +127,12 @@ new rule or guard that changes an outcome needs a new `EX-NN`), and that a desig
 changed doc sections against the code, not just the diff. Missing updates are a **major**
 finding; a stale or wrong statement in the spec is a finding like any other bug. A PR body
 saying "no behaviour change" must be borne out by the diff.
+
+**Public Suffix List update** (CLAUDE.md and `/ship`, "PSL lane"): a PR that changes only
+`src/inbox_jev/public_suffix_list.dat` needs no spec update. Check that the diff is the list
+alone, that its `VERSION`/`COMMIT` header matches the body and the upstream commit it links,
+that the rules added and removed are listed, and that "Verification" has a `check_branch.sh`
+run (with a `--query`) that loaded the production accounts file with the new list. Missing that: **major**.
 
 **Open-source readiness**: nothing Litebox-specific hardcoded in code (config/examples only),
 README/`.env.example`/`categories.yaml` updated when behaviour or config changes.

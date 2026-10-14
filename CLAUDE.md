@@ -6,9 +6,9 @@ See [README.md](README.md) for what the tool does and how it is configured.
 
 `main` is production: the VPS deploys from it. The repo ruleset "main: PR + CI" only accepts
 changes through squash-merged pull requests whose branch is up to date with `main`, with green
-`test`, `secrets`, `docker` and `qa-verdict` checks and no unresolved review threads; it
-requires no approving review. `qa-verdict` is the QA reviewer's verdict for the exact head
-commit, set by the `QA gate` workflow (`scripts/qa_gate.py`, ADR 0028). Every change, however
+`test`, `test-min-python`, `secrets`, `docker` and `qa-verdict` checks and no unresolved review
+threads; it requires no approving review. `qa-verdict` is the QA reviewer's verdict for the exact
+head commit, set by the `QA gate` workflow (`scripts/qa_gate.py`, ADR 0028). Every change, however
 small, follows this loop; `/ship <n>` (`.claude/skills/ship`) runs steps 4 and 5:
 
 1. **Branch** off `main`: `feat/…`, `fix/…`, `chore/…`.
@@ -61,6 +61,19 @@ small, follows this loop; `/ship <n>` (`.claude/skills/ship`) runs steps 4 and 5
 release notes of major or sensitive bumps, posts the same `## QA review` comment with its
 `Head:` so the gate can pass, and merges through the same gates. A bump that needs code changes
 goes through the full loop.
+
+**Public Suffix List updates** start from an issue, not a PR (see `/ship`, "PSL lane"). The
+weekly `Update public suffix list` workflow runs `scripts/update_psl.py --check` (download,
+validate, compare; it never writes to the repo) and, when a newer valid list exists, opens or
+updates the open issue labeled `psl-update` with the validated VERSION and COMMIT. A session that
+sees it branches off `main`, runs `scripts/update_psl.py`, checks that the diff is only
+`src/inbox_jev/public_suffix_list.dat` and reads the rules added and removed, runs
+`scripts/check_branch.sh <branch> --account <email> --query 'in:inbox newer_than:1d' --limit 1`
+once on the server (it loads the whole production accounts file with the new list, whatever
+`--account` names, so a `group_domains` entry of any account that became a suffix fails there,
+before it can fail a deploy), and opens a normal PR with that output in
+"Verification" and `Closes #<issue>`. The PR takes the normal loop above (`qa-reviewer`, merge
+gates); merging it closes the issue.
 
 Never merge with failing CI, an unresolved review thread or a QA verdict other than APPROVED.
 Subagents (`qa-reviewer`, `dev-fixer`) never merge, approve or use `--admin`, and never post a
@@ -181,8 +194,9 @@ change to decision logic must, **in the same PR**:
 
 Decision logic means: `categories.yaml` (categories, actions, thresholds, criteria, archive group,
 needs_reply, tags, auto_rule), `policy.py`, `triage.py` (pipeline, `previous_contact`, user edits,
-unsubscribe paths), `rules.py`, `corrections.py`, `signals.py`, `unsubscribe.py`, the classifier
-state and questions (`classifier.py`), body extraction (`gmail.extract_body`), the sent-mail
+unsubscribe paths), `rules.py`, `corrections.py`, `signals.py`, `psl.py` and the vendored
+`public_suffix_list.dat` (except a PSL-lane update of the list alone), `unsubscribe.py`, the
+classifier state and questions (`classifier.py`), body extraction (`gmail.extract_body`), the sent-mail
 search and its cache (`gmail.has_written_to`), `config.py` (`FREE_MAIL`, `PUBLIC_GROUP_HOSTS`,
 `group_domains` normalisation and rejection, the `act_categories` and
 `archive_group_reply_keep_probability` validators, and the `Settings` defaults `MODE`,

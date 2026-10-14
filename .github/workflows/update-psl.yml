@@ -1,0 +1,82 @@
+name: Update public suffix list
+
+# Weekly: checks whether publicsuffix.org has a newer Public Suffix List than the vendored one
+# (src/inbox_jev/public_suffix_list.dat) with `scripts/update_psl.py --check`, which downloads and
+# validates it but never writes it. When there is one, it opens an issue labeled `psl-update` (or
+# updates the open one). The workflow never pushes or opens a PR: a session picks the issue up and
+# ships the update through a normal PR (the "PSL lane" in CLAUDE.md, /ship). Actions are pinned by
+# commit SHA (the version is the comment); Dependabot bumps both.
+on:
+  schedule:
+    - cron: "23 6 * * 1" # Mondays 06:23 UTC
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: update-psl
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read # check out the vendored list and the script
+      issues: write # open or update the psl-update issue (and create its label)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The script needs only the standard library and inbox_jev.psl: the runner's python3
+      # (>= 3.11, requires-python) runs it from the source tree, nothing to install. It writes
+      # newer=, version= and commit= to $GITHUB_OUTPUT only after validating the list, VERSION
+      # and COMMIT included (one header line each, in the publisher's exact formats).
+      - name: Check for a newer list
+        id: check
+        run: PYTHONPATH=src python3 scripts/update_psl.py --check --github-output "$GITHUB_OUTPUT"
+      - name: Open or update the issue
+        if: steps.check.outputs.newer == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          LABEL: psl-update
+          VERSION: ${{ steps.check.outputs.version }}
+          COMMIT: ${{ steps.check.outputs.commit }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          prefix="Public Suffix List update available: "
+          title="$prefix$VERSION"
+          # A quoted heredoc is literal (no expansion, backticks included); printf fills in the
+          # values, which the script validated (a date-time and a 40-hex SHA).
+          format=$(cat <<'EOF'
+          publicsuffix.org has a newer Public Suffix List than `src/inbox_jev/public_suffix_list.dat`:
+
+          - VERSION: `%s`
+          - COMMIT: [`%s`](https://github.com/publicsuffix/list/commit/%s)
+
+          `scripts/update_psl.py --check` downloaded and validated it ([run](%s)); the workflow wrote nothing to the repo.
+
+          To ship it, follow the PSL lane (CLAUDE.md, `/ship`): branch off `main`, run `uv run python scripts/update_psl.py`, open a normal PR that closes this issue, and take it through the checks and QA.
+          EOF
+          )
+          body=$(mktemp)
+          # shellcheck disable=SC2059 # the format is the template above
+          printf "$format\n" "$VERSION" "$COMMIT" "$COMMIT" "$RUN_URL" > "$body"
+          gh label create "$LABEL" --force --color fbca04 \
+            --description "A newer Public Suffix List is available (update-psl workflow)"
+          open=$(gh issue list --label "$LABEL" --state open --json number --jq '.[0].number')
+          if [ -z "$open" ]; then
+            gh issue create --title "$title" --label "$LABEL" --body-file "$body"
+            exit 0
+          fi
+          current=$(gh issue view "$open" --json title --jq .title)
+          # VERSIONs are zero-padded UTC timestamps, so string order is time order. Never step
+          # the issue back (a stale CDN copy can be older than the VERSION it already names); a
+          # title not in this format (renamed by hand) is rewritten.
+          if [[ "$current" == "$prefix"* && ! "$VERSION" > "${current#"$prefix"}" ]]; then
+            echo "Issue #$open already reports ${current#"$prefix"} (this run found $VERSION)."
+          else
+            gh issue edit "$open" --title "$title" --body-file "$body"
+            gh issue comment "$open" --body-file "$body"
+          fi

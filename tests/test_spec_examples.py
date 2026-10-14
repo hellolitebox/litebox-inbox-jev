@@ -1163,3 +1163,36 @@ def test_ex31_an_email_answered_differently_restarts_a_pending_auto_rule(spec):
     gmail.emails["3"] = email("3", "Weekly <news@weekly.example>", "Issue 3")
     triage.run_account(ctx, account, Mode.ACT)
     assert rule() == ("newsletter", 1, False)
+
+
+# --- EX-32 -----------------------------------------------------------------------------------
+
+
+def test_ex32_the_public_suffix_list_decides_what_a_domain_is(cfg, account, monkeypatch):
+    """EX-32 (docs/how-it-decides.md §5, §4.8 machine addresses, §4.9 Public Suffix List,
+    §3.4 group_domains, ADR 0037)."""
+    # Replies to acme.de's bounce subdomain: acme.de is the registrable domain, not a suffix.
+    replies = {f"s{i}": {"To": f"m-77x{i}@bounce.acme.de"} for i in range(12)}
+    svc = SentMailService(replies)
+    gmail = sent_mail_gmail(monkeypatch, svc)
+    contact = triage.previous_contact(gmail, account.email, "updates@acme.de")
+    assert contact == "never"
+    assert svc.queries == ["in:sent to:updates@acme.de", "in:sent to:acme.de"]
+    d = decide(
+        cfg, account, _sig("Acme <updates@acme.de>"), _lead_suggestions(), previous_contact=contact
+    )
+    assert (d.category, d.archive, d.archive_group) == ("notification", True, True)
+    assert d.add_labels == ["Jev/Notifications"]  # no Review, no Needs Reply
+
+    # A person at a company called reply under the three-level wa.gov.au is searched for herself.
+    svc = SentMailService({"k": {"To": "Kim <kim@reply.wa.gov.au>"}})
+    gmail = sent_mail_gmail(monkeypatch, svc)
+    assert triage.previous_contact(gmail, account.email, "kim@reply.wa.gov.au") == (
+        "wrote_to_sender"
+    )
+    assert svc.queries == ["in:sent to:kim@reply.wa.gov.au"]
+
+    for suffix in ("wa.gov.au", "blogspot.com"):
+        with pytest.raises(ValidationError, match=f"'{suffix}' is a public suffix"):
+            Account(email="me@example.com", group_domains=[suffix])
+    assert Account(email="me@sch.gg", group_domains=["sch.gg"]).group_domains == ["sch.gg"]

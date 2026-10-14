@@ -86,7 +86,9 @@ author from `X-Original-Sender` is used as the sender, so rules, corrections, th
 `previous_contact` and the digest apply to the person. On those groups `allow_domains` matches
 the author, not the group: allowlist a group by its exact address in `allow_senders`. Other
 groups stay keyed on the group address. Group emails stored before this existed can be fixed
-with `inbox-jev senders backfill` (safe to run again). Details:
+with `inbox-jev senders backfill` (safe to run again). An entry that is a public suffix
+(`co.uk`, `wa.gov.au`, `github.io`, from the [Public Suffix List](https://publicsuffix.org)
+shipped with the package; a weekly check opens an issue when a newer one is out) fails the accounts file. Details:
 [docs/how-it-decides.md §3.4](docs/how-it-decides.md#34-groups-and-mailing-lists).
 
 ### Modes
