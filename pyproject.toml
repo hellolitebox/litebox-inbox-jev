@@ -53,6 +53,12 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 # tests/fakes.py: so the fakes are checked against the protocols they stand in for.
 files = ["src", "scripts", "tests/fakes.py"]
 python_version = "3.11"
+# Every def annotated, every generic parameterised, no Any returned where a type is declared
+# (tests/fakes.py included: typed, not exempted).
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_any_generics = true
+warn_return_any = true
 check_untyped_defs = true
 warn_unused_ignores = true
 warn_redundant_casts = true

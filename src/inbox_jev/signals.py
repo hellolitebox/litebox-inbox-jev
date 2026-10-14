@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from email.utils import getaddresses, parseaddr
 
 from . import psl
@@ -137,8 +137,8 @@ class Signals:
     sender: str  # lowercased email address
     sender_domain: str
     list_id: str | None
-    unsubscribe_https: list[str] = field(default_factory=list)
-    unsubscribe_mailto: list[str] = field(default_factory=list)
+    unsubscribe_https: tuple[str, ...] = ()
+    unsubscribe_mailto: tuple[str, ...] = ()
     one_click: bool = False
     dmarc_pass: bool = False
     # RFC 2369 List-Post: set by discussion-list software (Google Groups, Mailman, groups.io,
@@ -175,14 +175,15 @@ class Signals:
         return self.list_id or self.sender_domain
 
 
-def parse_list_unsubscribe(value: str | None) -> tuple[list[str], list[str]]:
+def parse_list_unsubscribe(value: str | None) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """RFC 2369: comma-separated <uri> entries. Returns (https urls, mailto uris).
 
     Every other scheme is dropped, plain `http://` included: a one-click POST or a manual link
     over http can be read or rewritten on the way and only confirms the address. A header with
     nothing but http URIs counts as no List-Unsubscribe, so the sender is unverified.
     """
-    https, mailto = [], []
+    https: list[str] = []
+    mailto: list[str] = []
     for uri in _ANGLE.findall(value or ""):
         uri = uri.strip()
         lower = uri.lower()
@@ -190,7 +191,7 @@ def parse_list_unsubscribe(value: str | None) -> tuple[list[str], list[str]]:
             https.append(uri)
         elif lower.startswith("mailto:"):
             mailto.append(uri)
-    return https, mailto
+    return tuple(https), tuple(mailto)
 
 
 def dmarc_passed(authentication_results: list[str]) -> bool:

@@ -49,7 +49,7 @@ def test_one_click_failure_falls_back_to_mailto():
 
 def test_one_click_failure_without_mailto_reports_failure():
     r = unsubscribe(
-        make_signals(unsubscribe_mailto=[]), lambda *a: None, client_returning(500), url_guard=allow
+        make_signals(unsubscribe_mailto=()), lambda *a: None, client_returning(500), url_guard=allow
     )
     assert (r.method, r.status, r.http_status) == ("one_click", "failed", 500)
 
@@ -61,7 +61,7 @@ def test_blocked_url_uses_mailto():
 
 
 def test_no_one_click_and_no_mailto_is_manual():
-    r = unsubscribe(make_signals(one_click=False, unsubscribe_mailto=[]), lambda *a: None)
+    r = unsubscribe(make_signals(one_click=False, unsubscribe_mailto=()), lambda *a: None)
     assert (r.method, r.status, r.target) == ("manual", "manual_pending", "https://shop.com/u/123")
 
 
@@ -137,7 +137,7 @@ def test_one_click_connects_to_the_validated_address_not_a_second_lookup(monkeyp
         return address
 
     r = unsubscribe(
-        make_signals(unsubscribe_https=["https://shop.com:8443/u/123?list=a&b=c"]),
+        make_signals(unsubscribe_https=("https://shop.com:8443/u/123?list=a&b=c",)),
         lambda *a: None,
         client,
         url_guard=guard_then_rebind,

@@ -140,7 +140,9 @@ or post email bodies.
 - Python ≥ 3.11 (`requires-python`; CI's `test-min-python` job runs the tests on
   `MIN_PYTHON_VERSION` and checks it equals `requires-python`, so bump them together), ruff (line
   length 100), mypy (`[tool.mypy]` in `pyproject.toml`: `src`, `scripts` and `tests/fakes.py`,
-  so the fakes are checked against the protocols they stand in for, e.g. `triage.GmailApi`; only
+  with `disallow_untyped_defs`, `disallow_incomplete_defs`, `disallow_any_generics` and
+  `warn_return_any`; the fakes are typed and checked, with `gmail.Gmail`, against the protocols
+  they stand in for: `triage.GmailApi`, `corrections.LabelReader`, `labels.LabelApi`; only
   `yaml`, `googleapiclient` and `google_auth_oauthlib` are untyped, their objects are `Any`),
   pytest. No network calls in tests: use the fakes in `tests/fakes.py`, injected (`Context(…,
   gmail=…, classifier=…)`), not monkeypatched into modules.

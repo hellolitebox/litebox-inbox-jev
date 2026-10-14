@@ -6,14 +6,14 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from urllib.parse import urlparse
 
-from .classification import Classification
+from .classification import Classification, PreviousContact
 from .config import PUBLIC_GROUP_HOSTS, Account, Action, CategoriesConfig, Mode
 from .signals import Signals, domain_of, on_domain
 from .system_labels import INBOX, SPAM
 
 ARCHIVE_ACTIONS = (Action.ARCHIVE, Action.ARCHIVE_UNSUBSCRIBE)
 # previous_contact values meaning I have written to the sender or their domain.
-KNOWN_CONTACT = ("wrote_to_sender", "wrote_to_their_domain")
+KNOWN_CONTACT = frozenset({PreviousContact.WROTE_TO_SENDER, PreviousContact.WROTE_TO_THEIR_DOMAIN})
 
 
 class DecisionSource(StrEnum):
@@ -30,10 +30,10 @@ class Decision:
     confidence: float
     source: DecisionSource
     low_confidence: bool = False
-    # Historical name (kept to match the DB column): it now means "unsubscribe skipped:
-    # unverified sender". Set only when the decision would otherwise unsubscribe; the email keeps
-    # its archive_unsubscribe category and is archived only.
-    downgraded_to_spam: bool = False
+    # Unsubscribe skipped because the sender is unverified (stored in the historically named
+    # `messages.downgraded_to_spam` column). Set only when the decision would otherwise
+    # unsubscribe; the email keeps its archive_unsubscribe category and is archived only.
+    unsubscribe_skipped_unverified: bool = False
     add_labels: list[str] = field(default_factory=list)
     archive: bool = False
     spam: bool = False
@@ -91,7 +91,7 @@ def decide(
     classification: Classification | None = None,
     rule_category: str | None = None,
     *,
-    previous_contact: str | None = None,
+    previous_contact: PreviousContact | None = None,
 ) -> Decision:
     """Decide what happens to one email.
 
@@ -151,20 +151,21 @@ def _check_unsubscribe(
     account: Account,
     sig: Signals,
     decision: Decision,
-    previous_contact: str | None,
+    previous_contact: PreviousContact | None,
 ) -> None:
     """Apply `unsubscribe_gate` to a decision that would unsubscribe (Jev and rule paths).
 
-    Each flag is set only when its check is what stopped the unsubscribe: `downgraded_to_spam`
-    for an unverified sender (the email keeps its category and is only archived),
-    `known_contact_kept` for a known contact. Unknown `previous_contact` doesn't stop it.
+    Each flag is set only when its check is what stopped the unsubscribe:
+    `unsubscribe_skipped_unverified` for an unverified sender (the email keeps its category and
+    is only archived), `known_contact_kept` for a known contact. Unknown `previous_contact`
+    doesn't stop it.
     """
     if not decision.unsubscribe:
         return
     veto = unsubscribe_gate(cfg, account, sig, decision.category, previous_contact).veto
     if veto is not None:
         decision.unsubscribe = False
-        decision.downgraded_to_spam = veto == Veto.UNVERIFIED
+        decision.unsubscribe_skipped_unverified = veto == Veto.UNVERIFIED
         decision.known_contact_kept = veto == Veto.KNOWN_CONTACT
 
 
@@ -173,7 +174,7 @@ def unsubscribe_gate(
     account: Account,
     sig: Signals,
     category: str,
-    previous_contact: str | None,
+    previous_contact: PreviousContact | None,
 ) -> GateResult:
     """The sender checks every unsubscribe passes, in one order, on every path. Pure.
 
@@ -290,7 +291,7 @@ def _archive_group_confident(
     sig: Signals,
     classification: Classification,
     threshold: float,
-    previous_contact: str | None = None,
+    previous_contact: PreviousContact | None = None,
 ) -> bool:
     """True when the archive categories together reach `archive_group_min_confidence`.
 

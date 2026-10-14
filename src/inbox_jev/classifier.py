@@ -5,10 +5,12 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import TypeAlias
 
 from typesafe_sdk import (
     Choice,
     Noul,
+    SystemOneResponse,
     TypeSafeAPIConnectionError,
     TypeSafeAPIError,
     TypeSafeAPIResponseValidationError,
@@ -16,7 +18,7 @@ from typesafe_sdk import (
     TypeSafeError,
 )
 
-from .classification import Classification
+from .classification import Classification, PreviousContact
 from .config import CategoriesConfig
 from .gmail import Email
 from .signals import Signals
@@ -24,6 +26,10 @@ from .signals import Signals
 CATEGORY_Q = "category"
 NEEDS_REPLY_Q = "needs_reply"
 TAG_PREFIX = "tag_"
+
+# One email as Jev sees it (`build_state`): header text, flags, the body excerpt and, when
+# known, `previous_contact`. A plain mapping, as the SDK's `state` is any JSON object.
+JevState: TypeAlias = dict[str, str | bool | None]
 
 # What a failed Jev call raises (API, connection, invalid answer). Callers that can do without
 # Jev's answer catch this, not Exception.
@@ -117,8 +123,9 @@ def describe_jev_error(exc: JevError, *, request_id: bool = True) -> str:
 CATEGORY_INSTRUCTIONS = (
     "Classify this email received in my work inbox into exactly one category. "
     "Judge by who wrote it and why, not only by the topic. "
-    "previous_contact says whether I have ever sent an email to this sender (wrote_to_sender), "
-    "to someone else at their company domain (wrote_to_their_domain) or never (never); it is "
+    "previous_contact says whether I have ever sent an email to this sender "
+    f"({PreviousContact.WROTE_TO_SENDER}), to someone else at their company domain "
+    f"({PreviousContact.WROTE_TO_THEIR_DOMAIN}) or never ({PreviousContact.NEVER}); it is "
     "missing when unknown. A personal-looking pitch from a sender I never wrote to is usually "
     "cold outreach, not important."
 )
@@ -128,12 +135,12 @@ def build_state(
     email: Email,
     account_email: str,
     body_chars: int,
-    previous_contact: str | None = None,
+    previous_contact: PreviousContact | None = None,
     sig: Signals | None = None,
-) -> dict:
+) -> JevState:
     """`sig` is triage.signals_for's answer; defaults to the raw (unresolved) signals."""
     sig = sig or email.signals
-    state = {
+    state: JevState = {
         "recipient": account_email,
         "from": email.header("From"),
         "to": email.header("To"),
@@ -149,12 +156,12 @@ def build_state(
         state["original_sender"] = sig.sender
         state["sent_via_group"] = sig.relayed_by
     if previous_contact is not None:
-        state["previous_contact"] = previous_contact
+        state["previous_contact"] = previous_contact.value
     return state
 
 
-def build_questions(cfg: CategoriesConfig) -> dict:
-    questions: dict = {
+def build_questions(cfg: CategoriesConfig) -> dict[str, Choice | Noul]:
+    questions: dict[str, Choice | Noul] = {
         CATEGORY_Q: Choice(
             instructions=CATEGORY_INSTRUCTIONS,
             criteria={c.key: c.criteria for c in cfg.categories},
@@ -166,7 +173,7 @@ def build_questions(cfg: CategoriesConfig) -> dict:
     return questions
 
 
-def _request_id(result) -> str | None:
+def _request_id(result: SystemOneResponse) -> str | None:
     try:
         return result.request_id
     except TypeSafeError:  # raised when the x-typesafe-request-id header is missing
@@ -174,7 +181,7 @@ def _request_id(result) -> str | None:
 
 
 class Classifier:
-    def __init__(self, api_key: str, model: str, cfg: CategoriesConfig):
+    def __init__(self, api_key: str, model: str, cfg: CategoriesConfig) -> None:
         if not api_key:
             raise JevNotConfigured("TYPESAFE_API_KEY is not set: add it to .env")
         try:
@@ -186,7 +193,7 @@ class Classifier:
         self._cfg = cfg
         self._questions = build_questions(cfg)
 
-    def classify(self, state: dict) -> Classification:
+    def classify(self, state: JevState) -> Classification:
         result = self._client.system_one(state, self._questions)
         choice = result.choices[CATEGORY_Q]
         return Classification(

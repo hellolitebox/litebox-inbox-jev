@@ -1,38 +1,9 @@
 import pytest
+from fakes import FakeLabels
 
 from inbox_jev import labels
 from inbox_jev.config import Mode
 from inbox_jev.db import Message
-
-SYSTEM = {"INBOX", "SPAM"}
-
-
-class FakeLabels:
-    def __init__(self, names, counts=None):
-        self._labels = {n: f"Label_{i}" for i, n in enumerate(names)}
-        self._counts = counts or {}  # label name -> messagesTotal
-        self.renamed = []
-        self.deleted = []
-
-    def labels(self):
-        return dict(self._labels)
-
-    def user_labels(self):
-        return {n for n in self._labels if n not in SYSTEM}
-
-    def label_message_count(self, label_id):
-        name = next(n for n, i in self._labels.items() if i == label_id)
-        return self._counts.get(name, 0)
-
-    def delete_label(self, label_id):
-        name = next(n for n, i in self._labels.items() if i == label_id)
-        del self._labels[name]
-        self.deleted.append(label_id)
-
-    def rename_label(self, label_id, new_name):
-        old = next(n for n, i in self._labels.items() if i == label_id)
-        self._labels[new_name] = self._labels.pop(old)
-        self.renamed.append((label_id, new_name))
 
 
 def _msg(account, gmail_id, added, decided):

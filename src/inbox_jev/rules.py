@@ -8,7 +8,7 @@ from enum import StrEnum
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .classification import Classification
+from .classification import Classification, PreviousContact
 from .config import Action, CategoriesConfig
 from .db import SenderRule
 from .policy import KNOWN_CONTACT, Decision, rule_keys, spares_known_contacts
@@ -79,7 +79,7 @@ def record_auto(
     sender: str,
     classification: Classification,
     decision: Decision,
-    previous_contact: str | None = None,
+    previous_contact: PreviousContact | None = None,
     *,
     count: bool = True,
 ) -> None:
@@ -111,7 +111,7 @@ def record_auto(
         and not _is_keep(cfg, rule.category)
     ):
         rule.hits = 0
-    # Unverified senders (downgraded_to_spam) can earn a rule: the rule path re-runs the
+    # Unverified senders (unsubscribe_skipped_unverified) can earn a rule: the rule path re-runs the
     # DMARC/List-Unsubscribe and group checks on every email, so it never unsubscribes them.
     # A group archive never earns one: the top category alone was below its threshold. Nor does
     # a known contact in a category that spares known contacts (cold_outreach), whether or not

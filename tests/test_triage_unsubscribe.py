@@ -15,6 +15,7 @@ from sqlalchemy import update
 from sqlalchemy.exc import OperationalError
 
 from inbox_jev import db, rules, triage
+from inbox_jev.classification import PreviousContact
 from inbox_jev.config import Mode
 from inbox_jev.db import Message, SentDomainScan, Unsubscribe
 from inbox_jev.gmail import DomainScan, scan_rules
@@ -424,7 +425,10 @@ def test_retry_stops_before_unsubscribing_while_another_process_writes(
     with ctx.sessions() as s:
         failed_unsub(s, account, "9", "agency.io", "cold_outreach")
         rows = triage.DomainScanRows(s, account.email)
-        assert triage.previous_contact(gmail, account.email, "bob@agency.io", rows) == "never"
+        assert (
+            triage.previous_contact(gmail, account.email, "bob@agency.io", rows)
+            == PreviousContact.NEVER
+        )
         s.commit()
     with ctx.sessions() as run_session:
         # `run`'s write, not committed yet.

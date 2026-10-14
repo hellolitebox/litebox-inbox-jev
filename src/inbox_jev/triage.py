@@ -20,12 +20,13 @@ from sqlalchemy.sql.expression import Executable
 
 from . import corrections, rules
 from . import unsubscribe as unsub
-from .classification import Classification
+from .classification import Classification, PreviousContact
 from .classifier import (
     Classifier,
     JevError,
     JevFailure,
     JevNotConfigured,
+    JevState,
     build_state,
     describe_jev_error,
     failure_kind,
@@ -109,7 +110,7 @@ class UnsubscribeBudget:
 class Classifies(Protocol):
     """Anything that answers for one email's Jev state."""
 
-    def classify(self, state: dict) -> Classification: ...
+    def classify(self, state: JevState) -> Classification: ...
 
 
 class JevClient(Classifies, Protocol):
@@ -185,7 +186,7 @@ class JevGuard:
         if self.stopped is not None:
             raise _JevStopped
 
-    def classify(self, state: dict) -> Classification:
+    def classify(self, state: JevState) -> Classification:
         self.check()
         try:
             result = self._client.classify(state)
@@ -263,7 +264,7 @@ class Context:
         self,
         settings: Settings,
         cfg: CategoriesConfig,
-        sessions: sessionmaker,
+        sessions: sessionmaker[Session],
         gmail: GmailFactory,
         classifier: JevClient | None = None,
     ) -> None:
@@ -503,7 +504,8 @@ def _retry_due(attempts: int, last_failure: datetime, at: datetime) -> bool:
         return False
     if last_failure.tzinfo is None:  # SQLite returns naive datetimes (stored as UTC)
         last_failure = last_failure.replace(tzinfo=UTC)
-    return at >= last_failure + ERROR_RETRY_BACKOFF * 2 ** max(attempts - 1, 0)
+    backoff: timedelta = ERROR_RETRY_BACKOFF * 2 ** max(attempts - 1, 0)
+    return at >= last_failure + backoff
 
 
 def describe_run_error(exc: BaseException, account: str) -> str:
@@ -743,7 +745,8 @@ class _Inputs:
 
     rule: SenderRule | None
     classification: Classification | None  # None: Jev not asked, or its flags-only call failed
-    contact: str | None  # previous_contact's answer; None: not checked, or the search failed
+    # previous_contact's answer; None: not checked, or the search failed
+    contact: PreviousContact | None
 
     @property
     def rule_category(self) -> str | None:
@@ -852,7 +855,7 @@ def _store_outcome(
     msg.needs_reply = classification.needs_reply if classification else None
     msg.tags = classification.tags if classification else None
     msg.low_confidence = decision.low_confidence
-    msg.downgraded_to_spam = decision.downgraded_to_spam
+    msg.downgraded_to_spam = decision.unsubscribe_skipped_unverified
     msg.mode = mode
     msg.labels_added = actions.add_labels
     msg.decided_labels = decision.add_labels
@@ -1114,8 +1117,8 @@ def _utc(at: datetime | None) -> datetime | None:
 
 def previous_contact(
     gmail: GmailApi, account: str, sender: str, scans: DomainScans | None = None
-) -> str | None:
-    """wrote_to_sender | wrote_to_their_domain | never, or None if it can't be checked.
+) -> PreviousContact | None:
+    """Whether I wrote to `sender` or to someone at their domain, or None if it can't be checked.
 
     Writing to a machine address isn't knowing someone: an automated sender
     (`signals.is_automated_address`, e.g. a no-reply or bounce address) is never searched for
@@ -1133,10 +1136,10 @@ def previous_contact(
     domain = domain_of(sender)
     try:
         if not is_automated_address(sender) and gmail.has_written_to(sender):
-            return "wrote_to_sender"
+            return PreviousContact.WROTE_TO_SENDER
         own = domain_of(account.lower())
         if domain not in FREE_MAIL and domain != own and gmail.has_written_to(domain, scans):
-            return "wrote_to_their_domain"
+            return PreviousContact.WROTE_TO_THEIR_DOMAIN
     except (SQLAlchemyError, NotImplementedError):
         # Saving the domain scan failed (e.g. the database is locked, or has no upsert): not an
         # unknown contact, which `run` may unsubscribe; the caller fails before any request.
@@ -1144,7 +1147,7 @@ def previous_contact(
     except Exception:
         log.warning("previous contact check failed", extra={"account": account}, exc_info=True)
         return None
-    return "never"
+    return PreviousContact.NEVER
 
 
 def _learn_correction(

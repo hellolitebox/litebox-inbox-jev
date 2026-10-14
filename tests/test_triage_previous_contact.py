@@ -14,6 +14,7 @@ from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.exc import OperationalError
 
 from inbox_jev import rules, triage
+from inbox_jev.classification import PreviousContact
 from inbox_jev.config import Mode
 from inbox_jev.db import SenderRule, SentDomainScan, Unsubscribe, now
 from inbox_jev.gmail import DomainScan, DomainVerdict, MemoryScans, scan_rules
@@ -67,33 +68,58 @@ class ContactGmail:
 @pytest.mark.parametrize(
     ("written", "sender", "expected", "queries"),
     [
-        ({"a@corp.com"}, "A@Corp.com", "wrote_to_sender", ["a@corp.com"]),
-        ({"corp.com"}, "b@corp.com", "wrote_to_their_domain", ["b@corp.com", "corp.com"]),
-        ((), "b@corp.com", "never", ["b@corp.com", "corp.com"]),
-        ({"gmail.com"}, "x@gmail.com", "never", ["x@gmail.com"]),  # free mail: no domain check
+        ({"a@corp.com"}, "A@Corp.com", PreviousContact.WROTE_TO_SENDER, ["a@corp.com"]),
+        (
+            {"corp.com"},
+            "b@corp.com",
+            PreviousContact.WROTE_TO_THEIR_DOMAIN,
+            ["b@corp.com", "corp.com"],
+        ),
+        ((), "b@corp.com", PreviousContact.NEVER, ["b@corp.com", "corp.com"]),
+        (
+            {"gmail.com"},
+            "x@gmail.com",
+            PreviousContact.NEVER,
+            ["x@gmail.com"],
+        ),  # free mail: no domain check
         # Free mail under a country domain is free mail too: no domain check.
-        ({"yahoo.com.ar"}, "ana@yahoo.com.ar", "never", ["ana@yahoo.com.ar"]),
-        ({"hotmail.co.uk"}, "bo@hotmail.co.uk", "never", ["bo@hotmail.co.uk"]),
-        ({"acme.com"}, "y@acme.com", "never", ["y@acme.com"]),  # my own domain
+        ({"yahoo.com.ar"}, "ana@yahoo.com.ar", PreviousContact.NEVER, ["ana@yahoo.com.ar"]),
+        ({"hotmail.co.uk"}, "bo@hotmail.co.uk", PreviousContact.NEVER, ["bo@hotmail.co.uk"]),
+        ({"acme.com"}, "y@acme.com", PreviousContact.NEVER, ["y@acme.com"]),  # my own domain
         ((), "x@corp.com OR from:me", None, []),  # never builds a query from odd input
         # A machine sender is never searched for itself, only its domain.
         (
             {"messages-noreply@linkedin.com"},
             "messages-noreply@linkedin.com",
-            "never",
+            PreviousContact.NEVER,
             ["linkedin.com"],
         ),
         (
             {"linkedin.com"},
             "messages-noreply@linkedin.com",
-            "wrote_to_their_domain",
+            PreviousContact.WROTE_TO_THEIR_DOMAIN,
             ["linkedin.com"],
         ),
-        ({"bounce@shop.com"}, "bounce@shop.com", "never", ["shop.com"]),
-        ({"noreply@gmail.com"}, "noreply@gmail.com", "never", []),  # free mail: nothing to ask
-        ({"reply@corp.com"}, "reply@corp.com", "wrote_to_sender", ["reply@corp.com"]),  # human
+        ({"bounce@shop.com"}, "bounce@shop.com", PreviousContact.NEVER, ["shop.com"]),
+        (
+            {"noreply@gmail.com"},
+            "noreply@gmail.com",
+            PreviousContact.NEVER,
+            [],
+        ),  # free mail: nothing to ask
+        (
+            {"reply@corp.com"},
+            "reply@corp.com",
+            PreviousContact.WROTE_TO_SENDER,
+            ["reply@corp.com"],
+        ),  # human
         # A company called Reply under a two-level public suffix is a person, searched for itself.
-        ({"ana@reply.com.ar"}, "ana@reply.com.ar", "wrote_to_sender", ["ana@reply.com.ar"]),
+        (
+            {"ana@reply.com.ar"},
+            "ana@reply.com.ar",
+            PreviousContact.WROTE_TO_SENDER,
+            ["ana@reply.com.ar"],
+        ),
     ],
 )
 def test_previous_contact(written, sender, expected, queries):
@@ -104,7 +130,9 @@ def test_previous_contact(written, sender, expected, queries):
 
 def test_previous_contact_keeps_only_the_domain_search_in_the_scans():
     gmail, scans = ContactGmail(), MemoryScans()
-    assert triage.previous_contact(gmail, "me@acme.com", "b@corp.com", scans) == "never"
+    assert (
+        triage.previous_contact(gmail, "me@acme.com", "b@corp.com", scans) == PreviousContact.NEVER
+    )
     assert list(zip(gmail.queries, gmail.scans, strict=True)) == [
         ("b@corp.com", None),
         ("corp.com", scans),

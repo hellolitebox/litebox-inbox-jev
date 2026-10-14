@@ -37,7 +37,7 @@ from typesafe_sdk import (
 
 from inbox_jev import digest, rules, triage
 from inbox_jev import unsubscribe as unsub
-from inbox_jev.classification import Classification
+from inbox_jev.classification import Classification, PreviousContact
 from inbox_jev.classifier import build_state
 from inbox_jev.config import Account, DigestLanguage, Mode, Settings
 from inbox_jev.db import (
@@ -118,7 +118,7 @@ def test_ex01_tool_digest_split_is_archived_by_the_group(cfg, account, make_sess
     """EX-01 (docs/how-it-decides.md §5, §3.2 archive group)."""
     sig = make_signals(sender="digest@analytics.example", sender_domain="analytics.example")
     jev = answer("notification", notification=0.55, newsletter=0.42, marketing=0.02, important=0.01)
-    d = decide(cfg, account, sig, jev, previous_contact="never")
+    d = decide(cfg, account, sig, jev, previous_contact=PreviousContact.NEVER)
     assert (d.category, d.archive, d.archive_group) == ("notification", True, True)
     assert not (d.low_confidence or d.unsubscribe or d.spam)
     assert d.add_labels == ["Jev/Notifications"]
@@ -130,7 +130,7 @@ def test_ex01_tool_digest_split_is_archived_by_the_group(cfg, account, make_sess
     # through the group (floor 0.99, archive categories 0.995).
     strict = account.model_copy(update={"min_confidence": {"notification": 0.99}})
     sure = answer("notification", notification=0.96, newsletter=0.035)
-    d_sure = decide(cfg, strict, sig, sure, previous_contact="never")
+    d_sure = decide(cfg, strict, sig, sure, previous_contact=PreviousContact.NEVER)
     assert d_sure.archive_group and sure.confidence >= cfg.auto_rule.min_confidence
     sessions = make_sessions("sqlite:///:memory:")
     with sessions() as s:
@@ -139,7 +139,7 @@ def test_ex01_tool_digest_split_is_archived_by_the_group(cfg, account, make_sess
         assert s.query(SenderRule).count() == 0
 
     narrowed = account.model_copy(update={"act_categories": ["notification"]})
-    d = decide(cfg, narrowed, sig, jev, previous_contact="never")
+    d = decide(cfg, narrowed, sig, jev, previous_contact=PreviousContact.NEVER)
     assert d.low_confidence and "Jev/Review" in d.add_labels and not d.archive
 
 
@@ -214,7 +214,7 @@ def test_ex03_stub_plain_part_is_replaced_by_the_html(cfg, account):
         "list-unsubscribe": ["<mailto:leave@esp.example>"],
     }
     mail = Email("1", "t1", ["INBOX"], headers, "snippet", body, 1_700_000_000_000)
-    state = build_state(mail, account.email, 3000, "never")
+    state = build_state(mail, account.email, 3000, PreviousContact.NEVER)
     assert state["body"].startswith("Annual Industry Summit") and state["is_mailing_list"]
 
     d = decide(
@@ -289,7 +289,7 @@ def test_ex05_known_contact_sequence_is_archived_only(spec, monkeypatch):
         assert s.query(Unsubscribe).count() == 0
         assert s.query(SenderRule).count() == 0  # known_contact_kept never earns a rule
 
-    for contact in ("wrote_to_sender", "wrote_to_their_domain"):
+    for contact in (PreviousContact.WROTE_TO_SENDER, PreviousContact.WROTE_TO_THEIR_DOMAIN):
         d = decide(
             ctx.cfg,
             spec[2],
@@ -404,7 +404,7 @@ def _consultation_pitch():
 def test_ex09_mass_pitch_expecting_reply_is_group_archived(cfg, account):
     """EX-09 (docs/how-it-decides.md §5, §3.2 archive group, needs-reply veto)."""
     sig = make_signals(sender="offers@bulkmail.example", sender_domain="bulkmail.example")
-    for contact in ("never", None):
+    for contact in (PreviousContact.NEVER, None):
         d = decide(cfg, account, sig, _consultation_pitch(), previous_contact=contact)
         assert (d.category, d.archive, d.archive_group) == ("cold_outreach", True, True)
         assert not d.unsubscribe and not d.low_confidence
@@ -414,14 +414,20 @@ def test_ex09_mass_pitch_expecting_reply_is_group_archived(cfg, account):
 def test_ex10_known_vendor_follow_up_stays_in_review(cfg, account):
     """EX-10 (docs/how-it-decides.md §5, §3.2 archive group, needs-reply veto)."""
     sig = make_signals(sender="rep@vendor.example", sender_domain="vendor.example")
-    d = decide(cfg, account, sig, _consultation_pitch(), previous_contact="wrote_to_their_domain")
+    d = decide(
+        cfg,
+        account,
+        sig,
+        _consultation_pitch(),
+        previous_contact=PreviousContact.WROTE_TO_THEIR_DOMAIN,
+    )
     assert not d.archive and d.low_confidence
     assert d.add_labels == ["Jev/Review", "Jev/Outreach", "Jev/Needs Reply"]
 
     keep_signal = answer(
         "cold_outreach", needs_reply=0.79, cold_outreach=0.64, marketing=0.31, important=0.05
     )
-    d = decide(cfg, account, sig, keep_signal, previous_contact="never")
+    d = decide(cfg, account, sig, keep_signal, previous_contact=PreviousContact.NEVER)
     assert not d.archive and d.low_confidence  # a stranger with keep probability ≥ 0.05
 
 
@@ -429,7 +435,7 @@ def test_ex10_known_vendor_follow_up_stays_in_review(cfg, account):
 
 
 @pytest.mark.parametrize(
-    "signals_kw", [{"unsubscribe_https": [], "unsubscribe_mailto": []}, {"dmarc_pass": False}]
+    "signals_kw", [{"unsubscribe_https": (), "unsubscribe_mailto": ()}, {"dmarc_pass": False}]
 )
 def test_ex11_unverified_cold_outreach_is_archived_never_unsubscribed(
     cfg, account, signals_kw, make_sessions
@@ -439,9 +445,9 @@ def test_ex11_unverified_cold_outreach_is_archived_never_unsubscribed(
         sender="founder@devshop.example", sender_domain="devshop.example", **signals_kw
     )
     jev = answer("cold_outreach", cold_outreach=0.97)
-    d = decide(cfg, account, sig, jev, previous_contact="never")
+    d = decide(cfg, account, sig, jev, previous_contact=PreviousContact.NEVER)
     assert (d.category, d.archive, d.spam, d.unsubscribe) == ("cold_outreach", True, False, False)
-    assert d.downgraded_to_spam
+    assert d.unsubscribe_skipped_unverified
     p = plan(cfg, d, Mode.ACT)
     assert p.archived and not p.spammed and "SPAM" not in p.add_labels
 
@@ -453,11 +459,18 @@ def test_ex11_unverified_cold_outreach_is_archived_never_unsubscribed(
     # A known contact: the unverified check stopped the unsubscribe, so known_contact_kept
     # isn't set (same order as the rule path), but the answer still doesn't count toward an
     # auto rule: known contacts never earn a cold_outreach rule.
-    d = decide(cfg, account, sig, jev, previous_contact="wrote_to_sender")
-    assert d.archive and d.downgraded_to_spam and not d.known_contact_kept and not d.unsubscribe
+    d = decide(cfg, account, sig, jev, previous_contact=PreviousContact.WROTE_TO_SENDER)
+    assert (
+        d.archive
+        and d.unsubscribe_skipped_unverified
+        and not d.known_contact_kept
+        and not d.unsubscribe
+    )
     with sessions() as s:
         s.query(SenderRule).delete()
-        rules.record_auto(s, cfg, account.email, sig.sender, jev, d, "wrote_to_sender")
+        rules.record_auto(
+            s, cfg, account.email, sig.sender, jev, d, PreviousContact.WROTE_TO_SENDER
+        )
         assert s.query(SenderRule).count() == 0
 
     # A List-Unsubscribe with only http:// URIs counts as none: unverified the same way.
@@ -469,8 +482,8 @@ def test_ex11_unverified_cold_outreach_is_archived_never_unsubscribed(
         }
     )
     assert not http_only.has_unsubscribe
-    d = decide(cfg, account, http_only, jev, previous_contact="never")
-    assert d.archive and d.downgraded_to_spam and not d.unsubscribe
+    d = decide(cfg, account, http_only, jev, previous_contact=PreviousContact.NEVER)
+    assert d.archive and d.unsubscribe_skipped_unverified and not d.unsubscribe
 
 
 # --- EX-12 -----------------------------------------------------------------------------------
@@ -658,12 +671,12 @@ def test_ex16_archive_group_respects_category_thresholds(cfg, account):
     cfg.by_key["marketing"].min_confidence = 0.95
     sig = make_signals(sender="hello@brand.example", sender_domain="brand.example")
     jev = answer("newsletter", newsletter=0.50, marketing=0.45, important=0.01)
-    d = decide(cfg, account, sig, jev, previous_contact="never")
+    d = decide(cfg, account, sig, jev, previous_contact=PreviousContact.NEVER)
     assert d.low_confidence and not d.archive and not d.archive_group
     assert d.add_labels == ["Jev/Review", "Jev/Newsletters"]
 
     lenient = account.model_copy(update={"min_confidence": {"marketing": 0.90}})
-    d = decide(cfg, lenient, sig, jev, previous_contact="never")
+    d = decide(cfg, lenient, sig, jev, previous_contact=PreviousContact.NEVER)
     assert d.archive and d.archive_group and not d.unsubscribe  # the account override wins
 
 
@@ -891,7 +904,7 @@ def test_ex24_replies_to_notifications_make_no_known_contact(cfg, account, monke
     gmail = sent_mail_gmail(monkeypatch, svc)
     sender = "messages-noreply@social.example"
     contact = triage.previous_contact(gmail, account.email, sender)
-    assert contact == "never"
+    assert contact == PreviousContact.NEVER
     assert svc.queries == ["in:sent to:social.example"]  # the machine sender isn't searched
     assert len(svc.reads) == 12  # To/Cc/Bcc of each match, no body
 
@@ -904,13 +917,16 @@ def test_ex24_replies_to_notifications_make_no_known_contact(cfg, account, monke
     # One email to a person there makes the domain known again.
     svc = SentMailService({"p": {"To": "Jane <jane@social.example>"}, **replies})
     gmail = sent_mail_gmail(monkeypatch, svc)
-    assert triage.previous_contact(gmail, account.email, sender) == "wrote_to_their_domain"
+    assert (
+        triage.previous_contact(gmail, account.email, sender)
+        == PreviousContact.WROTE_TO_THEIR_DOMAIN
+    )
     assert svc.reads == ["p"]
 
 
 def test_ex25_no_reply_sender_reply_signal_is_judged_like_a_strangers(cfg, account):
     """EX-25 (docs/how-it-decides.md §5, §3.2 archive group, §4.8 machine addresses)."""
-    known = "wrote_to_their_domain"
+    known = PreviousContact.WROTE_TO_THEIR_DOMAIN
     sig = _sig("Vendor <noreply@vendor.example>")
     assert sig.no_reply
     d = decide(cfg, account, sig, _lead_suggestions(), previous_contact=known)
@@ -1178,7 +1194,7 @@ def test_ex32_the_public_suffix_list_decides_what_a_domain_is(cfg, account, monk
     svc = SentMailService(replies)
     gmail = sent_mail_gmail(monkeypatch, svc)
     contact = triage.previous_contact(gmail, account.email, "updates@acme.de")
-    assert contact == "never"
+    assert contact == PreviousContact.NEVER
     assert svc.queries == ["in:sent to:updates@acme.de", "in:sent to:acme.de"]
     d = decide(
         cfg, account, _sig("Acme <updates@acme.de>"), _lead_suggestions(), previous_contact=contact
@@ -1190,7 +1206,7 @@ def test_ex32_the_public_suffix_list_decides_what_a_domain_is(cfg, account, monk
     svc = SentMailService({"k": {"To": "Kim <kim@reply.wa.gov.au>"}})
     gmail = sent_mail_gmail(monkeypatch, svc)
     assert triage.previous_contact(gmail, account.email, "kim@reply.wa.gov.au") == (
-        "wrote_to_sender"
+        PreviousContact.WROTE_TO_SENDER
     )
     assert svc.queries == ["in:sent to:kim@reply.wa.gov.au"]
 
@@ -1224,12 +1240,16 @@ def test_ex33_satisfaction_survey_is_not_vetoed_by_needs_reply(cfg, account):
         )
 
     # Before: "give us your opinion" read as a request (0.88) with keep 0.05 -> Review.
-    d = decide(cfg, account, sig, survey(0.88), previous_contact="wrote_to_their_domain")
+    d = decide(
+        cfg, account, sig, survey(0.88), previous_contact=PreviousContact.WROTE_TO_THEIR_DOMAIN
+    )
     assert not d.archive and d.low_confidence
     assert d.add_labels == ["Jev/Review", "Jev/Marketing", "Jev/Needs Reply"]
 
     # Now: Jev answers no, so the archive group (0.95) archives it, never unsubscribing.
-    d = decide(cfg, account, sig, survey(0.15), previous_contact="wrote_to_their_domain")
+    d = decide(
+        cfg, account, sig, survey(0.15), previous_contact=PreviousContact.WROTE_TO_THEIR_DOMAIN
+    )
     assert (d.category, d.archive, d.archive_group) == ("marketing", True, True)
     assert not (d.unsubscribe or d.low_confidence or d.spam)
     assert d.add_labels == ["Jev/Marketing"]
@@ -1272,7 +1292,7 @@ def test_ex34_an_email_to_a_similar_address_makes_no_known_contact(spec, monkeyp
     known = triage.previous_contact(
         sent_mail_gmail(monkeypatch, svc), account.email, "lee@outlook.com"
     )
-    assert known == "wrote_to_sender"
+    assert known == PreviousContact.WROTE_TO_SENDER
 
 
 # --- EX-35 -----------------------------------------------------------------------------------
@@ -1299,7 +1319,11 @@ def test_ex35_a_domain_written_to_only_at_machine_addresses_is_read_in_full(
 
     sig = _sig(f"Code <{sender}>")
     runs = [one_run() for _ in range(3)]
-    assert runs == [("wrote_to_their_domain", 25), ("wrote_to_their_domain", 25), ("never", 10)]
+    assert runs == [
+        (PreviousContact.WROTE_TO_THEIR_DOMAIN, 25),
+        (PreviousContact.WROTE_TO_THEIR_DOMAIN, 25),
+        (PreviousContact.NEVER, 10),
+    ]
     first = decide(cfg, account, sig, _lead_suggestions(), previous_contact=runs[0][0])
     assert (first.archive, first.low_confidence) == (False, True)  # Review, as before
     assert "Jev/Needs Reply" in first.add_labels
@@ -1316,12 +1340,15 @@ def test_ex35_a_domain_written_to_only_at_machine_addresses_is_read_in_full(
         )
         assert row.verdict_at is not None
 
-    assert one_run() == ("never", 0)  # one search for newer sent mail, nothing to read
+    assert one_run() == (
+        PreviousContact.NEVER,
+        0,
+    )  # one search for newer sent mail, nothing to read
     # A new email to a person there: read once, then known without asking Gmail again.
     svc.sent = {"p": {"To": "Ana <ana@code.example>"}, **svc.sent}
     svc.dates["p"] = SENT_BASE_S + 3600
-    assert one_run() == ("wrote_to_their_domain", 1)
-    assert one_run() == ("wrote_to_their_domain", 0)
+    assert one_run() == (PreviousContact.WROTE_TO_THEIR_DOMAIN, 1)
+    assert one_run() == (PreviousContact.WROTE_TO_THEIR_DOMAIN, 0)
     assert svc.queries == ["in:sent to:notifications@code.example"]
 
 
@@ -1360,8 +1387,8 @@ def test_ex36_a_never_verdict_is_redone_after_a_month(cfg, account, make_session
     one_run = _domain_runs(account, monkeypatch, svc, sessions)
     jev = answer("cold_outreach", cold_outreach=0.96)
 
-    assert one_run() == "never"
-    d = decide(cfg, account, _vendor_pitch(), jev, previous_contact="never")
+    assert one_run() == PreviousContact.NEVER
+    d = decide(cfg, account, _vendor_pitch(), jev, previous_contact=PreviousContact.NEVER)
     assert d.archive and d.unsubscribe
 
     # You restore from Trash an email you sent Ana there long ago: older than the span read.
@@ -1374,13 +1401,17 @@ def test_ex36_a_never_verdict_is_redone_after_a_month(cfg, account, make_session
             s.commit()
 
     age(NEVER_VERDICT_TTL - timedelta(days=1))
-    assert one_run() == "never"  # within the month: only newer mail is listed
+    assert one_run() == PreviousContact.NEVER  # within the month: only newer mail is listed
     assert svc.reads == []
     age(timedelta(days=1))
-    assert one_run() == "wrote_to_their_domain"  # a month old: read again from the newest
+    assert (
+        one_run() == PreviousContact.WROTE_TO_THEIR_DOMAIN
+    )  # a month old: read again from the newest
     assert svc.queries == ["in:sent to:sales@vendor.example", "in:sent to:vendor.example"]
     assert svc.reads[-1] == "ana"
-    d = decide(cfg, account, _vendor_pitch(), jev, previous_contact="wrote_to_their_domain")
+    d = decide(
+        cfg, account, _vendor_pitch(), jev, previous_contact=PreviousContact.WROTE_TO_THEIR_DOMAIN
+    )
     assert d.archive and d.known_contact_kept and not d.unsubscribe
     with sessions() as s:
         assert s.query(SentDomainScan).one().verdict == "person"
@@ -1401,14 +1432,16 @@ def test_ex37_a_scan_read_out_of_date_order_is_not_trusted(
     sessions = make_sessions("sqlite:///:memory:")
     one_run = _domain_runs(account, monkeypatch, svc, sessions)
 
-    assert one_run() == "wrote_to_their_domain"  # c came after b though newer: not trusted
+    assert (
+        one_run() == PreviousContact.WROTE_TO_THEIR_DOMAIN
+    )  # c came after b though newer: not trusted
     assert "out of date order" in caplog.text
     d = decide(
         cfg,
         account,
         _vendor_pitch(),
         answer("cold_outreach", cold_outreach=0.96),
-        previous_contact="wrote_to_their_domain",
+        previous_contact=PreviousContact.WROTE_TO_THEIR_DOMAIN,
     )
     assert d.known_contact_kept and not d.unsubscribe
     with sessions() as s:
@@ -1416,5 +1449,5 @@ def test_ex37_a_scan_read_out_of_date_order_is_not_trusted(
         assert (row.verdict, row.read, row.newest_s) == ("scanning", 0, None)  # starts over
 
     svc.ordered = True
-    assert one_run() == "never"
+    assert one_run() == PreviousContact.NEVER
     assert svc.queries[-1] == "in:sent to:vendor.example"  # from the newest match again

@@ -12,6 +12,7 @@ from conftest import make_classification, make_signals
 from fakes import as_archived, email, failed_unsub
 
 from inbox_jev import rules, triage
+from inbox_jev.classification import PreviousContact
 from inbox_jev.config import Mode
 from inbox_jev.db import Message
 from inbox_jev.policy import GateResult, Veto, acts_on, unsubscribe_gate
@@ -38,11 +39,21 @@ def test_acts_on(mode, act_categories, acts):
     ("category", "signals", "contact", "expected"),
     [
         ("marketing", {}, None, GateResult(None)),
-        ("cold_outreach", {}, "never", GateResult(None)),
+        ("cold_outreach", {}, PreviousContact.NEVER, GateResult(None)),
         ("cold_outreach", {}, None, GateResult(None, contact_unknown=True)),
-        ("marketing", {}, "wrote_to_sender", GateResult(None)),  # marketing spares no one
-        ("cold_outreach", {}, "wrote_to_sender", GateResult(Veto.KNOWN_CONTACT)),
-        ("cold_outreach", {}, "wrote_to_their_domain", GateResult(Veto.KNOWN_CONTACT)),
+        (
+            "marketing",
+            {},
+            PreviousContact.WROTE_TO_SENDER,
+            GateResult(None),
+        ),  # marketing spares no one
+        ("cold_outreach", {}, PreviousContact.WROTE_TO_SENDER, GateResult(Veto.KNOWN_CONTACT)),
+        (
+            "cold_outreach",
+            {},
+            PreviousContact.WROTE_TO_THEIR_DOMAIN,
+            GateResult(Veto.KNOWN_CONTACT),
+        ),
         ("newsletter", {}, None, GateResult(Veto.NOT_UNSUBSCRIBING)),
         ("important", {}, None, GateResult(Veto.NOT_UNSUBSCRIBING)),
         ("removed_category", {}, None, GateResult(Veto.NOT_UNSUBSCRIBING)),
@@ -50,7 +61,7 @@ def test_acts_on(mode, act_categories, acts):
         ("marketing", {"dmarc_pass": False}, None, GateResult(Veto.UNVERIFIED)),
         (
             "marketing",
-            {"unsubscribe_https": [], "unsubscribe_mailto": []},
+            {"unsubscribe_https": (), "unsubscribe_mailto": ()},
             None,
             GateResult(Veto.UNVERIFIED),
         ),
@@ -68,8 +79,12 @@ def test_unsubscribe_gate(cfg, account, category, signals, contact, expected):
     [
         # Several checks fail at once: the first in the gate's order is the one reported.
         ({"sender": "vip@partner.com", "dmarc_pass": False}, None, Veto.ALLOWLISTED),
-        ({"dmarc_pass": False, "is_discussion_list": True}, "wrote_to_sender", Veto.UNVERIFIED),
-        ({"is_discussion_list": True}, "wrote_to_sender", Veto.GROUP),
+        (
+            {"dmarc_pass": False, "is_discussion_list": True},
+            PreviousContact.WROTE_TO_SENDER,
+            Veto.UNVERIFIED,
+        ),
+        ({"is_discussion_list": True}, PreviousContact.WROTE_TO_SENDER, Veto.GROUP),
     ],
 )
 def test_unsubscribe_gate_reports_the_first_check_that_fails(cfg, account, signals, contact, veto):
@@ -182,8 +197,12 @@ def test_scenarios_match_the_gate(cfg, account, name):
     """Each scenario's outcome is the gate's (plus acts_on), not a path-specific rule."""
     sc = SCENARIOS[name]
     sig = triage.signals_for(_email(sc), account)
-    contact = "wrote_to_sender" if sig.sender in sc.written else None
-    contact = contact or ("wrote_to_their_domain" if sig.sender_domain in sc.written else "never")
+    contact = PreviousContact.WROTE_TO_SENDER if sig.sender in sc.written else None
+    contact = contact or (
+        PreviousContact.WROTE_TO_THEIR_DOMAIN
+        if sig.sender_domain in sc.written
+        else PreviousContact.NEVER
+    )
     gate = unsubscribe_gate(cfg, account, sig, sc.category, contact)
     assert gate.veto == sc.veto
     assert sc.unsubscribed is (gate.allowed and acts_on(sc.mode, sc.act_categories, sc.category))

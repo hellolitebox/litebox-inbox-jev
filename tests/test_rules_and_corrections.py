@@ -5,6 +5,7 @@ from conftest import make_classification, make_signals, selects_from
 from fakes import HttpError
 
 from inbox_jev import corrections, rules
+from inbox_jev.classification import PreviousContact
 from inbox_jev.config import Account, Mode
 from inbox_jev.corrections import detect
 from inbox_jev.db import Message, MessageStatus, SenderRule, now, open_sessions
@@ -164,14 +165,14 @@ def test_unverified_cold_outreach_earns_rule_that_never_unsubscribes(cfg, sessio
     c = make_classification("cold_outreach", 0.99)
     for _ in range(cfg.auto_rule.hits):
         d = decide(cfg, account, unverified, c)
-        assert d.downgraded_to_spam and d.archive and not d.unsubscribe
+        assert d.unsubscribe_skipped_unverified and d.archive and not d.unsubscribe
         rules.record_auto(session, cfg, "me@acme.com", "s@pitch.io", c, d)
         session.commit()
     rule = rules.lookup(session, "me@acme.com", "s@pitch.io")
     assert rule.category == "cold_outreach"
     d = decide(cfg, account, unverified, rule_category=rule.category)
-    assert d.archive and not d.unsubscribe and d.downgraded_to_spam
-    no_header = make_signals(unsubscribe_https=[], unsubscribe_mailto=[])
+    assert d.archive and not d.unsubscribe and d.unsubscribe_skipped_unverified
+    no_header = make_signals(unsubscribe_https=(), unsubscribe_mailto=())
     assert not decide(cfg, account, no_header, rule_category=rule.category).unsubscribe
 
 
@@ -192,9 +193,17 @@ def test_unverified_marketing_rule_never_unsubscribes(cfg, session, account):
 def test_known_contact_cold_outreach_does_not_earn_rule(cfg, session, account):
     c = make_classification("cold_outreach", 0.99)
     for _ in range(cfg.auto_rule.hits):
-        d = decide(cfg, account, make_signals(), c, previous_contact="wrote_to_their_domain")
+        d = decide(
+            cfg, account, make_signals(), c, previous_contact=PreviousContact.WROTE_TO_THEIR_DOMAIN
+        )
         rules.record_auto(
-            session, cfg, "me@acme.com", "rep@vendor.com", c, d, "wrote_to_their_domain"
+            session,
+            cfg,
+            "me@acme.com",
+            "rep@vendor.com",
+            c,
+            d,
+            PreviousContact.WROTE_TO_THEIR_DOMAIN,
         )
         session.commit()
     assert rules.lookup(session, "me@acme.com", "rep@vendor.com") is None
@@ -285,16 +294,20 @@ def test_known_contact_never_earns_cold_outreach_rule_even_unverified(cfg, sessi
     c = make_classification("cold_outreach", 0.99)
     for sig in (make_signals(dmarc_pass=False), make_signals(is_discussion_list=True)):
         for _ in range(cfg.auto_rule.hits):
-            d = decide(cfg, account, sig, c, previous_contact="wrote_to_sender")
+            d = decide(cfg, account, sig, c, previous_contact=PreviousContact.WROTE_TO_SENDER)
             rules.record_auto(
-                session, cfg, "me@acme.com", "rep@vendor.com", c, d, "wrote_to_sender"
+                session, cfg, "me@acme.com", "rep@vendor.com", c, d, PreviousContact.WROTE_TO_SENDER
             )
         assert rules.lookup(session, "me@acme.com", "rep@vendor.com") is None
     # marketing unsubscribes known contacts too, so they can earn a marketing rule.
     m = make_classification("marketing", 0.99)
     for _ in range(cfg.auto_rule.hits):
-        d = decide(cfg, account, make_signals(), m, previous_contact="wrote_to_sender")
-        rules.record_auto(session, cfg, "me@acme.com", "rep@vendor.com", m, d, "wrote_to_sender")
+        d = decide(
+            cfg, account, make_signals(), m, previous_contact=PreviousContact.WROTE_TO_SENDER
+        )
+        rules.record_auto(
+            session, cfg, "me@acme.com", "rep@vendor.com", m, d, PreviousContact.WROTE_TO_SENDER
+        )
     assert rules.lookup(session, "me@acme.com", "rep@vendor.com").category == "marketing"
 
 

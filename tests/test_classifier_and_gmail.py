@@ -6,7 +6,15 @@ import pytest
 from fakes import SENT_BASE_S, HttpError, SentMailService, sent_mail_gmail
 
 from inbox_jev import gmail as gmail_module
-from inbox_jev.classifier import CATEGORY_Q, NEEDS_REPLY_Q, TAG_PREFIX, build_questions, build_state
+from inbox_jev.classification import PreviousContact
+from inbox_jev.classifier import (
+    CATEGORY_INSTRUCTIONS,
+    CATEGORY_Q,
+    NEEDS_REPLY_Q,
+    TAG_PREFIX,
+    build_questions,
+    build_state,
+)
 from inbox_jev.gmail import (
     BATCH_SIZE,
     NEVER_VERDICT_TTL,
@@ -70,7 +78,20 @@ def test_build_state_truncates_body():
     assert state["is_mailing_list"] is True
     assert state["subject"] == "Hi"
     assert "previous_contact" not in state
-    assert build_state(email, "me@acme.com", 100, "never")["previous_contact"] == "never"
+    state = build_state(email, "me@acme.com", 100, PreviousContact.NEVER)
+    assert state["previous_contact"] == "never" and type(state["previous_contact"]) is str
+
+
+def test_previous_contact_wire_values_are_the_ones_jev_is_told_about():
+    """Jev's state carries these strings and its instructions explain them: renaming a member
+    must not change what Jev sees."""
+    assert [c.value for c in PreviousContact] == [
+        "wrote_to_sender",
+        "wrote_to_their_domain",
+        "never",
+    ]
+    for contact in ("(wrote_to_sender)", "(wrote_to_their_domain)", "(never)"):
+        assert contact in CATEGORY_INSTRUCTIONS
 
 
 def test_classifier_parses_api_response(cfg):

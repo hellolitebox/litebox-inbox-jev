@@ -5,6 +5,7 @@ import pytest
 from conftest import ROOT, make_classification, make_signals
 from fakes import GMAIL_PASS
 
+from inbox_jev.classification import PreviousContact
 from inbox_jev.config import Mode
 from inbox_jev.policy import decide, flags_only, plan, rule_keys
 from inbox_jev.signals import extract, resolve_relay
@@ -37,11 +38,11 @@ def test_marketing_high_confidence_unsubscribes(cfg, account):
 
 
 @pytest.mark.parametrize(
-    "signals_kw", [{"dmarc_pass": False}, {"unsubscribe_https": [], "unsubscribe_mailto": []}]
+    "signals_kw", [{"dmarc_pass": False}, {"unsubscribe_https": (), "unsubscribe_mailto": ()}]
 )
 def test_marketing_without_proof_is_archived_without_unsubscribe(cfg, account, signals_kw):
     d = decide(cfg, account, make_signals(**signals_kw), make_classification("marketing", 0.95))
-    assert d.category == "marketing" and d.downgraded_to_spam
+    assert d.category == "marketing" and d.unsubscribe_skipped_unverified
     assert d.archive and not d.spam and not d.unsubscribe
     assert "Jev/Marketing" in d.add_labels and "Jev/Spam" not in d.add_labels
     act = plan(cfg, d, Mode.ACT)
@@ -53,7 +54,7 @@ def test_unverified_marketing_below_threshold_stays_in_inbox(cfg, account):
     c = make_classification("marketing", 0.85)
     d = decide(cfg, account, make_signals(dmarc_pass=False), c)
     # No unsubscribe was in play (Review), so it isn't flagged as a skipped one.
-    assert d.low_confidence and not d.downgraded_to_spam
+    assert d.low_confidence and not d.unsubscribe_skipped_unverified
     assert not (d.archive or d.spam or d.unsubscribe)
     assert d.add_labels[:2] == ["Jev/Review", "Jev/Marketing"]
 
@@ -130,7 +131,7 @@ def test_needs_reply_skipped_for_unverified_marketing(cfg, account):
     # Sponsorship pitch without DMARC: archived as marketing, never flagged as needing a reply.
     c = make_classification("marketing", 0.95, needs_reply=0.95)
     d = decide(cfg, account, make_signals(dmarc_pass=False), c)
-    assert d.downgraded_to_spam and d.archive and not d.spam
+    assert d.unsubscribe_skipped_unverified and d.archive and not d.spam
     assert "Jev/Needs Reply" not in d.add_labels
 
 
@@ -172,20 +173,25 @@ def test_cold_outreach_between_thresholds_is_archived_by_group_without_unsubscri
 
 
 @pytest.mark.parametrize(
-    "signals_kw", [{"dmarc_pass": False}, {"unsubscribe_https": [], "unsubscribe_mailto": []}]
+    "signals_kw", [{"dmarc_pass": False}, {"unsubscribe_https": (), "unsubscribe_mailto": ()}]
 )
 def test_unverified_cold_outreach_is_archived_without_unsubscribe(cfg, account, signals_kw):
     d = decide(cfg, account, make_signals(**signals_kw), make_classification("cold_outreach", 1.0))
-    assert d.archive and not d.unsubscribe and not d.spam and d.downgraded_to_spam
+    assert d.archive and not d.unsubscribe and not d.spam and d.unsubscribe_skipped_unverified
 
 
 @pytest.mark.parametrize("category", ["cold_outreach", "marketing"])
 def test_rule_never_unsubscribes_from_unverified_sender(cfg, account, category):
     unverified = make_signals(dmarc_pass=False)
     d = decide(cfg, account, unverified, rule_category=category)
-    assert (d.source, d.archive, d.unsubscribe, d.downgraded_to_spam) == ("rule", True, False, True)
+    assert (d.source, d.archive, d.unsubscribe, d.unsubscribe_skipped_unverified) == (
+        "rule",
+        True,
+        False,
+        True,
+    )
     verified = decide(cfg, account, make_signals(), rule_category=category)
-    assert verified.unsubscribe and not verified.downgraded_to_spam
+    assert verified.unsubscribe and not verified.unsubscribe_skipped_unverified
 
 
 def probs(category, confidence, **others):
@@ -309,7 +315,9 @@ def test_needs_reply_just_below_keep_threshold_archives(cfg, account):
     assert "Jev/Needs Reply" not in d.add_labels
 
 
-@pytest.mark.parametrize("contact", ["wrote_to_sender", "wrote_to_their_domain"])
+@pytest.mark.parametrize(
+    "contact", [PreviousContact.WROTE_TO_SENDER, PreviousContact.WROTE_TO_THEIR_DOMAIN]
+)
 def test_needs_reply_blocks_group_for_known_contact_without_keep_signal(cfg, account, contact):
     # A vendor I emailed replies with a sales-flavoured follow-up: stays in Review even though
     # the keep categories are below archive_group_reply_keep_probability.
@@ -320,7 +328,9 @@ def test_needs_reply_blocks_group_for_known_contact_without_keep_signal(cfg, acc
     assert {"Jev/Review", "Jev/Needs Reply"} <= set(d.add_labels)
 
 
-@pytest.mark.parametrize("contact", ["wrote_to_sender", "wrote_to_their_domain"])
+@pytest.mark.parametrize(
+    "contact", [PreviousContact.WROTE_TO_SENDER, PreviousContact.WROTE_TO_THEIR_DOMAIN]
+)
 def test_needs_reply_from_a_no_reply_sender_ignores_the_known_contact(cfg, account, contact):
     # Nobody reads a reply to messages-noreply@: a reply signal alone can't keep it.
     sig = make_signals(sender="messages-noreply@linkedin.com", sender_domain="linkedin.com")
@@ -336,7 +346,7 @@ def test_needs_reply_from_a_no_reply_sender_still_vetoed_by_the_keep_signal(cfg,
     sig = make_signals(sender="noreply@bank.com", sender_domain="bank.com")
     c = probs("notification", 0.62, transactional=0.32, action_required=0.06)
     c.needs_reply = 0.75
-    d = decide(cfg, account, sig, c, previous_contact="wrote_to_their_domain")
+    d = decide(cfg, account, sig, c, previous_contact=PreviousContact.WROTE_TO_THEIR_DOMAIN)
     assert d.low_confidence and not d.archive
     assert {"Jev/Review", "Jev/Needs Reply"} <= set(d.add_labels)  # kept: the label stays
 
@@ -347,11 +357,11 @@ def test_needs_reply_from_no_reply_with_a_human_reply_to_keeps_the_veto(cfg, acc
     )
     c = probs("notification", 0.62, newsletter=0.36, important=0.01)
     c.needs_reply = 0.75
-    d = decide(cfg, account, sig, c, previous_contact="wrote_to_their_domain")
+    d = decide(cfg, account, sig, c, previous_contact=PreviousContact.WROTE_TO_THEIR_DOMAIN)
     assert d.low_confidence and not d.archive
 
 
-@pytest.mark.parametrize("contact", ["never", None])
+@pytest.mark.parametrize("contact", [PreviousContact.NEVER, None])
 def test_needs_reply_relaxed_for_unknown_or_new_contact(cfg, account, contact):
     c = probs("cold_outreach", 0.60, marketing=0.36, important=0.0)
     c.needs_reply = 0.90
@@ -361,7 +371,7 @@ def test_needs_reply_relaxed_for_unknown_or_new_contact(cfg, account, contact):
 
 def test_known_contact_without_reply_signal_still_group_archives(cfg, account):
     c = probs("notification", 0.55, newsletter=0.42)
-    d = decide(cfg, account, make_signals(), c, previous_contact="wrote_to_sender")
+    d = decide(cfg, account, make_signals(), c, previous_contact=PreviousContact.WROTE_TO_SENDER)
     assert d.archive and d.archive_group
 
 
@@ -373,7 +383,7 @@ def test_needs_reply_keep_threshold_zero_restores_strict_veto(cfg, account):
     assert d.low_confidence and not d.archive
 
 
-GROUP_UNSUB = ["mailto:googlegroups-manage+1+unsubscribe@googlegroups.com"]
+GROUP_UNSUB = ("mailto:googlegroups-manage+1+unsubscribe@googlegroups.com",)
 
 
 @pytest.mark.parametrize(
@@ -384,12 +394,12 @@ GROUP_UNSUB = ["mailto:googlegroups-manage+1+unsubscribe@googlegroups.com"]
             sender="hello@acme.com",
             sender_domain="acme.com",
             list_id="hello.acme.com",
-            unsubscribe_https=["https://groups.google.com/a/acme.com/group/hello/subscribe"],
+            unsubscribe_https=("https://groups.google.com/a/acme.com/group/hello/subscribe",),
             unsubscribe_mailto=GROUP_UNSUB,
             one_click=False,
         ),
         # An external Google Group I belong to.
-        dict(list_id="founders.example.org", unsubscribe_https=[], unsubscribe_mailto=GROUP_UNSUB),
+        dict(list_id="founders.example.org", unsubscribe_https=(), unsubscribe_mailto=GROUP_UNSUB),
         # A list on my own domain with a regular ESP unsubscribe.
         dict(list_id="news.acme.com"),
     ],
@@ -471,12 +481,14 @@ def test_sequence_tool_headers_still_unsubscribe(cfg, account):
 )
 def test_group_host_matches_parsed_host(cfg, account, uri, group):
     key = "unsubscribe_mailto" if uri.startswith("mailto:") else "unsubscribe_https"
-    sig = make_signals(**{"unsubscribe_https": [], "unsubscribe_mailto": [], key: [uri]})
+    sig = make_signals(**{"unsubscribe_https": (), "unsubscribe_mailto": (), key: (uri,)})
     d = decide(cfg, account, sig, make_classification("marketing", 0.99))
     assert d.unsubscribe is not group
 
 
-@pytest.mark.parametrize("contact", ["wrote_to_sender", "wrote_to_their_domain"])
+@pytest.mark.parametrize(
+    "contact", [PreviousContact.WROTE_TO_SENDER, PreviousContact.WROTE_TO_THEIR_DOMAIN]
+)
 def test_cold_outreach_from_known_contact_is_archived_without_unsubscribe(cfg, account, contact):
     c = make_classification("cold_outreach", 0.99)
     d = decide(cfg, account, make_signals(), c, previous_contact=contact)
@@ -488,14 +500,16 @@ def test_cold_outreach_from_known_contact_is_archived_without_unsubscribe(cfg, a
     assert m.unsubscribe and not m.known_contact_kept
 
 
-@pytest.mark.parametrize("contact", ["never", None])
+@pytest.mark.parametrize("contact", [PreviousContact.NEVER, None])
 def test_cold_outreach_from_stranger_still_unsubscribes(cfg, account, contact):
     c = make_classification("cold_outreach", 0.99)
     d = decide(cfg, account, make_signals(), c, previous_contact=contact)
     assert d.unsubscribe and not d.known_contact_kept
 
 
-@pytest.mark.parametrize("contact", ["wrote_to_sender", "wrote_to_their_domain"])
+@pytest.mark.parametrize(
+    "contact", [PreviousContact.WROTE_TO_SENDER, PreviousContact.WROTE_TO_THEIR_DOMAIN]
+)
 def test_rule_path_spares_known_contacts(cfg, account, contact):
     d = decide(
         cfg, account, make_signals(), rule_category="cold_outreach", previous_contact=contact
@@ -506,7 +520,7 @@ def test_rule_path_spares_known_contacts(cfg, account, contact):
     assert m.unsubscribe and not m.known_contact_kept
 
 
-@pytest.mark.parametrize("contact", ["never", None])
+@pytest.mark.parametrize("contact", [PreviousContact.NEVER, None])
 def test_rule_path_still_unsubscribes_strangers(cfg, account, contact):
     d = decide(
         cfg, account, make_signals(), rule_category="cold_outreach", previous_contact=contact
@@ -520,7 +534,7 @@ def _relayed(**kw):
         sender_domain="techstars.com",
         list_id="hello.acme.com",
         relayed_by="hello@acme.com",
-        unsubscribe_https=[],
+        unsubscribe_https=(),
         unsubscribe_mailto=GROUP_UNSUB,
         one_click=False,
     )
@@ -546,8 +560,8 @@ def test_group_relayed_mail_allowlisted_by_author_or_group(cfg, account):
 
 def test_group_relayed_mail_never_unsubscribes_even_with_esp_headers(cfg, account):
     sig = _relayed(
-        unsubscribe_https=["https://esp.example.com/u"],
-        unsubscribe_mailto=[],
+        unsubscribe_https=("https://esp.example.com/u",),
+        unsubscribe_mailto=(),
         one_click=True,
         list_id=None,
     )
@@ -620,7 +634,7 @@ def test_archive_group_skips_member_with_stricter_category_threshold(cfg, accoun
 def test_unverified_flag_only_when_an_unsubscribe_was_in_play(cfg, account, confidence):
     c = probs("marketing", confidence, newsletter=0.98 - confidence)
     d = decide(cfg, account, make_signals(dmarc_pass=False), c)
-    assert not d.unsubscribe and not d.downgraded_to_spam
+    assert not d.unsubscribe and not d.unsubscribe_skipped_unverified
 
 
 def test_known_contact_flag_set_after_the_verified_and_group_checks(cfg, account):
@@ -628,11 +642,16 @@ def test_known_contact_flag_set_after_the_verified_and_group_checks(cfg, account
     for sig in (make_signals(dmarc_pass=False), make_signals(is_discussion_list=True)):
         for rule in (None, "cold_outreach"):
             d = decide(
-                cfg, account, sig, None if rule else c, rule, previous_contact="wrote_to_sender"
+                cfg,
+                account,
+                sig,
+                None if rule else c,
+                rule,
+                previous_contact=PreviousContact.WROTE_TO_SENDER,
             )
             assert d.archive and not d.unsubscribe and not d.known_contact_kept
-    d = decide(cfg, account, make_signals(), c, previous_contact="wrote_to_sender")
-    assert d.known_contact_kept and not d.unsubscribe and not d.downgraded_to_spam
+    d = decide(cfg, account, make_signals(), c, previous_contact=PreviousContact.WROTE_TO_SENDER)
+    assert d.known_contact_kept and not d.unsubscribe and not d.unsubscribe_skipped_unverified
 
 
 def test_policy_and_rules_load_no_io_library():

@@ -37,8 +37,8 @@ def make_signals(**kw) -> Signals:
         sender="promo@news.shop.com",
         sender_domain="news.shop.com",
         list_id="news.shop.com",
-        unsubscribe_https=["https://shop.com/u/123"],
-        unsubscribe_mailto=["mailto:unsub@shop.com?subject=unsubscribe"],
+        unsubscribe_https=("https://shop.com/u/123",),
+        unsubscribe_mailto=("mailto:unsub@shop.com?subject=unsubscribe",),
         one_click=True,
         dmarc_pass=True,
     )

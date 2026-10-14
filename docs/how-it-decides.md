@@ -170,7 +170,7 @@ flowchart TD
     A -- yes --> B{"Decided by a rule, or Jev confidence<br/>at or above the category threshold?<br/>(not archive group, not Review)"}
     B -- no --> N
     B -- yes --> C{"Verified: DMARC pass<br/>and a List-Unsubscribe header?"}
-    C -- no --> N1["Archive only<br/>(downgraded_to_spam = unverified)"]
+    C -- no --> N1["Archive only<br/>(unsubscribe_skipped_unverified)"]
     C -- yes --> D{"Group or discussion list?<br/>List-Post, Google Groups target,<br/>relayed by a group, own-domain sender or list"}
     D -- yes --> N
     D -- no --> E{"Category spares known contacts<br/>and previous_contact is<br/>wrote_to_sender / wrote_to_their_domain?"}
@@ -201,10 +201,10 @@ F is `policy.acts_on`, the one mode / `act_categories` check, used by `policy.pl
 `triage` ([ADR 0026](decisions/0026-one-unsubscribe-gate-for-every-path.md)).
 
 The gate reports the first check that refused (`Veto`), and `_check_unsubscribe` sets a flag only
-for that one. So `downgraded_to_spam` means "an unsubscribe was skipped because the sender is
-unverified" and `known_contact_kept` means "an unsubscribe was skipped because of a known
+for that one. So `unsubscribe_skipped_unverified` means "an unsubscribe was skipped because the
+sender is unverified" and `known_contact_kept` means "an unsubscribe was skipped because of a known
 contact": an unverified or group sender never gets `known_contact_kept`, and an archive-group or
-Review decision never gets `downgraded_to_spam`
+Review decision never gets `unsubscribe_skipped_unverified`
 ([ADR 0023](decisions/0023-one-order-for-unsubscribe-checks.md)).
 
 ## 3. Decision tables
@@ -292,7 +292,7 @@ An unsubscribe is irreversible. During `run` it happens only when **all** of the
 |---|---|---|
 | 1 | The final category's action is `archive_unsubscribe` | `policy._apply` |
 | 2 | Decided by a sender rule, or by Jev at or above the category threshold. An archive-group or Review decision never unsubscribes | `policy.decide` |
-| 3 | **Verified**: `dmarc=pass` in Gmail's own `Authentication-Results` ([4.2](#42-dmarc)) and a `List-Unsubscribe` header with an `https:` or `mailto:` URI (an `http:`-only header counts as none, [4.3](#43-list-unsubscribe-one-click-and-mailto)). If not, the email keeps its category, is archived, and `downgraded_to_spam` is set ("unsubscribe skipped: unverified sender"). It is never moved to Spam for this | `policy.unsubscribe_gate` |
+| 3 | **Verified**: `dmarc=pass` in Gmail's own `Authentication-Results` ([4.2](#42-dmarc)) and a `List-Unsubscribe` header with an `https:` or `mailto:` URI (an `http:`-only header counts as none, [4.3](#43-list-unsubscribe-one-click-and-mailto)). If not, the email keeps its category, is archived, and `unsubscribe_skipped_unverified` is set. It is never moved to Spam for this | `policy.unsubscribe_gate` |
 | 4 | **Not a group or discussion list** (`_group_list`): no `List-Post` header; no unsubscribe target on `googlegroups.com` / `groups.google.com` (host or subdomain); not relayed by a Google Group (`group_author` found, trusted or not); sender domain and `List-Id` not on the account's own domain (or a subdomain) | `policy.unsubscribe_gate` |
 | 5 | For a category with `unsubscribe_known_contacts: false` (`cold_outreach`): `previous_contact` is not `wrote_to_sender` / `wrote_to_their_domain` (`known_contact_kept` otherwise). Unknown (`None`, the search failed or wasn't run) does **not** block it | `policy.unsubscribe_gate` |
 | 6 | Mode is `act`, and the account has no `act_categories` or lists the category | `policy.acts_on`, from `policy.plan` |
@@ -427,7 +427,7 @@ than the pending rule's restarts it at 0 hits without switching its category
 | Counts, same category | | `hits += 1`; active at `auto_rule.hits` (3) |
 | Counts, other category (incl. an active auto rule to a removed category) | | category switches, `hits = 1`, active only if `auto_rule.hits` ≤ 1 |
 
-Unverified senders (`downgraded_to_spam`) can earn a rule: the rule path re-runs the
+Unverified senders (`unsubscribe_skipped_unverified`) can earn a rule: the rule path re-runs the
 DMARC/`List-Unsubscribe`/group checks on each email. A known contact never earns a rule to a
 category that spares known contacts (`cold_outreach`), whether the sender is verified, unverified
 or a group: such a "pitch" is where Jev is most likely wrong, so the sender stays on the Jev path.
@@ -640,7 +640,7 @@ unsubscribe checks, `dmarc_pass` also gates the Google Groups author recovery ([
 - `List-Unsubscribe` (first header) is parsed as RFC 2369 `<uri>` entries. Only `https://` and
   `mailto:` URIs are kept; `http://` and anything else is ignored. "Has unsubscribe" = at least
   one of them. So an `http://`-only header counts as no header: the sender is unverified
-  (archived only, `downgraded_to_spam`), the URL is never `POST`ed nor offered as a
+  (archived only, `unsubscribe_skipped_unverified`), the URL is never `POST`ed nor offered as a
   `manual_pending` link, and `is_mailing_list` in the Jev state depends on `List-Id` alone
   ([ADR 0025](decisions/0025-http-only-list-unsubscribe-is-none.md)).
 - **One-click** = `List-Unsubscribe-Post` contains `List-Unsubscribe=One-Click` (spaces and case
@@ -911,11 +911,12 @@ the probabilities that matter are shown; the rest are ~0.
 - **Test**: `test_ex11_unverified_cold_outreach_is_archived_never_unsubscribed`
 - **Input**: `founder@devshop.example`, no `List-Unsubscribe` (or DMARC not `pass`). Jev:
   cold_outreach 0.97.
-- **Outcome**: archived with `Jev/Outreach`, `downgraded_to_spam = true`; never unsubscribed and
-  never moved to Spam. It still counts toward an auto rule, because `previous_contact` is
-  `never`. From a known contact it would be archived the same way, with `known_contact_kept =
-  false` (the unverified check is what stopped the unsubscribe), and it wouldn't count toward an
-  auto rule. A `List-Unsubscribe` with only an `http://` URL is treated like no header.
+- **Outcome**: archived with `Jev/Outreach`, `unsubscribe_skipped_unverified = true`; never
+  unsubscribed and never moved to Spam. It still counts toward an auto rule, because
+  `previous_contact` is `never`. From a known contact it would be archived the same way, with
+  `known_contact_kept = false` (the unverified check is what stopped the unsubscribe), and it
+  wouldn't count toward an auto rule. A `List-Unsubscribe` with only an `http://` URL is treated
+  like no header.
 - **Why**: unsubscribing from an unverified sender only confirms your address; being unverified
   isn't fraud. A rule for it is safe: the rule path re-runs the sender checks on every email.
   Known contacts stay on the Jev path whatever the headers say.
@@ -1001,8 +1002,8 @@ the probabilities that matter are shown; the rest are ~0.
 - **Input**: `promo@shop.example` with `List-Unsubscribe: <https://shop.example/u/1>` and
   one-click, and a single `Authentication-Results: mail.shop.example; dmarc=pass …` (no
   `mx.google.com` header). Jev: marketing 0.97.
-- **Outcome**: archived with `Jev/Marketing`, `downgraded_to_spam = true`; no one-click `POST`,
-  no `unsubscribes` row.
+- **Outcome**: archived with `Jev/Marketing`, `unsubscribe_skipped_unverified = true`; no
+  one-click `POST`, no `unsubscribes` row.
 - **Why**: Gmail stamps every inbound email with its own header; one that is missing means the
   only verdict was written by someone else, possibly the sender
   ([ADR 0022](decisions/0022-dmarc-only-from-gmail.md)).
@@ -1344,8 +1345,8 @@ the probabilities that matter are shown; the rest are ~0.
 - **Auto rule**: a sender rule created by `record_auto` after `auto_rule.hits` consistent answers.
 - **Correction**: a change you made in Gmail (another category label, back to the inbox) that
   becomes a `correction` sender rule.
-- **`downgraded_to_spam`**: historical column name. Means "unsubscribe skipped: unverified
-  sender", set only when the decision would otherwise unsubscribe; the email keeps its category.
+- **`downgraded_to_spam`**: historical name of the `messages` column that stores
+  `unsubscribe_skipped_unverified` (kept to avoid a migration).
 - **Flags-only call**: the Jev call for an allowlisted email or one decided by a rule to a keep
   category: only its Needs Reply and tags are used. If it fails, the email is decided without
   them.
@@ -1384,6 +1385,9 @@ the probabilities that matter are shown; the rest are ~0.
 - **Threshold**: the account's `min_confidence` for a category, else the category's.
 - **Trusted group**: a Google Group on a `group_domains` domain that passes the
   `X-Original-Sender` checks.
+- **`unsubscribe_skipped_unverified`**: "unsubscribe skipped: unverified sender", set only when
+  the decision would otherwise unsubscribe; the email keeps its category and is archived only.
+  Stored in the `downgraded_to_spam` column.
 - **Verified sender**: DMARC pass and a usable `List-Unsubscribe`.
 
 ## Known gaps

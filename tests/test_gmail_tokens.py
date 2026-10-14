@@ -63,10 +63,10 @@ def test_failed_save_keeps_the_previous_token_and_no_temporary_file(tmp_path, mo
     path = tmp_path / "me@acme.com.json"
     path.write_text('{"token": "old"}')
 
-    def replace(src, dst):
+    def replace(self, target):
         raise OSError("disk full")
 
-    monkeypatch.setattr(gmail_module.os, "replace", replace)
+    monkeypatch.setattr(gmail_module.Path, "replace", replace)
     with pytest.raises(OSError, match="disk full"):
         save_token(path, '{"token": "new"}')
     assert path.read_text() == '{"token": "old"}'

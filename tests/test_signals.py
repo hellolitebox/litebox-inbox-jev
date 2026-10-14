@@ -20,12 +20,25 @@ def test_parse_list_unsubscribe_mixed():
     https, mailto = parse_list_unsubscribe(
         "<mailto:u@list.com?subject=unsub>, <https://list.com/u?id=1>, <http://insecure.com/u>"
     )
-    assert https == ["https://list.com/u?id=1"]
-    assert mailto == ["mailto:u@list.com?subject=unsub"]
+    assert https == ("https://list.com/u?id=1",)
+    assert mailto == ("mailto:u@list.com?subject=unsub",)
+
+
+def test_signals_are_hashable():
+    """Signals is frozen and holds only tuples, so equal headers give equal, hashable signals."""
+    headers = {
+        "from": ["Shop <promo@shop.com>"],
+        "list-unsubscribe": ["<https://shop.com/u>, <mailto:u@shop.com>"],
+        "reply-to": ["help@shop.com"],
+    }
+    sig = extract(headers)
+    assert sig.unsubscribe_https == ("https://shop.com/u",)
+    assert sig.unsubscribe_mailto == ("mailto:u@shop.com",)
+    assert {sig, extract(headers)} == {sig}
 
 
 def test_parse_list_unsubscribe_empty():
-    assert parse_list_unsubscribe(None) == ([], [])
+    assert parse_list_unsubscribe(None) == ((), ())
 
 
 def test_dmarc_only_trusts_gmail_header():
@@ -180,7 +193,7 @@ def test_dmarc_without_a_gmail_header_is_not_trusted():
 
 
 def test_http_only_list_unsubscribe_counts_as_none():
-    assert parse_list_unsubscribe("<http://shop.com/u?id=1>") == ([], [])
+    assert parse_list_unsubscribe("<http://shop.com/u?id=1>") == ((), ())
     sig = extract(
         {
             "from": ["Shop <promo@shop.com>"],

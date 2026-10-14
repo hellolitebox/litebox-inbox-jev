@@ -33,7 +33,7 @@ from sqlalchemy import (
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.engine.interfaces import DBAPIConnection
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.pool import ConnectionPoolEntry
 
 # Failed passes on one email before triage stops retrying it (see triage.ERROR_RETRY_BACKOFF).
@@ -89,16 +89,16 @@ class Message(Base):
     jev_category: Mapped[str | None] = mapped_column(String(64))  # raw model answer
     category: Mapped[str | None] = mapped_column(String(64), index=True)  # after policy
     confidence: Mapped[float | None] = mapped_column(Float)
-    probabilities: Mapped[dict | None] = mapped_column(JSON)
+    probabilities: Mapped[dict[str, float] | None] = mapped_column(JSON)
     needs_reply: Mapped[float | None] = mapped_column(Float)
-    tags: Mapped[dict | None] = mapped_column(JSON)
+    tags: Mapped[dict[str, float] | None] = mapped_column(JSON)
     low_confidence: Mapped[bool] = mapped_column(Boolean, default=False)
-    # Historical name, kept to avoid a migration: now means "unsubscribe skipped: unverified
-    # sender" (marketing without dmarc=pass or List-Unsubscribe; archived, not spammed).
+    # policy.Decision.unsubscribe_skipped_unverified, under its historical column name (kept to
+    # avoid a migration): unsubscribe skipped, unverified sender; archived, not spammed.
     downgraded_to_spam: Mapped[bool] = mapped_column(Boolean, default=False)
     mode: Mapped[str] = mapped_column(String(16))  # config.Mode
-    labels_added: Mapped[list | None] = mapped_column(JSON)  # applied in Gmail
-    decided_labels: Mapped[list | None] = mapped_column(JSON)  # policy output, any mode
+    labels_added: Mapped[list[str] | None] = mapped_column(JSON)  # applied in Gmail
+    decided_labels: Mapped[list[str] | None] = mapped_column(JSON)  # policy output, any mode
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
     spammed: Mapped[bool] = mapped_column(Boolean, default=False)
     corrected_category: Mapped[str | None] = mapped_column(String(64))
@@ -153,9 +153,9 @@ class SentDomainScan(Base):
     verdict: Mapped[str] = mapped_column(String(16))  # gmail.DomainVerdict
     verdict_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     newest_s: Mapped[int | None] = mapped_column(BigInteger)  # Unix seconds
-    newest_ids: Mapped[list] = mapped_column(JSON, default=list)
+    newest_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     oldest_s: Mapped[int | None] = mapped_column(BigInteger)
-    oldest_ids: Mapped[list] = mapped_column(JSON, default=list)
+    oldest_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     reached_end: Mapped[bool] = mapped_column(Boolean, default=False)
     read: Mapped[int] = mapped_column(Integer, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
@@ -237,7 +237,7 @@ def _add_missing_columns(engine: Engine) -> None:
 
 
 @contextmanager
-def open_sessions(url: str) -> Iterator[sessionmaker]:
+def open_sessions(url: str) -> Iterator[sessionmaker[Session]]:
     """A session factory on `make_engine(url)`, whose engine is disposed on exit.
 
     Disposing closes the pooled connections, which would otherwise stay open until the

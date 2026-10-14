@@ -139,7 +139,7 @@ class Checker:
             *(["no_reply"] if sig.no_reply else []),
             *(["group"] if decision.archive_group else []),
             *(["unsub"] if decision.unsubscribe else []),
-            *(["unverified"] if decision.downgraded_to_spam else []),
+            *(["unverified"] if decision.unsubscribe_skipped_unverified else []),
             *(["known_contact"] if decision.known_contact_kept else []),
             *(["needs_reply"] if cfg.needs_reply.label in decision.add_labels else []),
             *(["stale_rule"] if stale else []),

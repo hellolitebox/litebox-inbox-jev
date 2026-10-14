@@ -128,7 +128,7 @@ def save_token(path: Path, data: str) -> None:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        Path(tmp).replace(path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
@@ -158,7 +158,7 @@ def load_credentials(tokens_dir: Path, email: str) -> Credentials:
     path = token_path(tokens_dir, email)
     if not path.exists():
         raise FileNotFoundError(f"No token for {email}; run `inbox-jev auth add {email}`")
-    creds = Credentials.from_authorized_user_file(str(path), SCOPES)
+    creds: Credentials = Credentials.from_authorized_user_file(str(path), SCOPES)
     if not creds.valid:
         creds.refresh(Request())
         save_token(path, creds.to_json())
@@ -188,18 +188,22 @@ class Email:
         return signals.extract(self.headers)
 
 
+# Elements whose text isn't part of the readable body.
+_SKIPPED_TAGS = frozenset({"script", "style", "head"})
+
+
 class _TextExtractor(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
         self.parts: list[str] = []
         self._skip = 0
 
-    def handle_starttag(self, tag: str, attrs: list) -> None:
-        if tag in ("script", "style", "head"):
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in _SKIPPED_TAGS:
             self._skip += 1
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in ("script", "style", "head") and self._skip:
+        if tag in _SKIPPED_TAGS and self._skip:
             self._skip -= 1
 
     def handle_data(self, data: str) -> None:
@@ -252,7 +256,7 @@ def _resolve_alternative(plain: list[str], rich: list[str]) -> str:
     return text
 
 
-def extract_body(payload: dict) -> str:
+def extract_body(payload: dict[str, Any]) -> str:
     """Prefer text/plain; use text/html stripped of tags when plain is missing or a stub.
 
     The stub check only compares a multipart/alternative's own plain and HTML versions, so
@@ -261,7 +265,7 @@ def extract_body(payload: dict) -> str:
     """
 
     # Each segment is ("text", resolved text) or ("html", raw HTML outside any alternative).
-    def walk(part: dict) -> list[tuple[str, str]]:
+    def walk(part: dict[str, Any]) -> list[tuple[str, str]]:
         if part.get("filename"):
             return []
         mime = part.get("mimeType", "")
@@ -285,7 +289,7 @@ def extract_body(payload: dict) -> str:
     return text
 
 
-def _to_email(msg: dict, snippet: str, body: str) -> Email:
+def _to_email(msg: dict[str, Any], snippet: str, body: str) -> Email:
     """An `Email` from a messages.get response; its headers keyed by lowercased name."""
     headers: dict[str, list[str]] = {}
     for h in msg.get("payload", {}).get("headers", []):
@@ -523,7 +527,7 @@ class _ScanCheck:
 
 
 class Gmail:
-    def __init__(self, creds: Credentials):
+    def __init__(self, creds: Credentials) -> None:
         self._service = build("gmail", "v1", credentials=creds, cache_discovery=False)
         self._svc = self._service.users()
         self._label_ids: dict[str, str] | None = None
@@ -615,7 +619,9 @@ class Gmail:
         answers: dict[str, list[str] | None] = {}
         failed: dict[str, Exception] = {}
 
-        def collect(request_id: str, response: dict | None, exc: Exception | None) -> None:
+        def collect(
+            request_id: str, response: dict[str, Any] | None, exc: Exception | None
+        ) -> None:
             if exc is None:
                 answers[request_id] = (response or {}).get("labelIds", [])
             elif is_not_found(exc):
@@ -646,7 +652,8 @@ class Gmail:
             if is_not_found(exc):
                 return None
             raise
-        return msg.get("labelIds", [])
+        label_ids: list[str] = msg.get("labelIds", [])
+        return label_ids
 
     def _minimal_get(self, message_id: str) -> Any:
         """The messages.get request for a message's id and labels only (not yet executed)."""
