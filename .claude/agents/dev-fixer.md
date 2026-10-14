@@ -46,9 +46,10 @@ review threads (CodeRabbit or human) on the PR.
    touches no listed path); if a skill isn't available, say so there and continue.
 4. Don't expand scope. Don't refactor unrelated code. If you find a new bug outside the PR,
    mention it in your reply instead of fixing it.
-   When a fix changes decision logic (`categories.yaml`, `policy`, `triage`, `rules`,
-   `corrections`, `signals`, `unsubscribe`, classifier state, body extraction,
-   `gmail.has_written_to`, `config.py` constants/validators/`Settings` defaults, or the `cli.py`
+   When a fix changes decision logic (`categories.yaml`, `policy`, `triage`,
+   `unsubscribe_retry`, `jev_guard`, `rules`, `corrections`, `signals`, `unsubscribe`, classifier
+   state, body extraction (`body`), the sent-mail search (`Gmail.has_written_to`, `sent_scan`,
+   `scan_rows`), `config.py` constants/validators/`Settings` defaults, or the `cli.py`
    commands `restore`, `reprocess`, `rules set`/`delete`, `unsubscribe-retry`), update
    `docs/how-it-decides.md`, the affected `EX-NN` examples and `tests/test_spec_examples.py` (a
    new rule or guard that changes an outcome gets a new `EX-NN`), and the ADR in `docs/decisions/` if the fix changes a design decision, in the same push (see

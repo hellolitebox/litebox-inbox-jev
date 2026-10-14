@@ -47,7 +47,11 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "SIM"]
+select = ["E", "F", "I", "B", "UP", "SIM", "C901"]
+
+[tool.ruff.lint.mccabe]
+# Keeps the pass loop, the digest and the unsubscribe-retry checklist from regrowing.
+max-complexity = 12
 
 [tool.mypy]
 # tests/fakes.py: so the fakes are checked against the protocols they stand in for.

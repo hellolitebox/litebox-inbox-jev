@@ -1,4 +1,4 @@
-"""`unsubscribe-retry` (`triage.retry_unsubscribes`): the checks `run` applies, again."""
+"""`unsubscribe-retry` (`unsubscribe_retry.retry_unsubscribes`): the checks `run` applies, again."""
 
 import pytest
 from fakes import (
@@ -14,18 +14,18 @@ from fakes import (
 from sqlalchemy import update
 from sqlalchemy.exc import OperationalError
 
-from inbox_jev import db, rules, triage
+from inbox_jev import db, rules, scan_rows, triage, unsubscribe_retry
 from inbox_jev.classification import PreviousContact
 from inbox_jev.config import Mode
 from inbox_jev.db import Message, SentDomainScan, Unsubscribe
-from inbox_jev.gmail import DomainScan, scan_rules
 from inbox_jev.policy import DecisionSource
 from inbox_jev.rules import RuleSource
+from inbox_jev.sent_scan import DomainScan, scan_rules
 
 
 def _retry(ctx, gmail, account):
     with ctx.sessions() as s:
-        out = triage.retry_unsubscribes(ctx, s, gmail, account)
+        out = unsubscribe_retry.retry_unsubscribes(ctx, s, gmail, account)
         rows = {r.list_key: (r.status, r.attempts) for r in s.query(Unsubscribe)}
     return dict(out), rows
 
@@ -237,7 +237,7 @@ def test_retry_skips_email_the_user_touched_in_gmail(setup):
     ],
 )
 def test_retry_skips_edits_run_leaves_alone(setup, live, outcome):
-    # Two category labels or none: corrections.detect sees nothing, _user_edit does.
+    # Two category labels or none: corrections.detect sees nothing, user_edit does.
     ctx, gmail, account = setup
     account.mode = Mode.ACT
     label_ids = gmail.ensure_labels(ctx.cfg.all_labels())
@@ -370,16 +370,16 @@ def test_retry_unsubscribes_when_run_stored_the_same_scan_meanwhile(setup, monke
     gmail.has_written_to = sent_mail_gmail(monkeypatch, svc).has_written_to
     with ctx.sessions() as s:
         failed_unsub(s, account, "9", "agency.io", "cold_outreach")
-    save = triage.DomainScanRows.save
+    save = scan_rows.DomainScanRows.save
 
     def save_then_run_saves(self, scan):
         save(self, scan)
         with ctx.sessions() as other:
             run_scan = DomainScan(scan.domain, scan_rules(), newest_s=SENT_BASE_S, read=1)
-            save(triage.DomainScanRows(other, account.email), run_scan)
+            save(scan_rows.DomainScanRows(other, account.email), run_scan)
             other.commit()
 
-    monkeypatch.setattr(triage.DomainScanRows, "save", save_then_run_saves)
+    monkeypatch.setattr(scan_rows.DomainScanRows, "save", save_then_run_saves)
     out, rows = _retry(ctx, gmail, account)
     assert out == {"agency.io": "ok"} and rows["agency.io"] == ("ok", 2)
     assert gmail.sent == ["u@agency.io"]
@@ -396,11 +396,11 @@ def test_retry_stops_before_unsubscribing_when_the_scan_cant_be_saved(setup, mon
     def locked(self, scan):
         raise OperationalError("INSERT INTO sent_domain_scans", {}, Exception("database is locked"))
 
-    monkeypatch.setattr(triage.DomainScanRows, "save", locked)
+    monkeypatch.setattr(scan_rows.DomainScanRows, "save", locked)
     with ctx.sessions() as s:
         failed_unsub(s, account, "9", "agency.io", "cold_outreach")
     with pytest.raises(OperationalError), ctx.sessions() as s:
-        triage.retry_unsubscribes(ctx, s, gmail, account)
+        unsubscribe_retry.retry_unsubscribes(ctx, s, gmail, account)
     assert gmail.sent == []
     with ctx.sessions() as s:
         assert (s.query(Unsubscribe).one().status, s.query(Unsubscribe).one().attempts) == (
@@ -424,7 +424,7 @@ def test_retry_stops_before_unsubscribing_while_another_process_writes(
     gmail.has_written_to = sent_mail_gmail(monkeypatch, svc).has_written_to
     with ctx.sessions() as s:
         failed_unsub(s, account, "9", "agency.io", "cold_outreach")
-        rows = triage.DomainScanRows(s, account.email)
+        rows = scan_rows.DomainScanRows(s, account.email)
         assert (
             triage.previous_contact(gmail, account.email, "bob@agency.io", rows)
             == PreviousContact.NEVER
@@ -434,7 +434,7 @@ def test_retry_stops_before_unsubscribing_while_another_process_writes(
         # `run`'s write, not committed yet.
         run_session.execute(update(Message).where(Message.gmail_id == "9").values(subject="x"))
         with pytest.raises(OperationalError, match="locked"), ctx.sessions() as s:
-            triage.retry_unsubscribes(ctx, s, gmail, account)
+            unsubscribe_retry.retry_unsubscribes(ctx, s, gmail, account)
         run_session.rollback()
     assert gmail.sent == []
     with ctx.sessions() as s:
@@ -453,9 +453,9 @@ def test_retry_fails_the_account_before_gmail_on_a_database_without_the_upsert(s
     monkeypatch.setattr(gmail, "get", lambda message_id: gets.append(message_id))
     with ctx.sessions() as s:
         failed_unsub(s, account, "9", "agency.io", "cold_outreach")
-    monkeypatch.setattr(triage, "_SCAN_UPSERT_DIALECTS", ("postgresql",))
+    ctx.scan_dialects = ("postgresql",)  # stands for a database without the upsert
     with pytest.raises(NotImplementedError, match="sqlite"), ctx.sessions() as s:
-        triage.retry_unsubscribes(ctx, s, gmail, account)
+        unsubscribe_retry.retry_unsubscribes(ctx, s, gmail, account)
     assert gets == [] and gmail.sent == [] and gmail.written_queries == []
     with ctx.sessions() as s:
         row = s.query(Unsubscribe).one()

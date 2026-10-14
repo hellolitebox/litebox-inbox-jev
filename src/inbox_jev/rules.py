@@ -127,63 +127,90 @@ def record_auto(
     `known` is the sender's rules already read for this email (`load`); without it they are
     read here.
     """
-    is_keep = _is_keep(cfg, decision.category)
     other_keep = cfg.keep_probability(classification.probabilities, exclude=decision.category)
     keep_signal = other_keep >= cfg.auto_rule.max_keep_probability
     rule = (known if known is not None else load(session, account, sender)).exact
-    # The sender sends mail that may need to stay in the inbox (e.g. a "payment failed" from a
-    # notifications address): restart a pending rule that would archive it.
-    if (
-        (is_keep or keep_signal)
-        and rule is not None
-        and rule.source == RuleSource.AUTO
-        and not rule.active
-        and not _is_keep(cfg, rule.category)
-    ):
+    if rule is not None and (_is_keep(cfg, decision.category) or keep_signal):
+        _reset_pending_archive_rule(cfg, rule)
+    if not _counts_toward_rule(cfg, classification, decision, previous_contact, keep_signal):
+        return
+    if rule is None:
+        if count:
+            session.add(_new_auto_rule(cfg, account, sender, decision.category))
+        return
+    _count_hit(cfg, rule, decision.category, count=count)
+
+
+def _reset_pending_archive_rule(cfg: CategoriesConfig, rule: SenderRule) -> None:
+    """The sender sends mail that may need to stay in the inbox (a keep decision, or a keep
+    category likely enough, e.g. a "payment failed" from a notifications address): restart a
+    pending auto rule that would archive it."""
+    if rule.source == RuleSource.AUTO and not rule.active and not _is_keep(cfg, rule.category):
         rule.hits = 0
-    # Unverified senders (unsubscribe_skipped_unverified) can earn a rule: the rule path re-runs the
-    # DMARC/List-Unsubscribe and group checks on every email, so it never unsubscribes them.
-    # A group archive never earns one: the top category alone was below its threshold. Nor does
-    # a known contact in a category that spares known contacts (cold_outreach), whether or not
-    # an unsubscribe was in play (verified or not, group or not): a "pitch" from someone I wrote
-    # to is where Jev is most likely wrong, so such senders stay on the Jev path, which sees the
-    # relationship on every email.
+
+
+def _counts_toward_rule(
+    cfg: CategoriesConfig,
+    classification: Classification,
+    decision: Decision,
+    previous_contact: PreviousContact | None,
+    keep_signal: bool,
+) -> bool:
+    """Whether Jev's answer can count toward an auto rule: confident (not low-confidence, at
+    least `auto_rule.min_confidence`) and no keep category likely enough (`keep_signal`).
+
+    Unverified senders (unsubscribe_skipped_unverified) can earn a rule: the rule path re-runs
+    the DMARC/List-Unsubscribe and group checks on every email, so it never unsubscribes them.
+    A group archive never earns one: the top category alone was below its threshold. Nor does
+    a known contact in a category that spares known contacts (cold_outreach), whether or not
+    an unsubscribe was in play (verified or not, group or not): a "pitch" from someone I wrote
+    to is where Jev is most likely wrong, so such senders stay on the Jev path, which sees the
+    relationship on every email.
+    """
     known_contact = previous_contact in KNOWN_CONTACT and spares_known_contacts(
         cfg, decision.category
     )
-    if (
+    return not (
         decision.low_confidence
         or decision.archive_group
         or known_contact
         or keep_signal
         or classification.confidence < cfg.auto_rule.min_confidence
-    ):
-        return
-    if rule is None:
-        if not count:
-            return
-        session.add(
-            SenderRule(
-                account=account,
-                sender_key=sender,
-                category=decision.category,
-                source=RuleSource.AUTO,
-                hits=1,
-                active=cfg.auto_rule.hits <= 1,
-            )
-        )
-        return
+    )
+
+
+def _new_auto_rule(cfg: CategoriesConfig, account: str, sender: str, category: str) -> SenderRule:
+    """A sender's first counted answer: a pending auto rule with one hit (active at once when
+    `auto_rule.hits` is 1)."""
+    return SenderRule(
+        account=account,
+        sender_key=sender,
+        category=category,
+        source=RuleSource.AUTO,
+        hits=1,
+        active=cfg.auto_rule.hits <= 1,
+    )
+
+
+def _count_hit(cfg: CategoriesConfig, rule: SenderRule, category: str, *, count: bool) -> None:
+    """Count a confident answer in `category` on the sender's exact rule `rule`.
+
+    Only a pending auto rule, or an active one whose category was removed, changes: manual and
+    correction rules never do. The same category adds a hit (active at `auto_rule.hits`);
+    another one starts the rule over in it. With `count=False` (an answer already learned from)
+    nothing is added, but a pending rule in another category still starts over at 0 hits.
+    """
     if rule.source != RuleSource.AUTO or (rule.active and rule.category in cfg.by_key):
         return
     if not count:
-        if not rule.active and rule.category != decision.category:
+        if not rule.active and rule.category != category:
             rule.hits = 0
         return
-    if rule.category == decision.category:
+    if rule.category == category:
         rule.hits += 1
         rule.active = rule.hits >= cfg.auto_rule.hits
     else:
-        rule.category, rule.hits = decision.category, 1
+        rule.category, rule.hits = category, 1
         rule.active = cfg.auto_rule.hits <= 1
 
 

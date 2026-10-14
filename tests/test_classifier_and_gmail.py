@@ -6,6 +6,7 @@ import pytest
 from fakes import SENT_BASE_S, HttpError, SentMailService, sent_mail_gmail
 
 from inbox_jev import gmail as gmail_module
+from inbox_jev.body import extract_body
 from inbox_jev.classification import PreviousContact
 from inbox_jev.classifier import (
     CATEGORY_INSTRUCTIONS,
@@ -15,20 +16,15 @@ from inbox_jev.classifier import (
     build_questions,
     build_state,
 )
-from inbox_jev.gmail import (
-    BATCH_SIZE,
+from inbox_jev.gmail import BATCH_SIZE, SINGLE_RETRIES, Email, Gmail, is_not_found
+from inbox_jev.sent_scan import (
     NEVER_VERDICT_TTL,
     SENT_ADDRESS_READS,
     SENT_DOMAIN_READS,
     SENT_NEWER_LIMIT,
-    SINGLE_RETRIES,
     DomainScan,
     DomainVerdict,
-    Email,
-    Gmail,
     MemoryScans,
-    extract_body,
-    is_not_found,
     scan_rules,
 )
 
@@ -470,7 +466,7 @@ def _match_everything(list_call):
 
 
 def test_has_written_to_address_with_more_loose_matches_than_it_reads_counts(monkeypatch, caplog):
-    caplog.set_level("INFO", logger="inbox_jev.gmail")
+    caplog.set_level("INFO", logger="inbox_jev.sent_scan")
     sent = {f"s{i}": {"To": f"x{i}ana@corp.com"} for i in range(SENT_ADDRESS_READS + 1)}
     svc = SentMailService(sent)
     assert sent_mail_gmail(monkeypatch, svc).has_written_to("ana@corp.com")
@@ -524,7 +520,7 @@ def _check(monkeypatch, svc, scans, domain="github.com"):
 
 
 def test_domain_scan_goes_on_across_runs_until_every_match_is_read(monkeypatch, caplog):
-    caplog.set_level("INFO", logger="inbox_jev.gmail")
+    caplog.set_level("INFO", logger="inbox_jev.sent_scan")
     svc, scans = SentMailService(dict(GITHUB_REPLIES)), MemoryScans()
     assert _check(monkeypatch, svc, scans)  # 25 of 60 read: counts as written for now
     assert svc.reads == [f"g{i}" for i in range(SENT_DOMAIN_READS)]
@@ -701,7 +697,7 @@ def test_domain_scan_stores_a_verdict_reached_without_a_read(monkeypatch):
 def test_domain_scan_read_out_of_date_order_starts_over(monkeypatch, caplog):
     # Gmail lists C after B though C is newer: C lies inside the span B made, so a later
     # before: search would never list an email like it. The scan must not end `never`.
-    caplog.set_level("WARNING", logger="inbox_jev.gmail")
+    caplog.set_level("WARNING", logger="inbox_jev.sent_scan")
     sent = {
         "a": {"To": "reply+a@reply.github.com"},
         "b": {"To": "reply+b@reply.github.com"},

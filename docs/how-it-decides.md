@@ -86,7 +86,7 @@ Contents:
      email decided by a rule makes none) says whose fault it is
      ([ADR 0035](decisions/0035-identical-refusals-stop-the-pass.md)):
      - the next call is refused **the same way** (same SDK error type and HTTP status,
-       `triage.MAX_IDENTICAL_REJECTIONS` = 2 in a row): Jev may refuse everything, e.g. a change
+       `jev_guard.MAX_IDENTICAL_REJECTIONS` = 2 in a row): Jev may refuse everything, e.g. a change
        on its side. The pass stops asking Jev, and neither email gives up: each is stored as
        `error` with one **ordinary** failure, retried after the usual backoff like a timeout
        ([EX-28](#ex-28--jev-refuses-every-request-the-same-way)). The emails after them are left
@@ -100,7 +100,7 @@ Contents:
        the next run try it again ([EX-23](#ex-23--jev-refuses-one-email)).
    - **transient** (anything else): the email is stored as `error` with the usual backoff.
 
-   After **3** failed Jev calls in a row (`triage.MAX_CONSECUTIVE_JEV_FAILURES`; flags-only calls
+   After **3** failed Jev calls in a row (`jev_guard.MAX_CONSECUTIVE_JEV_FAILURES`; flags-only calls
    count, a successful call resets the count) the pass also stops asking Jev. Once stopped, for
    the rest of the pass: an email that needs Jev's decision is left as it is (no sent-mail
    search, not stored, no failure counted) for the next run; an allowlisted email or one with a
@@ -315,9 +315,9 @@ A `failed` row is retried by `run` the next time an email from the same list pas
 checks (until 3 attempts), and by `inbox-jev unsubscribe-retry`. Both store an attempt the same
 way (`triage.record_attempt`: result, `attempts + 1`, time, an `unsubscribe` log line).
 
-**`unsubscribe-retry`** (`triage.retry_unsubscribes`) re-checks each `failed` row with fewer than
-3 attempts against the email's current state, with the same `acts_on` and `unsubscribe_gate`
-as `run`. Differences from `run`:
+**`unsubscribe-retry`** (`unsubscribe_retry.retry_unsubscribes`) re-checks each `failed` row
+with fewer than 3 attempts against the email's current state, with the same `acts_on` and
+`unsubscribe_gate` as `run`. Differences from `run`:
 
 | Check | `run` | `unsubscribe-retry` |
 |---|---|---|
@@ -484,7 +484,7 @@ row's stored sender. It is checked in two places:
   are skipped.
 - In the pipeline, when an email from an earlier `label`/`act` pass is processed again.
 
-**User edits = hands off** (`triage._user_edit`, only for rows that have labels from an earlier
+**User edits = hands off** (`triage.user_edit`, only for rows that have labels from an earlier
 pass, and never in `dry_run`):
 
 | Edit | Result |
@@ -520,7 +520,7 @@ instead of restoring nothing.
    change the search).
 2. Unless the sender is a [machine address](#48-machine-and-no-reply-addresses) (writing to
    `noreply@` or a bounce address doesn't make anyone a contact, so it isn't searched): Gmail
-   search `in:sent to:<sender>` (`maxResults=10`, `gmail.SENT_ADDRESS_READS`), then read the
+   search `in:sent to:<sender>` (`maxResults=10`, `sent_scan.SENT_ADDRESS_READS`), then read the
    `To`, `Cc` and `Bcc` headers (`format=metadata`, no body) of the matches, newest first, one at
    a time. The first that went to the sender's own address → `wrote_to_sender`
    (`signals.wrote_to_address`): Gmail's `to:` also matches similar addresses, so a match alone
@@ -556,16 +556,17 @@ exception → `None` (logged as a warning, not cached), except a database error 
 scan (below), which is raised: the email fails and is retried (`run`), or `unsubscribe-retry`
 stops, in both cases before any unsubscribe request.
 
-**Domain scan** (`gmail.DomainScan`, kept per account and domain in the `sent_domain_scans`
-table by `triage.DomainScanRows`; [EX-35](#ex-35--a-domain-written-to-only-at-machine-addresses-is-read-in-full),
+**Domain scan** (`sent_scan.DomainScan`, kept per account and domain in the `sent_domain_scans`
+table by `scan_rows.DomainScanRows`;
+[EX-35](#ex-35--a-domain-written-to-only-at-machine-addresses-is-read-in-full),
 [ADR 0040](decisions/0040-domain-scan-kept-across-runs.md)). The scan reads the matches newest
-first, at most 25 per check (`gmail.SENT_DOMAIN_READS`, the read budget per domain and run), and
-remembers the dates of the newest and oldest emails it read (Unix seconds, as Gmail's
+first, at most 25 per check (`sent_scan.SENT_DOMAIN_READS`, the read budget per domain and
+run), and remembers the dates of the newest and oldest emails it read (Unix seconds, as Gmail's
 `after:` / `before:` take them) and the ids read in those two seconds:
 
 - No scan yet: `in:sent to:<domain>` (`maxResults=25`) from the newest match down.
 - A scan, first: `in:sent to:<domain> after:<newest − 1 s>` (up to 500,
-  `gmail.SENT_NEWER_LIMIT`; with more, the check stops and the domain counts as written). The
+  `sent_scan.SENT_NEWER_LIMIT`; with more, the check stops and the domain counts as written). The
   new matches are read oldest first, so what was read stays one span without gaps.
 - Then, unless the scan reached the end: `in:sent to:<domain> before:<oldest + 1 s>` and the
   next older matches, newest first, until the budget runs out.
@@ -575,7 +576,7 @@ remembers the dates of the newest and oldest emails it read (Unix seconds, as Gm
   known contact. Otherwise `scanning`: counts as written. `never` is checked again on every
   check by the `after:` search, so new sent mail to the domain is read (and a new email to a
   person there makes it `person`) the first time an email from it is decided.
-- A `never` reached 30 days ago or more (`gmail.NEVER_VERDICT_TTL`) starts over from the newest
+- A `never` reached 30 days ago or more (`sent_scan.NEVER_VERDICT_TTL`) starts over from the newest
   match, as a new scan: the `after:` search only lists mail dated after the span, so sent mail
   that appears later with an older date (restored from Trash, imported) would otherwise never be
   read ([EX-36](#ex-36--a-never-verdict-is-redone-after-a-month)). While it re-reads, the domain
@@ -597,7 +598,7 @@ remembers the dates of the newest and oldest emails it read (Unix seconds, as Gm
   without that upsert, `run` (in every mode) and `unsubscribe-retry` fail the account at their
   start, before any Gmail call, and `previous_contact` raises rather than answer "unknown" (no
   veto in `run`). A Gmail
-  error keeps what was read before it. A scan made under other rules (`gmail.scan_rules`: the
+  error keeps what was read before it. A scan made under other rules (`sent_scan.scan_rules`: the
   code's `SCAN_RULES_VERSION` and the bundled Public Suffix List's digest, which decide machine
   addresses) starts over. A domain without any match stores nothing.
 - `unsubscribe-retry` uses the same table; `scripts/dry_classify.py` keeps scans in memory
@@ -694,7 +695,7 @@ candidate, trusted or not, makes the email a group for the unsubscribe check.
 
 ### 4.6 Body extraction
 
-`gmail.extract_body(payload)` walks the MIME tree:
+`body.extract_body(payload)` walks the MIME tree:
 
 - Parts with a filename (attachments) are skipped.
 - Within each `multipart/alternative` that has a `text/plain` part, its plain text is used,

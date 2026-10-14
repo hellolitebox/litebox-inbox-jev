@@ -13,12 +13,12 @@ from fakes import (
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.exc import OperationalError
 
-from inbox_jev import rules, triage
+from inbox_jev import rules, scan_rows, triage
 from inbox_jev.classification import PreviousContact
 from inbox_jev.config import Mode
 from inbox_jev.db import SenderRule, SentDomainScan, Unsubscribe, now
-from inbox_jev.gmail import DomainScan, DomainVerdict, MemoryScans, scan_rules
 from inbox_jev.rules import RuleSource
+from inbox_jev.sent_scan import DomainScan, DomainVerdict, MemoryScans, scan_rules
 from inbox_jev.unsubscribe import UnsubscribeMethod, UnsubscribeStatus
 
 
@@ -144,20 +144,20 @@ def test_domain_scan_rows_round_trip(make_sessions):
     scan = DomainScan("code.example", scan_rules(), newest_s=20, newest_ids=["a"])
     scan.include("b", 10)
     with sessions() as s:
-        rows = triage.DomainScanRows(s, "me@acme.com")
+        rows = scan_rows.DomainScanRows(s, "me@acme.com")
         assert rows.load("code.example") is None
         rows.save(scan)
         s.commit()
     with sessions() as s:
-        assert triage.DomainScanRows(s, "other@acme.com").load("code.example") is None
-        rows = triage.DomainScanRows(s, "me@acme.com")
+        assert scan_rows.DomainScanRows(s, "other@acme.com").load("code.example") is None
+        rows = scan_rows.DomainScanRows(s, "me@acme.com")
         assert rows.load("code.example") == scan
         scan.verdict, scan.verdict_at, scan.read = DomainVerdict.NEVER, now(), 2
         scan.reached_end = True
         rows.save(scan)
         s.commit()
     with sessions() as s:
-        assert triage.DomainScanRows(s, "me@acme.com").load("code.example") == scan
+        assert scan_rows.DomainScanRows(s, "me@acme.com").load("code.example") == scan
         assert s.query(SentDomainScan).count() == 1
 
 
@@ -168,10 +168,10 @@ def test_domain_scan_rows_save_over_a_row_another_session_stored(make_sessions, 
     mine = DomainScan("code.example", scan_rules(), DomainVerdict.NEVER, now(), 20, ["a"], 10)
     mine.read, mine.reached_end = 2, True
     with sessions() as s, sessions() as other:
-        rows = triage.DomainScanRows(s, "me@acme.com")
+        rows = scan_rows.DomainScanRows(s, "me@acme.com")
         assert rows.load("code.example") is None
         theirs = DomainScan("code.example", scan_rules(), newest_s=30, newest_ids=["z"], read=1)
-        triage.DomainScanRows(other, "me@acme.com").save(theirs)
+        scan_rows.DomainScanRows(other, "me@acme.com").save(theirs)
         other.commit()
         assert rows.load("code.example") == theirs  # not a stale copy from the identity map
         rows.save(mine)
@@ -189,42 +189,51 @@ def test_domain_scan_rows_save_keeps_a_concurrent_person(make_sessions, tmp_path
     person = DomainScan("code.example", rules_then, DomainVerdict.PERSON, now(), 30, ["p"], 30)
     mine = DomainScan("code.example", scan_rules(), DomainVerdict.NEVER, now(), 20, ["a"], 20)
     with sessions() as s, sessions() as other:
-        rows = triage.DomainScanRows(s, "me@acme.com")
+        rows = scan_rows.DomainScanRows(s, "me@acme.com")
         assert rows.load("code.example") is None
-        triage.DomainScanRows(other, "me@acme.com").save(person)
+        scan_rows.DomainScanRows(other, "me@acme.com").save(person)
         other.commit()
         rows.save(mine)
         s.commit()
     with sessions() as s:
-        stored = triage.DomainScanRows(s, "me@acme.com").load("code.example")
+        stored = scan_rows.DomainScanRows(s, "me@acme.com").load("code.example")
         assert stored == (person if kept else mine)
 
 
 @pytest.mark.parametrize("dialect", [sqlite.dialect(), postgresql.dialect()])
 def test_scan_upsert_on_each_documented_database(dialect):
     scan = DomainScan("code.example", scan_rules())
-    sql = str(triage.scan_upsert(dialect.name, "me@acme.com", scan).compile(dialect=dialect))
+    sql = str(scan_rows.scan_upsert(dialect.name, "me@acme.com", scan).compile(dialect=dialect))
     assert "ON CONFLICT (account, domain) DO UPDATE" in sql
     assert "WHERE sent_domain_scans.verdict !=" in sql
 
 
 def test_scan_upsert_refuses_a_database_without_one():
     with pytest.raises(NotImplementedError, match="mysql"):
-        triage.scan_upsert("mysql", "me@acme.com", DomainScan("code.example", scan_rules()))
+        scan_rows.scan_upsert("mysql", "me@acme.com", DomainScan("code.example", scan_rules()))
 
 
 def test_domain_scan_rows_refuse_a_database_without_the_upsert():
     # Before any search: a domain verdict it then couldn't store would reach `run` as unknown.
     mysql = SimpleNamespace(get_bind=lambda: SimpleNamespace(dialect=SimpleNamespace(name="mysql")))
     with pytest.raises(NotImplementedError, match="mysql"):
-        triage.DomainScanRows(mysql, "me@acme.com")
+        scan_rows.DomainScanRows(mysql, "me@acme.com")
+
+
+def test_domain_scan_rows_accept_only_the_given_dialects():
+    sqlite_db = SimpleNamespace(
+        get_bind=lambda: SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+    )
+    scan_rows.DomainScanRows(sqlite_db, "me@acme.com")  # documented: accepted
+    with pytest.raises(NotImplementedError, match="sqlite"):
+        scan_rows.DomainScanRows(sqlite_db, "me@acme.com", dialects=("postgresql",))
 
 
 class NoUpsertScans(MemoryScans):
     """Domain scans saved in a database without the upsert (e.g. MySQL)."""
 
     def save(self, scan):
-        triage.scan_upsert("mysql", "me@acme.com", scan)
+        scan_rows.scan_upsert("mysql", "me@acme.com", scan)
 
 
 def test_previous_contact_raises_when_the_database_has_no_upsert(monkeypatch):
@@ -236,9 +245,9 @@ def test_previous_contact_raises_when_the_database_has_no_upsert(monkeypatch):
         )
 
 
-def test_run_fails_the_account_before_gmail_on_a_database_without_the_upsert(setup, monkeypatch):
+def test_run_fails_the_account_before_gmail_on_a_database_without_the_upsert(setup):
     ctx, gmail, account = setup
-    monkeypatch.setattr(triage, "_SCAN_UPSERT_DIALECTS", ("postgresql",))
+    ctx.scan_dialects = ("postgresql",)  # stands for a database without the upsert
     with pytest.raises(NotImplementedError, match="sqlite"):
         triage.run_account(ctx, account, Mode.ACT)
     assert gmail.sent == [] and gmail.modified == [] and ctx.classifier.states == []
@@ -264,14 +273,14 @@ def test_run_fails_the_email_when_the_scan_cant_be_saved(setup, monkeypatch):
     ctx, gmail, account = setup
     svc = SentMailService({"g0": {"To": "bounces+0@agency.io"}})
     gmail.has_written_to = sent_mail_gmail(monkeypatch, svc).has_written_to
-    monkeypatch.setattr(triage.DomainScanRows, "save", LockedScans.save)
+    monkeypatch.setattr(scan_rows.DomainScanRows, "save", LockedScans.save)
     gmail.emails = {"9": pitch_email("9")}
     ctx.classifier.answers["Pitch 9"] = make_classification("cold_outreach", 0.97)
     triage.run_account(ctx, account, Mode.ACT)
     assert gmail.sent == [] and gmail.modified == []
     with ctx.sessions() as s:
         assert s.query(Unsubscribe).count() == 0
-        assert triage._find_message(s, account.email, "9").status == "error"  # retried later
+        assert triage.find_message(s, account.email, "9").status == "error"  # retried later
 
 
 def test_run_keeps_the_domain_scan_between_runs(setup, monkeypatch):

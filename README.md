@@ -284,8 +284,9 @@ sudo systemctl enable --now inbox-jev-triage.timer inbox-jev-digest.timer
 - Run logs (JSON lines): `journalctl -u inbox-jev-triage -f`. Every line logged during an
   account's pass carries `run_id`, the id of its `runs` row. A run that fails for one account
   (for example an expired Gmail token, a missing `TYPESAFE_API_KEY`, or Jev rejecting the key
-  or failing 3 calls in a row) is recorded in `runs.error`, the other accounts still run, and
-  the service exits non-zero so systemd shows the failure. `digest`, `unsubscribe-retry` and
+  or failing 3 calls in a row) is recorded in `runs.error` and logged once with its traceback
+  ("account run failed", with that `run_id`), the other accounts still run, and the service
+  exits non-zero so systemd shows the failure. `digest`, `unsubscribe-retry` and
   `senders backfill` also go on with the other accounts when one fails, and exit non-zero.
   Jev errors are stored and logged as type, HTTP status and request id only, never Jev's
   message (it can quote the email).

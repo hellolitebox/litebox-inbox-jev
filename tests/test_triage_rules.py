@@ -7,7 +7,7 @@ from fakes import (
     email,
 )
 
-from inbox_jev import digest, rules, triage
+from inbox_jev import digest, jev_guard, rules, triage
 from inbox_jev.config import DigestLanguage, Mode
 from inbox_jev.db import Message, Run, SenderRule
 from inbox_jev.rules import RuleSource
@@ -79,7 +79,7 @@ def test_flags_only_jev_failure_still_labels_allowlist_and_keep_rule(setup, capl
     with ctx.sessions() as s:
         rules.set_rule(s, account.email, "promo@shop.com", "important", RuleSource.CORRECTION)
         s.commit()
-    with pytest.raises(triage.JevUnavailable):  # 3 failed calls in a row (1, 2, 3) stop Jev
+    with pytest.raises(jev_guard.JevUnavailable):  # 3 failed calls in a row (1, 2, 3) stop Jev
         triage.run_account(ctx, account, Mode.ACT)
     with ctx.sessions() as s:
         run = s.query(Run).one()

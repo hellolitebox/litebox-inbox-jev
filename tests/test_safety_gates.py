@@ -11,7 +11,7 @@ import pytest
 from conftest import make_classification, make_signals
 from fakes import as_archived, email, failed_unsub
 
-from inbox_jev import rules, triage
+from inbox_jev import rules, triage, unsubscribe_retry
 from inbox_jev.classification import PreviousContact
 from inbox_jev.config import Mode
 from inbox_jev.db import Message
@@ -172,7 +172,7 @@ def _retry_path(ctx, gmail, account, sc):
     with ctx.sessions() as s:
         failed_unsub(s, account, "9", "the-list", sc.category, sender=sender, confidence=0.97)
     with ctx.sessions() as s:
-        triage.retry_unsubscribes(ctx, s, gmail, account)
+        unsubscribe_retry.retry_unsubscribes(ctx, s, gmail, account)
 
 
 PATHS = {"jev": _jev_path, "rule": _rule_path, "retry": _retry_path}

@@ -140,7 +140,7 @@ class SenderRule(Base):
 
 
 class SentDomainScan(Base):
-    """An account's sent-mail scan of one domain (`gmail.DomainScan`), kept between runs so a
+    """An account's sent-mail scan of one domain (`sent_scan.DomainScan`), kept between runs so a
     domain written to only at machine addresses is read in full a few emails per run."""
 
     __tablename__ = "sent_domain_scans"
@@ -149,8 +149,8 @@ class SentDomainScan(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     account: Mapped[str] = mapped_column(String(320), index=True)
     domain: Mapped[str] = mapped_column(String(255))
-    rules: Mapped[str] = mapped_column(String(64))  # gmail.scan_rules() when it started
-    verdict: Mapped[str] = mapped_column(String(16))  # gmail.DomainVerdict
+    rules: Mapped[str] = mapped_column(String(64))  # sent_scan.scan_rules() when it started
+    verdict: Mapped[str] = mapped_column(String(16))  # sent_scan.DomainVerdict
     verdict_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     newest_s: Mapped[int | None] = mapped_column(BigInteger)  # Unix seconds
     newest_ids: Mapped[list[str]] = mapped_column(JSON, default=list)

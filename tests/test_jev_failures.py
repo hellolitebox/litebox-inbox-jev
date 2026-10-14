@@ -9,6 +9,7 @@ import httpx2
 import pytest
 from conftest import make_classification
 from fakes import FakeClassifier, JevFails, email, jev_http_error
+from sqlalchemy import event
 from sqlalchemy.exc import OperationalError
 from typesafe_sdk import (
     Choice,
@@ -26,7 +27,7 @@ from typesafe_sdk import (
     TypeSafeUnprocessableEntityError,
 )
 
-from inbox_jev import logs, rules, triage
+from inbox_jev import jev_guard, logs, rules, triage
 from inbox_jev.classifier import (
     Classifier,
     JevFailure,
@@ -157,13 +158,14 @@ def test_real_sdk_question_error_is_described(cfg):
 
 
 def _formatted(exc: BaseException) -> str:
-    """`exc` as the CLI logs it (`log.exception` through JsonFormatter): the whole chain."""
+    """`exc` as `run_account` logs it (`log.exception` through JsonFormatter): the whole
+    chain."""
     return JsonFormatter().formatException((type(exc), exc, exc.__traceback__))
 
 
-def test_failing_to_record_a_jev_error_does_not_chain_its_text(setup, cfg, monkeypatch):
+def test_failing_to_record_a_jev_error_does_not_chain_its_text(setup, cfg):
     """If storing a refused email fails (database locked…), the error that escapes the run
-    carries no Jev error as context: `cli` logs its whole traceback."""
+    carries no Jev error as context: `run_account` logs its whole traceback."""
     ctx, gmail, account = setup
     gmail.emails = {"1": gmail.emails["1"]}  # one refusal: this email's, stored at the pass's end
     gmail.emails["1"].body = BODY
@@ -171,12 +173,17 @@ def test_failing_to_record_a_jev_error_does_not_chain_its_text(setup, cfg, monke
         ctx.settings, cfg, ctx.sessions, ctx.gmail, classifier=_sdk_classifier(cfg, _echoing(422))
     )
 
-    def locked(*args, **kwargs):
-        raise OperationalError("UPDATE messages", {}, Exception("database is locked"))
+    def locked(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("INSERT INTO messages"):  # the refused email's error row
+            raise OperationalError(statement, {}, Exception("database is locked"))
 
-    monkeypatch.setattr(triage, "_record_error", locked)
-    with pytest.raises(OperationalError) as info:
-        triage.run_account(ctx, account, Mode.ACT)
+    engine = ctx.sessions.kw["bind"]
+    event.listen(engine, "before_cursor_execute", locked)
+    try:
+        with pytest.raises(OperationalError) as info:
+            triage.run_account(ctx, account, Mode.ACT)
+    finally:
+        event.remove(engine, "before_cursor_execute", locked)
 
     assert info.value.__context__ is None
     assert "SECRET" not in _formatted(info.value)
@@ -199,6 +206,7 @@ def test_failing_to_handle_a_jev_error_in_the_guard_does_not_chain_its_text(
         raise RuntimeError("describe failed")
 
     monkeypatch.setattr(triage, "describe_jev_error", broken)
+    monkeypatch.setattr(jev_guard, "describe_jev_error", broken)
     caplog.set_level(logging.INFO, logger="typesafe_sdk")
     triage.run_account(ctx, account, Mode.ACT)
 
@@ -230,7 +238,7 @@ def test_422_echoing_the_email_is_never_stored_or_logged(setup, cfg, caplog):
 
     # 2 and 3 (flags only) are refused the same way: Jev's problem, so 2 gets an ordinary failure
     gmail.emails = everything
-    with pytest.raises(triage.JevUnavailable):
+    with pytest.raises(jev_guard.JevUnavailable):
         triage.run_account(ctx, account, Mode.ACT)
     run = _run(ctx)
     assert run.error == (
@@ -266,7 +274,7 @@ def test_auth_failure_stops_jev_without_blaming_the_email(setup, cfg, caplog):
             )
         )
         s.commit()
-    with pytest.raises(triage.JevUnavailable):
+    with pytest.raises(jev_guard.JevUnavailable):
         triage.run_account(ctx, account, Mode.ACT)
 
     assert jev.calls == 1  # email 1; 2 needs Jev too but isn't sent, 3's flags call is skipped
@@ -295,7 +303,7 @@ def test_transient_failures_stop_jev_after_three_in_a_row(setup, cfg):
     gmail.emails.update({e.id: e for e in [email("5", "Ann <ann@other.org>", "Lunch?")]})
     jev = JevFails(TypeSafeAPITimeoutError(30.0))
     ctx = triage.Context(ctx.settings, cfg, ctx.sessions, ctx.gmail, classifier=jev)
-    with pytest.raises(triage.JevUnavailable):
+    with pytest.raises(jev_guard.JevUnavailable):
         triage.run_account(ctx, account, Mode.ACT)
 
     assert jev.calls == 3  # 1, 2 and 3's flags call; then 4 and 5 aren't sent
@@ -396,7 +404,7 @@ def test_identical_refusals_around_a_rule_give_neither_email_up(setup, cfg):
             )
         )
         s.commit()
-    with pytest.raises(triage.JevUnavailable, match="Jev refused 2 requests in a row"):
+    with pytest.raises(jev_guard.JevUnavailable, match="Jev refused 2 requests in a row"):
         triage.run_account(ctx, account, Mode.ACT)
 
     rows = _rows(ctx)
@@ -444,7 +452,7 @@ def test_a_refused_flags_only_call_counts_as_the_next_call(setup, cfg):
     gmail.emails = {e: gmail.emails[e] for e in ("1", "3")}
     jev = FakeClassifier({"Proposal": _refused(), "Internal": _refused()})
     ctx = triage.Context(ctx.settings, cfg, ctx.sessions, ctx.gmail, classifier=jev)
-    with pytest.raises(triage.JevUnavailable, match="likely a change on Jev's side"):
+    with pytest.raises(jev_guard.JevUnavailable, match="likely a change on Jev's side"):
         triage.run_account(ctx, account, Mode.ACT)
     rows = _rows(ctx)
     assert (rows["1"].status, rows["1"].error_attempts) == ("error", 1)
@@ -453,3 +461,53 @@ def test_a_refused_flags_only_call_counts_as_the_next_call(setup, cfg):
         "allowlist",
         None,
     )
+
+
+# --- JevGuard's held refusals (blame / settle_held / finish), without a pass around them ------
+
+
+def _guard_refusing() -> tuple[JevFails, jev_guard.JevGuard]:
+    jev = JevFails(jev_http_error(TypeSafeUnprocessableEntityError, 422))
+    return jev, jev_guard.JevGuard(jev, "me@acme.com")
+
+
+def test_guard_holds_a_refusal_until_the_next_call_shows_it_was_the_emails():
+    jev, guard = _guard_refusing()
+    with pytest.raises(TypeSafeUnprocessableEntityError) as first:
+        guard.classify({})
+    assert guard.blame("1", first.value, None) is None  # held: whose fault isn't known yet
+    assert guard.settle_held() is None  # no later call
+    jev.error = jev_http_error(TypeSafeInternalServerError, 500)
+    with pytest.raises(TypeSafeInternalServerError) as second:
+        guard.classify({})
+    assert guard.settle_held() == jev_guard.FailedEmail("1", first.value, None, alone=True)
+    assert guard.blame("2", second.value, None) == jev_guard.FailedEmail("2", second.value, None)
+    assert guard.finish() is None and guard.skipped == 0
+
+
+def test_guard_settles_held_refusals_as_ordinary_failures_when_jev_refuses_everything():
+    _, guard = _guard_refusing()
+    with pytest.raises(TypeSafeUnprocessableEntityError) as first:
+        guard.classify({})
+    assert guard.blame("1", first.value, None) is None
+    with pytest.raises(jev_guard.JevStopped) as stop:  # refused the same way: stops the guard
+        guard.classify({})
+    refusal = stop.value.refusal
+    assert refusal is not None
+    assert guard.settle_held() == jev_guard.FailedEmail("1", first.value, None, alone=False)
+    assert guard.blame("2", stop.value, None) == jev_guard.FailedEmail(
+        "2", refusal, None, alone=False
+    )
+    with pytest.raises(jev_guard.JevStopped) as later:  # no call: the email waits
+        guard.classify({})
+    assert guard.blame("3", later.value, None) is None and guard.skipped == 1
+    assert guard.finish() is None
+
+
+def test_guard_finish_releases_a_refusal_no_later_call_settled():
+    _, guard = _guard_refusing()
+    with pytest.raises(TypeSafeUnprocessableEntityError) as first:
+        guard.classify({})
+    assert guard.blame("1", first.value, None) is None
+    assert guard.finish() == jev_guard.FailedEmail("1", first.value, None, alone=True)
+    assert guard.finish() is None

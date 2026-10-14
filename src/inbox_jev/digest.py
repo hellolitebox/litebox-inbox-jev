@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Callable, Sequence
 from datetime import timedelta
-from typing import TypedDict
+from typing import TypedDict, TypeVar
 
 import httpx
 from sqlalchemy import select
@@ -15,6 +16,8 @@ from .db import MAX_ERROR_ATTEMPTS, Message, MessageStatus, Run, Unsubscribe, no
 from .unsubscribe import UnsubscribeStatus
 
 MAX_ITEMS = 15
+
+_T = TypeVar("_T")
 
 
 class PluralForms(TypedDict):
@@ -177,67 +180,6 @@ def build(
         select(Unsubscribe).where(Unsubscribe.account == account, Unsubscribe.attempted_at >= since)
     ).all()
     runs = session.scalars(select(Run).where(Run.account == account, Run.started_at >= since)).all()
-
-    modes = sorted({m.mode for m in done})
-    out = [t["header"].format(account=account, hours=hours, modes=", ".join(modes) or "—")]
-
-    counts = Counter(m.category for m in done if not m.low_confidence)
-    summary = " · ".join(
-        f"{cfg.by_key[k].label if k in cfg.by_key else k}: {n}" for k, n in counts.most_common()
-    )
-    low = [m for m in done if m.low_confidence]
-    out.append(
-        t["summary"].format(
-            processed=plural(t["processed"], len(done)),
-            summary=summary or t["nothing"],
-            low=len(low),
-        )
-    )
-
-    # Categories that stay in the inbox on purpose (besides "important") get their own section,
-    # e.g. automated emails that need an action. Emails listed there aren't repeated below.
-    listed: set[int] = set()
-    for cat in cfg.categories:
-        if cat.action != Action.KEEP or cat.key == "important":
-            continue
-        kept = [m for m in done if m.category == cat.key and not m.low_confidence]
-        if kept:
-            out.append(f"\n*🔔 {cat.label} ({len(kept)})*")
-            out += [_line(t, account, m) for m in kept[:MAX_ITEMS]]
-            listed.update(id(m) for m in kept)
-
-    reply = [m for m in done if _needs_reply(cfg, m) and id(m) not in listed]
-    if reply:
-        out.append(t["needs_reply"].format(n=len(reply)))
-        out += [_line(t, account, m) for m in reply[:MAX_ITEMS]]
-
-    ok = [u for u in unsubs if u.status == UnsubscribeStatus.OK]
-    if ok:
-        out.append(t["unsubscribed"].format(n=len(ok)))
-        out += [f"• {esc(u.list_key)} ({u.method})" for u in ok[:MAX_ITEMS]]
-    pending = [u for u in unsubs if u.status == UnsubscribeStatus.MANUAL_PENDING]
-    if pending:
-        out.append(t["unsubscribe_manual"].format(n=len(pending)))
-        out += [
-            f"• {esc(u.list_key)} — "
-            + (_link(u.target, t["link"]) if u.target else t["link_in_body"])
-            for u in pending[:MAX_ITEMS]
-        ]
-    failed = [u for u in unsubs if u.status == UnsubscribeStatus.FAILED]
-    if failed:
-        out.append(t["unsubscribe_failed"].format(n=len(failed)))
-        out += [
-            f"• {esc(u.list_key)}: {esc(u.error or u.http_status or '', 80)}"
-            for u in failed[:MAX_ITEMS]
-        ]
-
-    if low:
-        out.append(t["low_confidence"].format(n=len(low), label=cfg.review_label))
-        out += [
-            _line(t, account, m, f" → {esc(m.category)}? ({(m.confidence or 0):.0%})")
-            for m in low[:MAX_ITEMS]
-        ]
-
     learned = session.scalars(
         select(Message).where(
             Message.account == account,
@@ -245,31 +187,116 @@ def build(
             Message.correction_checked_at >= since,
         )
     ).all()
-    if learned:
-        out.append(t["learned"].format(n=len(learned)))
-        out += [
-            f"• {esc(m.sender)}: {esc(m.category)} → {esc(m.corrected_category)}"
-            for m in learned[:MAX_ITEMS]
-        ]
 
-    failed_runs = [r for r in runs if r.error]
-    if errors or failed_runs:
-        gave_up = [m for m in errors if (m.error_attempts or 0) >= MAX_ERROR_ATTEMPTS]
-        out.append(
-            t["errors"].format(
-                emails=plural(t["error_emails"], len(errors)),
-                gave_up=len(gave_up),
-                failed_runs=plural(t["failed_runs"], len(failed_runs)),
-            )
-        )
-        out += _failed_runs(t, failed_runs)
-        if gave_up:
-            out.append(t["gave_up"].format(attempts=MAX_ERROR_ATTEMPTS))
-            out += [
-                _line(t, account, m, f": {esc(m.error or '', 80)}") for m in gave_up[:MAX_ITEMS]
-            ]
-
+    modes = sorted({m.mode for m in done})
+    low = [m for m in done if m.low_confidence]
+    kept = _kept_on_purpose(cfg, done)
+    listed = {id(m) for _, msgs in kept for m in msgs}
+    reply = [m for m in done if _needs_reply(cfg, m) and id(m) not in listed]
+    out = [t["header"].format(account=account, hours=hours, modes=", ".join(modes) or "—")]
+    out += _summary(t, cfg, done, low)
+    for label, msgs in kept:
+        out += _section(f"\n*🔔 {label} ({len(msgs)})*", msgs, lambda m: _line(t, account, m))
+    out += _section(t["needs_reply"].format(n=len(reply)), reply, lambda m: _line(t, account, m))
+    out += _unsubscribe_sections(t, unsubs)
+    out += _low_confidence(t, cfg, account, low)
+    out += _section(
+        t["learned"].format(n=len(learned)),
+        learned,
+        lambda m: f"• {esc(m.sender)}: {esc(m.category)} → {esc(m.corrected_category)}",
+    )
+    out += _errors(t, account, errors, [r for r in runs if r.error])
     return "\n".join(out)
+
+
+def _section(title: str, items: Sequence[_T], line: Callable[[_T], str]) -> list[str]:
+    """`title` and one `line` per item (at most MAX_ITEMS), or nothing when there are none."""
+    return [title, *(line(item) for item in items[:MAX_ITEMS])] if items else []
+
+
+def _summary(
+    t: DigestMessages, cfg: CategoriesConfig, done: list[Message], low: list[Message]
+) -> list[str]:
+    """How many emails were processed, per category (low-confidence ones apart)."""
+    counts = Counter(m.category for m in done if not m.low_confidence)
+    summary = " · ".join(
+        f"{cfg.by_key[k].label if k in cfg.by_key else k}: {n}" for k, n in counts.most_common()
+    )
+    processed = plural(t["processed"], len(done))
+    return [t["summary"].format(processed=processed, summary=summary or t["nothing"], low=len(low))]
+
+
+def _kept_on_purpose(cfg: CategoriesConfig, done: list[Message]) -> list[tuple[str, list[Message]]]:
+    """(label, emails) of each category that stays in the inbox on purpose besides "important",
+    e.g. automated emails that need an action: each gets its own section, and the emails listed
+    there aren't repeated under Needs Reply."""
+    kept = []
+    for cat in cfg.categories:
+        if cat.action != Action.KEEP or cat.key == "important":
+            continue
+        msgs = [m for m in done if m.category == cat.key and not m.low_confidence]
+        if msgs:
+            kept.append((cat.label, msgs))
+    return kept
+
+
+def _unsubscribe_sections(t: DigestMessages, unsubs: Sequence[Unsubscribe]) -> list[str]:
+    """Unsubscribed lists, the ones waiting for a manual unsubscribe, and the failed ones."""
+    ok = [u for u in unsubs if u.status == UnsubscribeStatus.OK]
+    pending = [u for u in unsubs if u.status == UnsubscribeStatus.MANUAL_PENDING]
+    failed = [u for u in unsubs if u.status == UnsubscribeStatus.FAILED]
+    return [
+        *_section(
+            t["unsubscribed"].format(n=len(ok)), ok, lambda u: f"• {esc(u.list_key)} ({u.method})"
+        ),
+        *_section(
+            t["unsubscribe_manual"].format(n=len(pending)),
+            pending,
+            lambda u: (
+                f"• {esc(u.list_key)} — "
+                + (_link(u.target, t["link"]) if u.target else t["link_in_body"])
+            ),
+        ),
+        *_section(
+            t["unsubscribe_failed"].format(n=len(failed)),
+            failed,
+            lambda u: f"• {esc(u.list_key)}: {esc(u.error or u.http_status or '', 80)}",
+        ),
+    ]
+
+
+def _low_confidence(
+    t: DigestMessages, cfg: CategoriesConfig, account: str, low: list[Message]
+) -> list[str]:
+    """Emails left in the inbox with the review label, with Jev's guess and its confidence."""
+    return _section(
+        t["low_confidence"].format(n=len(low), label=cfg.review_label),
+        low,
+        lambda m: _line(t, account, m, f" → {esc(m.category)}? ({(m.confidence or 0):.0%})"),
+    )
+
+
+def _errors(
+    t: DigestMessages, account: str, errors: list[Message], failed_runs: list[Run]
+) -> list[str]:
+    """Failed emails and runs: one line per distinct run error, then the emails that gave up."""
+    if not (errors or failed_runs):
+        return []
+    gave_up = [m for m in errors if (m.error_attempts or 0) >= MAX_ERROR_ATTEMPTS]
+    out = [
+        t["errors"].format(
+            emails=plural(t["error_emails"], len(errors)),
+            gave_up=len(gave_up),
+            failed_runs=plural(t["failed_runs"], len(failed_runs)),
+        ),
+        *_failed_runs(t, failed_runs),
+    ]
+    out += _section(
+        t["gave_up"].format(attempts=MAX_ERROR_ATTEMPTS),
+        gave_up,
+        lambda m: _line(t, account, m, f": {esc(m.error or '', 80)}"),
+    )
+    return out
 
 
 def _failed_runs(t: DigestMessages, runs: list[Run]) -> list[str]:

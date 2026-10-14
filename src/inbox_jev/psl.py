@@ -127,6 +127,6 @@ def is_public_suffix(domain: str) -> bool:
 @cache
 def fingerprint() -> str:
     """A short digest of the bundled list's text: changes whenever the list is updated, so a
-    result computed under an earlier list can be told apart (`gmail.scan_rules`)."""
+    result computed under an earlier list can be told apart (`sent_scan.scan_rules`)."""
     data = files("inbox_jev").joinpath(DATA_FILE).read_bytes()
     return hashlib.sha256(data).hexdigest()[:12]

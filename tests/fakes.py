@@ -20,8 +20,9 @@ from inbox_jev.classification import Classification
 from inbox_jev.classifier import JevError, JevState
 from inbox_jev.config import Account, Mode
 from inbox_jev.db import Message, MessageStatus, Unsubscribe
-from inbox_jev.gmail import DomainScans, Email, Gmail
+from inbox_jev.gmail import Email, Gmail
 from inbox_jev.policy import DecisionSource
+from inbox_jev.sent_scan import DomainScans, SentMail
 from inbox_jev.system_labels import INBOX, SPAM
 from inbox_jev.triage import GmailFactory
 from inbox_jev.unsubscribe import UnsubscribeMethod, UnsubscribeStatus
@@ -374,8 +375,10 @@ if TYPE_CHECKING:
 
     def _conforms(gmail: Gmail, fake: FakeGmail, fake_labels: FakeLabels) -> None:
         """Never run: mypy checks that `gmail.Gmail` and the fakes satisfy every Protocol they
-        stand in for (`triage.GmailApi`, `corrections.LabelReader`, `labels.LabelApi`)."""
+        stand in for (`triage.GmailApi`, `corrections.LabelReader`, `labels.LabelApi`,
+        `sent_scan.SentMail`)."""
         _gmail_api: triage.GmailApi = gmail
+        _gmail_sent_mail: SentMail = gmail
         _gmail_reader: corrections.LabelReader = gmail
         _gmail_label_api: labels.LabelApi = gmail
         _fake_api: triage.GmailApi = fake

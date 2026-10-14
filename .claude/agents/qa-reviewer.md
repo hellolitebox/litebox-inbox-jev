@@ -56,17 +56,17 @@ review's `Skills` line and continue.
 | `python-anti-patterns` | any `.py` under `src/` or `scripts/` | the anti-pattern checklist, on every changed function |
 | `python-code-style` | any `.py` | naming, docstrings, formatting beyond ruff |
 | `python-design-patterns` | any `.py` | KISS, separation of concerns, duplication vs. abstraction, coupling |
-| `python-project-structure` | any `.py` | module boundaries and public API (`policy` pure, I/O in `gmail`/`triage`) |
+| `python-project-structure` | any `.py` | module boundaries and public API (`policy` pure, I/O in `gmail`/`triage` and the modules split from them) |
 | `python-type-safety` | any `.py` | names, enums vs. loose strings, `Any` where a type exists (mypy covers annotations and `None`) |
 | `python-error-handling` | any `.py` | exception scope, partial failures in a run, errors that hide or abort |
-| `python-resilience` | `gmail.py`, `classifier.py`, `unsubscribe.py`, `triage.py`, `digest.py` | retries, backoff, timeouts on Gmail/Jev/HTTP calls |
+| `python-resilience` | `gmail.py`, `body.py`, `sent_scan.py`, `classifier.py`, `unsubscribe.py`, `triage.py`, `jev_guard.py`, `scan_rows.py`, `unsubscribe_retry.py`, `digest.py` | retries, backoff, timeouts on Gmail/Jev/HTTP calls |
 | `python-resource-management` | those I/O modules, `db.py` | sessions, HTTP clients, files: context managers and cleanup |
 | `python-observability` | those I/O modules, `logs.py`, `cli.py` | structured logs (and never email bodies), what a failure leaves behind |
 | `python-configuration` | `config.py`, `categories.yaml`, `accounts.example.yaml`, `.env.example`, `docker-compose.yml` | `Settings`/YAML validation, secrets, defaults |
 | `python-testing-patterns` | `tests/` | test quality: behaviour over implementation, fixtures, fakes, no network |
-| `python-performance-optimization` | `triage.py`, `gmail.py`, `db.py`, `rules.py`, `corrections.py` | API calls and DB queries per email/run, N+1, unbounded loops |
+| `python-performance-optimization` | `triage.py`, `jev_guard.py`, `scan_rows.py`, `unsubscribe_retry.py`, `gmail.py`, `body.py`, `sent_scan.py`, `db.py`, `rules.py`, `corrections.py` | API calls and DB queries per email/run, N+1, unbounded loops |
 | `python-packaging` | `pyproject.toml`, `uv.lock`, `Dockerfile`, `.github/workflows/` | `pyproject.toml`, `uv.lock`, entry points, the Docker build |
-| `python-background-jobs` | `triage.py`, `cli.py`, `deploy/` | the timer-driven runs: idempotency, overlap, retries |
+| `python-background-jobs` | `triage.py`, `jev_guard.py`, `scan_rows.py`, `unsubscribe_retry.py`, `cli.py`, `deploy/` | the timer-driven runs: idempotency, overlap, retries |
 | `async-python-patterns` | async code is added (the codebase is sync today) | event loop, blocking calls, cancellation |
 | `temporal-python-testing` | Temporal is introduced | otherwise "n/a" |
 
@@ -98,7 +98,7 @@ capped; `restore` must still be able to undo.
 
 **Real-mail check** (CLAUDE.md, "Validating behaviour changes"): if the PR changes
 classification (`categories.yaml` criteria, the classifier state or questions,
-`gmail.extract_body`) or a destructive path (archive, spam, unsubscribe, `unsubscribe-retry`),
+`body.extract_body`) or a destructive path (archive, spam, unsubscribe, `unsubscribe-retry`),
 the PR body must include the output of `scripts/check_branch.sh` (`dry_classify.py` on real
 mail, read-only) or an explicit reason it isn't needed, borne out by the diff. Missing: **major**.
 Output that contains email bodies: **blocker**.
@@ -108,16 +108,18 @@ email (avoid repeats; rules should skip Jev), N+1 DB queries, unbounded loops or
 timeouts on every network call.
 
 **Code hygiene**: matches existing style and module boundaries (policy stays pure; I/O in
-gmail/triage), clear names, no dead code or commented-out code, no duplication of existing
+gmail/triage and the modules split from them: `body`, `sent_scan`, `jev_guard`, `scan_rows`,
+`unsubscribe_retry`), clear names, no dead code or commented-out code, no duplication of existing
 helpers, type hints, small functions, comments only where non-obvious.
 
 **Tests**: new behaviour has tests; tests assert behaviour, not implementation; no network in
 tests.
 
 **Decision-logic docs** (see CLAUDE.md, "Decision logic docs"): if the PR changes
-`categories.yaml`, `policy.py`, `triage.py`, `rules.py`, `corrections.py`, `signals.py`,
-`psl.py`, `unsubscribe.py`, the classifier state/questions, `gmail.extract_body`,
-`gmail.has_written_to`, `config.py` (`FREE_MAIL`, `PUBLIC_GROUP_HOSTS`, `group_domains` / `act_categories` /
+`categories.yaml`, `policy.py`, `triage.py`, `unsubscribe_retry.py`, `jev_guard.py`, `rules.py`,
+`corrections.py`, `signals.py`, `psl.py`, `unsubscribe.py`, the classifier state/questions,
+`body.py`, the sent-mail search (`Gmail.has_written_to`, `sent_scan.py`, `scan_rows.py`),
+`config.py` (`FREE_MAIL`, `PUBLIC_GROUP_HOSTS`, `group_domains` / `act_categories` /
 `archive_group_reply_keep_probability` validation, the `Settings` defaults `MODE`, `LOOKBACK`,
 `MAX_MESSAGES_PER_RUN`, `MAX_UNSUBSCRIBES_PER_RUN`, `BODY_CHARS`) or the `cli.py` commands
 `restore`, `reprocess`, `rules set` / `rules delete`, `unsubscribe-retry`, check that

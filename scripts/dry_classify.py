@@ -22,7 +22,7 @@ from pathlib import Path
 from sqlalchemy import Engine, create_engine, make_url, select
 from sqlalchemy.orm import Session
 
-from inbox_jev import rules, triage
+from inbox_jev import jev_guard, rules, triage
 from inbox_jev.classification import Classification
 from inbox_jev.classifier import Classifier, JevError, JevState, describe_jev_error
 from inbox_jev.config import (
@@ -68,7 +68,7 @@ def _outcome(decision: Decision) -> str:
 class _CountingClassifier:
     """`classifier` counting the calls made to it, failed ones included."""
 
-    classifier: triage.Classifies
+    classifier: jev_guard.Classifies
     calls: int = 0
 
     def classify(self, state: JevState) -> Classification:
@@ -82,7 +82,7 @@ class Checker:
 
     session: Session
     gmail: triage.GmailApi
-    classifier: triage.Classifies
+    classifier: jev_guard.Classifies
     cfg: CategoriesConfig
     account: Account
     mode: Mode  # the sent-mail search on rules depends on it

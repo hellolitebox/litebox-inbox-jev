@@ -193,7 +193,7 @@ def test_process_reads_the_sender_rules_once_per_email(setup):
 
 
 @pytest.mark.parametrize("via_rule", [False, True], ids=["jev", "rule"])
-def test_email_row_is_flushed_before_the_unsubscribe_request(setup, monkeypatch, via_rule):
+def test_email_row_is_flushed_before_the_unsubscribe_request(setup, via_rule):
     # The unsubscribe is irreversible: the email's row is written (taking SQLite's write lock)
     # before the request, so a locked DB fails the email before unsubscribing, not after.
     ctx, gmail, account = setup
@@ -212,10 +212,10 @@ def test_email_row_is_flushed_before_the_unsubscribe_request(setup, monkeypatch,
 
     def spy(sig, send_mail):
         at_unsubscribe.append(list(written))
-        return real_unsubscribe(sig, send_mail=send_mail)
+        return real_unsubscribe(sig, send_mail)
 
-    real_unsubscribe = triage.unsub.unsubscribe
-    monkeypatch.setattr(triage.unsub, "unsubscribe", spy)
+    real_unsubscribe = ctx.unsubscriber
+    ctx.unsubscriber = spy
     engine = ctx.sessions.kw["bind"]
     event.listen(engine, "before_cursor_execute", record)
     try:

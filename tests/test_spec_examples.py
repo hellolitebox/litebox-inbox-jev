@@ -35,8 +35,9 @@ from typesafe_sdk import (
     TypeSafeUnprocessableEntityError,
 )
 
-from inbox_jev import digest, rules, triage
+from inbox_jev import digest, jev_guard, rules, scan_rows, triage
 from inbox_jev import unsubscribe as unsub
+from inbox_jev.body import extract_body
 from inbox_jev.classification import Classification, PreviousContact
 from inbox_jev.classifier import build_state
 from inbox_jev.config import Account, DigestLanguage, Mode, Settings
@@ -48,9 +49,10 @@ from inbox_jev.db import (
     SentDomainScan,
     Unsubscribe,
 )
-from inbox_jev.gmail import NEVER_VERDICT_TTL, Email, extract_body
+from inbox_jev.gmail import Email
 from inbox_jev.policy import decide, plan
 from inbox_jev.rules import RuleSource
+from inbox_jev.sent_scan import NEVER_VERDICT_TTL
 from inbox_jev.signals import extract, resolve_relay
 
 DOC = Path(__file__).resolve().parents[1] / "docs" / "how-it-decides.md"
@@ -92,8 +94,8 @@ def _row(ctx, gmail_id):
         return row
 
 
-def _one_click_posts(monkeypatch):
-    """Route one-click POSTs to a mock transport (no network, no DNS) and record them."""
+def _one_click_posts(ctx):
+    """Route `ctx`'s one-click POSTs to a mock transport (no network, no DNS) and record them."""
     posts = []
     real = unsub.unsubscribe
 
@@ -107,7 +109,7 @@ def _one_click_posts(monkeypatch):
         with httpx.Client(transport=httpx.MockTransport(handler)) as client:
             return real(sig, send_mail, client=client, url_guard=lambda url: ["93.184.216.34"])
 
-    monkeypatch.setattr(triage.unsub, "unsubscribe", fake)
+    ctx.unsubscriber = fake
     return posts
 
 
@@ -247,21 +249,21 @@ def _sequence_email(id="1"):
     )
 
 
-def _run_sequence(spec, monkeypatch, written=frozenset()):
+def _run_sequence(spec, written=frozenset()):
     ctx, gmail, account = spec
     gmail.written = written
     gmail.emails = {"1": _sequence_email()}
     ctx.classifier.answers["Re: quick question about your pipeline"] = answer(
         "cold_outreach", cold_outreach=0.96, marketing=0.04
     )
-    posts = _one_click_posts(monkeypatch)
+    posts = _one_click_posts(ctx)
     triage.run_account(ctx, account, Mode.ACT)
     return ctx, gmail, posts
 
 
-def test_ex04_stranger_sequence_is_archived_and_unsubscribed(spec, monkeypatch):
+def test_ex04_stranger_sequence_is_archived_and_unsubscribed(spec):
     """EX-04 (docs/how-it-decides.md §5, §3.3 unsubscribe conditions, §4.3 one-click)."""
-    ctx, gmail, posts = _run_sequence(spec, monkeypatch)
+    ctx, gmail, posts = _run_sequence(spec)
     assert gmail.written_queries == ["sam@growthagency.example", "growthagency.example"]
     assert ctx.classifier.states[0]["previous_contact"] == "never"
     assert gmail.modified[-1][2] == ["INBOX"]
@@ -277,11 +279,9 @@ def test_ex04_stranger_sequence_is_archived_and_unsubscribed(spec, monkeypatch):
         )
 
 
-def test_ex05_known_contact_sequence_is_archived_only(spec, monkeypatch):
+def test_ex05_known_contact_sequence_is_archived_only(spec):
     """EX-05 (docs/how-it-decides.md §5, §3.3 condition 5, §4.1 previous_contact)."""
-    ctx, gmail, posts = _run_sequence(
-        spec, monkeypatch, written=frozenset({"sam@growthagency.example"})
-    )
+    ctx, gmail, posts = _run_sequence(spec, written=frozenset({"sam@growthagency.example"}))
     assert ctx.classifier.states[0]["previous_contact"] == "wrote_to_sender"
     assert gmail.modified[-1][2] == ["INBOX"]
     assert posts == [] and gmail.sent == []
@@ -303,7 +303,7 @@ def test_ex05_known_contact_sequence_is_archived_only(spec, monkeypatch):
 # --- EX-06 -----------------------------------------------------------------------------------
 
 
-def test_ex06_pitch_via_own_group_uses_author_and_never_unsubscribes(spec, monkeypatch):
+def test_ex06_pitch_via_own_group_uses_author_and_never_unsubscribes(spec):
     """EX-06 (docs/how-it-decides.md §5, §3.4 groups, §4.5 X-Original-Sender trust)."""
     ctx, gmail, account = spec
     account.allow_domains = ["example.com"]
@@ -321,7 +321,7 @@ def test_ex06_pitch_via_own_group_uses_author_and_never_unsubscribes(spec, monke
         )
     }
     ctx.classifier.answers["Partnership idea"] = answer("cold_outreach", cold_outreach=0.97)
-    posts = _one_click_posts(monkeypatch)
+    posts = _one_click_posts(ctx)
     triage.run_account(ctx, account, Mode.ACT)
 
     state = ctx.classifier.states[0]  # allow_domains matched the author, not the group
@@ -683,7 +683,7 @@ def test_ex16_archive_group_respects_category_thresholds(cfg, account):
 # --- EX-17 -----------------------------------------------------------------------------------
 
 
-def test_ex17_no_gmail_authentication_results_is_unverified(spec, monkeypatch):
+def test_ex17_no_gmail_authentication_results_is_unverified(spec):
     """EX-17 (docs/how-it-decides.md §5, §4.2 DMARC, §3.3 condition 3)."""
     ctx, gmail, account = spec
     gmail.emails = {
@@ -697,7 +697,7 @@ def test_ex17_no_gmail_authentication_results_is_unverified(spec, monkeypatch):
         )
     }
     ctx.classifier.answers["Flash sale"] = answer("marketing", marketing=0.97)
-    posts = _one_click_posts(monkeypatch)
+    posts = _one_click_posts(ctx)
     triage.run_account(ctx, account, Mode.ACT)
 
     assert gmail.modified[-1][2] == ["INBOX"] and "SPAM" not in gmail.modified[-1][1]
@@ -781,7 +781,7 @@ def test_ex21_revoked_jev_key_stops_jev_but_not_rules(spec):
     with ctx.sessions() as s:
         rules.set_rule(s, account.email, "news@weekly.example", "newsletter", RuleSource.MANUAL)
         s.commit()
-    with pytest.raises(triage.JevUnavailable):
+    with pytest.raises(jev_guard.JevUnavailable):
         triage.run_account(ctx, account, Mode.ACT)
 
     assert jev.calls == 1  # Sam's email; nothing more is sent to Jev in this pass
@@ -821,7 +821,7 @@ def test_ex22_jev_down_stops_after_three_failures(spec):
     }
     jev = JevFails(TypeSafeAPITimeoutError(30.0))
     ctx = triage.Context(ctx.settings, ctx.cfg, ctx.sessions, ctx.gmail, classifier=jev)
-    with pytest.raises(triage.JevUnavailable):
+    with pytest.raises(jev_guard.JevUnavailable):
         triage.run_account(ctx, account, Mode.ACT)
 
     assert jev.calls == 3
@@ -984,7 +984,7 @@ def test_doc_examples_match_tests():
 # --- EX-26 -----------------------------------------------------------------------------------
 
 
-def test_ex26_writing_to_a_friend_on_country_free_mail_makes_no_known_contact(spec, monkeypatch):
+def test_ex26_writing_to_a_friend_on_country_free_mail_makes_no_known_contact(spec):
     """EX-26 (docs/how-it-decides.md §5, §4.7 previous_contact, config.FREE_MAIL)."""
     ctx, gmail, account = spec
     # I wrote to my cousin at hotmail.com.ar: a domain search would say "yes" for anyone there.
@@ -999,7 +999,7 @@ def test_ex26_writing_to_a_friend_on_country_free_mail_makes_no_known_contact(sp
         )
     }
     ctx.classifier.answers["Escalá tus ventas"] = answer("cold_outreach", cold_outreach=0.96)
-    posts = _one_click_posts(monkeypatch)
+    posts = _one_click_posts(ctx)
     triage.run_account(ctx, account, Mode.ACT)
 
     assert gmail.written_queries == ["growth.lead@hotmail.com.ar"]  # no domain search
@@ -1051,7 +1051,7 @@ def test_ex28_jev_refusing_everything_gives_no_email_up(spec):
     }
     jev = JevFails(jev_http_error(TypeSafeUnprocessableEntityError, 422))
     ctx = triage.Context(ctx.settings, ctx.cfg, ctx.sessions, ctx.gmail, classifier=jev)
-    with pytest.raises(triage.JevUnavailable):
+    with pytest.raises(jev_guard.JevUnavailable):
         triage.run_account(ctx, account, Mode.ACT)
 
     assert jev.calls == 2  # Invoice 7 and Sam's pitch; nothing more is sent
@@ -1138,7 +1138,7 @@ def test_ex30_two_emails_jev_refuses_dont_hold_up_the_rest(spec):
     for passes in (1, 2, 3):  # every 10 minutes: both copies are due again and stop the pass
         if passes > 1:
             age_errors(ctx, 10)
-        with pytest.raises(triage.JevUnavailable, match="refused 2 requests in a row"):
+        with pytest.raises(jev_guard.JevUnavailable, match="refused 2 requests in a row"):
             triage.run_account(ctx, account, Mode.ACT)
         assert attempts() == [passes, passes]
     with ctx.sessions() as s:
@@ -1276,7 +1276,7 @@ def test_ex34_an_email_to_a_similar_address_makes_no_known_contact(spec, monkeyp
     ctx.classifier.answers["Quick question about your pipeline"] = answer(
         "cold_outreach", cold_outreach=0.96
     )
-    posts = _one_click_posts(monkeypatch)
+    posts = _one_click_posts(ctx)
     triage.run_account(ctx, account, Mode.ACT)
 
     assert svc.queries == ["in:sent to:lee@outlook.com"]  # free mail: no domain search
@@ -1310,7 +1310,7 @@ def test_ex35_a_domain_written_to_only_at_machine_addresses_is_read_in_full(
     def one_run():
         svc.queries, svc.reads = [], []
         with sessions() as s:
-            scans = triage.DomainScanRows(s, account.email)
+            scans = scan_rows.DomainScanRows(s, account.email)
             contact = triage.previous_contact(
                 sent_mail_gmail(monkeypatch, svc), account.email, sender, scans
             )
@@ -1370,7 +1370,7 @@ def _domain_runs(account, monkeypatch, svc, sessions):
     def one_run():
         svc.queries, svc.reads = [], []
         with sessions() as s:
-            scans = triage.DomainScanRows(s, account.email)
+            scans = scan_rows.DomainScanRows(s, account.email)
             contact = triage.previous_contact(
                 sent_mail_gmail(monkeypatch, svc), account.email, "sales@vendor.example", scans
             )
@@ -1421,7 +1421,7 @@ def test_ex37_a_scan_read_out_of_date_order_is_not_trusted(
     cfg, account, make_sessions, monkeypatch, caplog
 ):
     """EX-37 (docs/how-it-decides.md §5, §4.1 previous_contact, ADR 0040)."""
-    caplog.set_level("WARNING", logger="inbox_jev.gmail")
+    caplog.set_level("WARNING", logger="inbox_jev.sent_scan")
     sent = {
         "a": {"To": "bounces+a@vendor.example"},
         "b": {"To": "bounces+b@vendor.example"},

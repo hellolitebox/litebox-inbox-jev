@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterator, Sequence
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -13,11 +13,9 @@ from types import TracebackType
 from typing import Any, Literal, Protocol, Self, cast, get_args
 
 from sqlalchemy import Update, and_, or_, select, update
-from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.sql.expression import Executable
 
 from . import corrections, logs, rules
 from . import unsubscribe as unsub
@@ -27,7 +25,6 @@ from .classifier import (
     JevError,
     JevFailure,
     JevNotConfigured,
-    JevState,
     build_state,
     describe_jev_error,
     failure_kind,
@@ -39,34 +36,31 @@ from .db import (
     MessageStatus,
     Run,
     SenderRule,
-    SentDomainScan,
     Unsubscribe,
     now,
 )
 from .gmail import (
-    DomainScan,
-    DomainScans,
-    DomainVerdict,
     Email,
     is_not_found,
     is_token_refresh_error,
     token_error_detail,
 )
+from .jev_guard import Classifies, FailedEmail, JevGuard, JevStopped, JevUnavailable
 from .policy import (
     Decision,
     DecisionSource,
     Plan,
-    Veto,
     acts_on,
     decide,
     flags_only,
     is_allowed,
     plan,
     unsubscribe_gate,
-    unsubscribes,
 )
+from .scan_rows import SCAN_UPSERT_DIALECTS, DomainScanRows
+from .sent_scan import DomainScans
 from .signals import ADDRESS, Signals, domain_of, is_automated_address, resolve_relay
-from .system_labels import INBOX, SPAM, STARRED, TRASH
+from .system_labels import INBOX, SPAM, STARRED
 from .unsubscribe import UnsubscribeStatus
 
 log = logging.getLogger(__name__)
@@ -76,14 +70,6 @@ MAX_UNSUB_ATTEMPTS = 3
 # each failure) and left alone (status stays `error`) after db.MAX_ERROR_ATTEMPTS failed passes,
 # about 10.5 hours after the first one, so an outage of a few hours doesn't make it give up.
 ERROR_RETRY_BACKOFF = timedelta(minutes=5)
-# A pass stops asking Jev after this many failed calls in a row (each one already retried by the
-# SDK): Jev is down, and the rest of the emails that need it wait for the next pass instead of
-# each spending a call, its retries and one of its own error attempts.
-MAX_CONSECUTIVE_JEV_FAILURES = 3
-# Jev refusing this many calls in a row the same way (same error type and HTTP status) is taken as
-# a change on its side, not as bad emails: the pass stops asking Jev, and each refused email
-# counts an ordinary failure (backoff) instead of giving up at once (ADR 0035).
-MAX_IDENTICAL_REJECTIONS = 2
 
 
 @dataclass
@@ -106,12 +92,6 @@ class UnsubscribeBudget:
     def spend(self) -> None:
         """Count one attempt."""
         self.remaining -= 1
-
-
-class Classifies(Protocol):
-    """Anything that answers for one email's Jev state."""
-
-    def classify(self, state: JevState) -> Classification: ...
 
 
 class JevClient(Classifies, Protocol):
@@ -139,117 +119,9 @@ class GmailApi(Protocol):
 # An account's address -> a Gmail client for it (`gmail.connect` in the CLI, a fake in tests).
 # Whoever opens a client closes it when the account's work ends (`contextlib.closing`).
 GmailFactory = Callable[[str], GmailApi]
-
-
-class JevUnavailable(Exception):
-    """A pass stopped asking Jev (`JevGuard`); the message is the run's `runs.error`."""
-
-
-class _JevStopped(Exception):
-    """Raised instead of asking Jev once the pass stopped doing so: the email isn't to blame and
-    is left as it is for the next pass.
-
-    Except on the call that stopped the pass by being refused like the one before it
-    (`MAX_IDENTICAL_REJECTIONS`): `refusal` is that refusal, and its email counts an ordinary
-    failure for it (see _run_pass).
-    """
-
-    def __init__(self, refusal: JevError | None = None) -> None:
-        super().__init__()  # no args: the refusal's text can echo the email
-        self.refusal = refusal
-
-
-class JevGuard:
-    """The Jev client of one account's pass: stops calling Jev once it is clearly unusable.
-
-    A failure Jev will repeat for every email (`JevFailure.CONFIG`: key revoked, no access,
-    unknown model) stops it at once, and the email that hit it is not blamed (`_JevStopped`).
-    So do MAX_IDENTICAL_REJECTIONS refusals in a row with the same error type and HTTP status
-    (`JevFailure.REJECTED`, e.g. two 422s): Jev refuses whatever it is sent, and the refused
-    emails count an ordinary failure rather than giving up (`_JevStopped.refusal`). `_run_pass`
-    holds an email's refusal back until the next call shows which case it is (`last_rejection`).
-    Otherwise MAX_CONSECUTIVE_JEV_FAILURES failed calls in a row stop it; those failures are the
-    emails' own (stored as `error`). A successful call resets both counts. Once stopped, every
-    call raises `_JevStopped` without reaching Jev; `stopped` says why.
-    """
-
-    def __init__(
-        self, client: Classifies, account: str, limit: int = MAX_CONSECUTIVE_JEV_FAILURES
-    ) -> None:
-        self._client, self._account, self._limit = client, account, limit
-        self.consecutive_failures = 0
-        self.stopped: str | None = None
-        # The latest call's error when Jev refused it (REJECTED), else None; with the number of
-        # identical refusals in a row it ends.
-        self.last_rejection: JevError | None = None
-        self._identical_rejections = 0
-
-    def check(self) -> None:
-        """Raise `_JevStopped` if the pass no longer asks Jev (before work only Jev needs)."""
-        if self.stopped is not None:
-            raise _JevStopped
-
-    def classify(self, state: JevState) -> Classification:
-        self.check()
-        try:
-            result = self._client.classify(state)
-        except JevError as exc:
-            failure = exc
-        else:
-            self.consecutive_failures = 0
-            self.last_rejection, self._identical_rejections = None, 0
-            return result
-        # Outside the `except`, so nothing raised here chains the Jev error's text (see _run_pass).
-        self.consecutive_failures += 1
-        kind = failure_kind(failure)
-        self._track_rejection(failure if kind is JevFailure.REJECTED else None)
-        what = describe_jev_error(failure, request_id=False)
-        if kind is JevFailure.CONFIG:
-            self._stop(
-                f"Jev rejected the API key or model ({what}): check TYPESAFE_API_KEY and "
-                "TYPESAFE_MODEL; emails that need Jev wait for the next run"
-            )
-            raise _JevStopped
-        if self._identical_rejections >= MAX_IDENTICAL_REJECTIONS:
-            self._stop(
-                f"Jev refused {self._identical_rejections} requests in a row the same way "
-                f"({what}): likely a change on Jev's side; emails that need Jev wait for the "
-                "next run"
-            )
-            raise _JevStopped(refusal=failure)
-        if self.consecutive_failures >= self._limit:
-            self._stop(
-                f"Jev unavailable: {self.consecutive_failures} calls in a row failed (last: "
-                f"{what}); emails that need Jev wait for the next run"
-            )
-        raise failure
-
-    @property
-    def refusing_everything(self) -> bool:
-        """Stopped because Jev refused MAX_IDENTICAL_REJECTIONS calls in a row the same way."""
-        return self._identical_rejections >= MAX_IDENTICAL_REJECTIONS
-
-    def _track_rejection(self, rejection: JevError | None) -> None:
-        """Count `rejection` (None: the call failed another way) toward identical refusals."""
-        if rejection is None:
-            self._identical_rejections = 0
-        elif self.last_rejection is not None and _rejection_key(rejection) == _rejection_key(
-            self.last_rejection
-        ):
-            self._identical_rejections += 1
-        else:
-            self._identical_rejections = 1
-        self.last_rejection = rejection
-
-    def _stop(self, reason: str) -> None:
-        self.stopped = reason
-        self.last_rejection = None
-        log.error("stopped asking Jev", extra={"account": self._account, "reason": reason})
-
-
-def _rejection_key(exc: JevError) -> tuple[type, int | None]:
-    """What makes two refusals "the same way": the SDK error type and the HTTP status."""
-    return type(exc), getattr(exc, "status", None)
+# The irreversible unsubscribe request, given the sender's signals and a way to send mail:
+# `unsubscribe.unsubscribe`, or a spy in tests.
+Unsubscriber = Callable[[Signals, unsub.SendMail], unsub.Result]
 
 
 class Context:
@@ -259,6 +131,9 @@ class Context:
     `classifier` injects the Jev client (tests pass a fake). Without one, a `Classifier` is
     created from the settings when a `run` pass starts, which fails it (`JevNotConfigured`)
     when TYPESAFE_API_KEY is missing; commands that never ask Jev don't need the key.
+    `unsubscriber` makes the unsubscribe requests of `run` and `unsubscribe-retry`, and
+    `scan_dialects` are the databases the sent-mail scans are stored in (`DomainScanRows`);
+    tests replace them.
     Use it as a context manager (or call `close`) to close the Jev client; the caller that
     created `sessions` disposes of its engine.
     """
@@ -270,12 +145,17 @@ class Context:
         sessions: sessionmaker[Session],
         gmail: GmailFactory,
         classifier: JevClient | None = None,
+        *,
+        unsubscriber: Unsubscriber = unsub.unsubscribe,
+        scan_dialects: Collection[str] = SCAN_UPSERT_DIALECTS,
     ) -> None:
         self.settings = settings
         self.cfg = cfg
         self.sessions = sessions
         self.gmail = gmail
         self._classifier = classifier
+        self.unsubscriber = unsubscriber
+        self.scan_dialects = scan_dialects
         # (account, sender_key) of rules to removed categories already logged in this invocation.
         self.stale_rules_logged: set[tuple[str, str]] = set()
 
@@ -316,43 +196,63 @@ def run_account(
     """One pass over an account's inbox, recorded as a `Run` row.
 
     The row is committed first, so any failure (no TYPESAFE_API_KEY, an expired Gmail token,
-    Gmail or DB errors) is stored in `runs.error` with `finished_at` set, then re-raised for the
-    caller. The account is expected to have passed `config.validate_accounts` (the CLI checks the
-    whole file before any run); an `act_categories` key that isn't a category would only match
-    nothing, so that category is labeled and never acted on (fail closed).
+    Gmail or DB errors) is stored in `runs.error` with `finished_at` set, logged with its
+    traceback ("account run failed", tagged with the run's `run_id`), then re-raised for the
+    caller, which doesn't log it again. The account is expected to have passed
+    `config.validate_accounts` (the CLI checks the whole file before any run); an
+    `act_categories` key that isn't a category would only match nothing, so that category is
+    labeled and never acted on (fail closed).
     """
     mode = effective_mode(ctx.settings, account, mode_override)
     with ctx.sessions() as session:
-        run = Run(account=account.email, mode=mode)
-        session.add(run)
-        session.commit()
-        # Counted outside the ORM object: a rollback after a failed email would reset it.
-        counts = RunCounts()
-        try:
-            with logs.run_context(run.id):  # every log line of the pass carries `run_id`
-                _run_pass(ctx, session, account, mode, limit, lookback, counts)
-        except Exception as exc:
-            session.rollback()
-            run.error = describe_run_error(exc, account.email)
-            raise
-        finally:
-            run.processed, run.errors = counts.processed, counts.errors
-            run.finished_at = now()
+        with _logged_failure(account.email):  # no run_id: the row couldn't be stored
+            run = Run(account=account.email, mode=mode)
             session.add(run)
             session.commit()
-            log.info(
-                "run finished",
-                extra={
-                    "account": account.email,
-                    "run_id": run.id,
-                    "mode": mode,
-                    "processed": run.processed,
-                    "errors": run.errors,
-                    "jev_skipped": counts.jev_skipped,
-                    "failed": run.error is not None,
-                },
-            )
+        # Counted outside the ORM object: a rollback after a failed email would reset it.
+        counts = RunCounts()
+        # Every log line of the pass carries `run_id`, its failure's traceback included.
+        with logs.run_context(run.id), _logged_failure(account.email):
+            try:
+                _run_pass(ctx, session, account, mode, limit, lookback, counts)
+            except Exception as exc:
+                session.rollback()
+                run.error = describe_run_error(exc, account.email)
+                raise
+            finally:
+                _finish_run(session, run, counts)
     return run
+
+
+@contextmanager
+def _logged_failure(account: str) -> Iterator[None]:
+    """Log an exception leaving the block ("account run failed", with its traceback), then
+    re-raise it: inside `logs.run_context`, the line carries the run's `run_id`."""
+    try:
+        yield
+    except Exception:
+        log.exception("account run failed", extra={"account": account})
+        raise
+
+
+def _finish_run(session: Session, run: Run, counts: RunCounts) -> None:
+    """Store the pass's counts and end time on its row (committed) and log "run finished"."""
+    run.processed, run.errors = counts.processed, counts.errors
+    run.finished_at = now()
+    session.add(run)
+    session.commit()
+    log.info(
+        "run finished",
+        extra={
+            "account": run.account,
+            "run_id": run.id,
+            "mode": run.mode,
+            "processed": run.processed,
+            "errors": run.errors,
+            "jev_skipped": counts.jev_skipped,
+            "failed": run.error is not None,
+        },
+    )
 
 
 def _run_pass(
@@ -365,7 +265,8 @@ def _run_pass(
     counts: RunCounts,
 ) -> None:
     jev = JevGuard(ctx.classifier, account.email)  # no API key: fails before touching Gmail
-    scans = DomainScanRows(session, account.email)  # a database without the upsert: likewise
+    # A database without the upsert: likewise.
+    scans = DomainScanRows(session, account.email, dialects=ctx.scan_dialects)
     with closing(ctx.gmail(account.email)) as gmail:
         label_ids = gmail.ensure_labels(ctx.cfg.all_labels()) if mode != Mode.DRY_RUN else {}
         if mode != Mode.DRY_RUN:
@@ -379,83 +280,57 @@ def _run_pass(
         account_pass = AccountPass(
             ctx, session, gmail, account, mode, label_ids, budget, jev, scans
         )
-        held: _HeldRejection | None = None  # an email Jev refused, until the next call says why
-        for message_id in ids:
-            if message_id in skip:
-                continue
-            # The failure is handled after the `try`, not in its `except`: an error raised
-            # while handling it (the rollback, `_record_error`'s commit) would otherwise chain a
-            # Jev error, whose text can echo the email, into the traceback the caller logs.
-            failure: Exception | None = None
-            try:
-                process(account_pass, message_id)
-            except Exception as exc:
-                failure = exc
-            else:
-                counts.processed += 1
-            if failure is not None:
-                session.rollback()
-            if held is not None and jev.last_rejection is not held.failure:
-                _settle_rejection(account_pass, held, counts)  # a later Jev call says whose fault
-                held = None
-            if failure is None:
-                continue
-            if isinstance(failure, _JevStopped):
-                if failure.refusal is None:  # needed Jev after the pass stopped asking it
-                    counts.jev_skipped += 1  # untouched
-                else:  # refused like the email before it, which stopped the pass
-                    refusal = failure.refusal
-                    _fail(
-                        account_pass, message_id, refusal, account_pass.fetched, counts, alone=False
-                    )
-                continue
-            if is_token_refresh_error(failure):
-                # Token refresh failed: fail the run, don't count it against the email.
-                raise failure
-            rejection = jev.last_rejection
-            if rejection is not None and failure is rejection:  # this email, or Jev refusing all?
-                held = _HeldRejection(message_id, rejection, account_pass.fetched)
-                continue
-            _fail(account_pass, message_id, failure, account_pass.fetched, counts)
-        if held is not None:  # no later call: Jev refused only this email as far as anyone knows
-            _settle_rejection(account_pass, held, counts)
+        try:
+            _process_all(account_pass, [i for i in ids if i not in skip], counts)
+        finally:
+            counts.jev_skipped = jev.skipped
         if jev.stopped is not None:
             raise JevUnavailable(jev.stopped)
 
 
-@dataclass(frozen=True)
-class _HeldRejection:
-    """An email whose Jev call was refused (`JevFailure.REJECTED`), not stored yet: if the next
-    Jev call is refused the same way, Jev refuses everything and the email doesn't give up."""
+def _process_all(p: AccountPass, ids: list[str], counts: RunCounts) -> None:
+    """Process each email in turn (`_attempt`). A failure is stored as `JevGuard.blame` and
+    `JevGuard.settle_held` say (`_fail`) and the pass goes on, except a Gmail token that can't
+    refresh, which fails the run without counting against the email."""
+    jev = p.jev
+    for message_id in ids:
+        failure = _attempt(p, message_id, counts)
+        if (held := jev.settle_held()) is not None:  # a later Jev call says whose fault it was
+            _fail(p, held, counts)
+        if failure is None:
+            continue
+        if is_token_refresh_error(failure):
+            raise failure
+        if (failed := jev.blame(message_id, failure, p.fetched)) is not None:
+            _fail(p, failed, counts)
+    if (held := jev.finish()) is not None:
+        _fail(p, held, counts)
 
-    message_id: str
-    failure: JevError
-    email: Email | None  # as `process` read it, for the error row
 
+def _attempt(p: AccountPass, message_id: str, counts: RunCounts) -> Exception | None:
+    """Process one email (`process`): None when it succeeded, else what it raised, its changes
+    rolled back.
 
-def _settle_rejection(p: AccountPass, held: _HeldRejection, counts: RunCounts) -> None:
-    """Store a held refusal once the next Jev call (or the pass's end) says whose fault it was.
-
-    Jev refusing every call the same way (`JevGuard.refusing_everything`): an ordinary failure,
-    retried after the backoff like a timeout, so two emails Jev really refuses can't stop every
-    pass before the emails behind them. Otherwise it was this email: it gives up at once.
+    The failure is returned, not handled in the `except`: an error raised while handling it (the
+    rollback, `_record_error`'s commit) would otherwise chain a Jev error, whose text can echo
+    the email, into the traceback the caller logs.
     """
-    alone = not p.jev.refusing_everything
-    _fail(p, held.message_id, held.failure, held.email, counts, alone=alone)
+    try:
+        process(p, message_id)
+    except Exception as exc:
+        failure = exc
+    else:
+        counts.processed += 1
+        return None
+    p.session.rollback()
+    return failure
 
 
-def _fail(
-    p: AccountPass,
-    message_id: str,
-    failure: Exception,
-    email: Email | None,
-    counts: RunCounts,
-    *,
-    alone: bool = True,
-) -> None:
-    """Store `message_id` as failed (`_record_error`, committed) and log it."""
+def _fail(p: AccountPass, failed: FailedEmail, counts: RunCounts) -> None:
+    """Store a failed email (`_record_error`, committed) and log it."""
     counts.errors += 1
-    _record_error(p, message_id, failure, email, alone=alone)
+    message_id, failure = failed.message_id, failed.failure
+    _record_error(p, message_id, failure, failed.email, alone=failed.alone)
     account = p.account.email
     if isinstance(failure, JevError):  # its text can echo the email: type and status only
         log.warning(
@@ -678,7 +553,8 @@ class AccountPass:
             self.account,
             self.mode,
             self.ctx.settings.body_chars,
-            self.scans,
+            scans=self.scans,
+            guard=self.jev,
         )
 
 
@@ -688,7 +564,7 @@ class AccountPass:
 Stage = Literal["fetch", "lookup", "jev", "apply"]
 
 
-class _StageTimer:
+class StageTimer:
     """Milliseconds spent in each `Stage` while one email is processed. A stage entered more
     than once adds up; one never entered stays 0."""
 
@@ -715,23 +591,23 @@ def process(p: AccountPass, message_id: str) -> Message:
     sender's rules once (`rules.load`: the rule that decides, `rule_for`, and the row an auto
     rule is learned on); gather Jev's answer and the sent-mail search (`gather_inputs`);
     decide and plan (`policy`, pure); apply the labels in Gmail and store the outcome; learn an
-    auto rule; unsubscribe within the run cap. Raises `_JevStopped`, before changing anything,
+    auto rule; unsubscribe within the run cap. Raises `JevStopped`, before changing anything,
     when the email needs Jev's decision and `p.jev` has stopped.
     """
     ctx, session, account, mode = p.ctx, p.session, p.account, p.mode
-    timer = _StageTimer()
+    timer = StageTimer()
     p.fetched = None
     with timer.stage("fetch"):
         email = p.gmail.get(message_id)
     p.fetched = email
     sig = signals_for(email, account)
-    prev = _find_message(session, account.email, message_id)
+    prev = find_message(session, account.email, message_id)
     counted_before = _counted_toward_auto_rule(prev)
     if prev is not None:
         prev.sender = sig.sender  # rows stored before group authors were recovered
         # In dry_run, or before any label of ours is in Gmail (labels_added), nothing to compare.
         if mode != Mode.DRY_RUN and prev.labels_added:
-            current = _current_label_names(email, p.label_ids)
+            current = current_label_names(email, p.label_ids)
             _learn_correction(ctx.cfg, session, account, prev, current)
             if _user_edited(ctx.cfg, account, prev, current):
                 return _leave_alone(session, prev, mode)
@@ -739,7 +615,7 @@ def process(p: AccountPass, message_id: str) -> Message:
     with timer.stage("lookup"):
         known = rules.load(session, account.email, sig.sender)
         rule = rule_for(ctx, account, known)
-    list_row = _ListRow(session, account.email, sig.list_key)
+    list_row = ListRow(session, account.email, sig.list_key)
     inputs = gather_inputs(p.sources, email, sig, rule, list_row=list_row, timer=timer)
     decision = decide(
         ctx.cfg,
@@ -759,7 +635,7 @@ def process(p: AccountPass, message_id: str) -> Message:
         if (
             actions.unsubscribe
             and not p.unsub_budget.exhausted
-            and _unsubscribe(session, p.gmail, account, email, sig, list_row)
+            and _unsubscribe(p, email, sig, list_row)
         ):
             p.unsub_budget.spend()
         session.commit()
@@ -771,9 +647,10 @@ def process(p: AccountPass, message_id: str) -> Message:
 class InputSources:
     """What `gather_inputs` reads one account's inputs from.
 
-    `run` builds it from its pass (`AccountPass.sources`: Jev through the pass's `JevGuard`, the
-    sent-mail scans in the DB); `scripts/dry_classify.py` from its read-only clients (the bare
-    `Classifier`, no `scans`: the domain search's progress lasts as long as `gmail`).
+    `run` builds it from its pass (`AccountPass.sources`: Jev through the pass's `JevGuard`, also
+    given as `guard`, and the sent-mail scans in the DB); `scripts/dry_classify.py` from its
+    read-only clients (the bare `Classifier`, no `guard`, no `scans`: the domain search's
+    progress lasts as long as `gmail`).
     """
 
     cfg: CategoriesConfig
@@ -784,6 +661,9 @@ class InputSources:
     mode: Mode  # the rule path's sent-mail search depends on it
     body_chars: int
     scans: DomainScans | None = None
+    # The pass's guard when `classifier` is one: once it has stopped asking Jev, an email Jev
+    # would decide gets no sent-mail search either (`JevStopped`).
+    guard: JevGuard | None = None
 
 
 @dataclass(frozen=True)
@@ -800,7 +680,7 @@ class Inputs:
         return self.rule.category if self.rule else None
 
 
-class _ListRow:
+class ListRow:
     """An email's row in the Unsubscribe table, read at most once while the email is processed.
 
     Both the rule path's sent-mail check (`_rule_needs_contact`) and the unsubscribe step
@@ -836,25 +716,25 @@ def gather_inputs(
     sig: Signals,
     rule: SenderRule | None,
     *,
-    list_row: _ListRow | None = None,
-    timer: _StageTimer | None = None,
+    list_row: ListRow | None = None,
+    timer: StageTimer | None = None,
 ) -> Inputs:
     """Jev's answer and the sent-mail search for an email with sender rule `rule`, each only
     where it can matter. `run` and `scripts/dry_classify.py` both call it, so the script makes
     the same calls as a pass.
 
     No allowlist entry and no rule: Jev decides, told whether I wrote to the sender (neither is
-    asked once a pass's `JevGuard` has stopped: `_JevStopped`). The allowlist or a rule to a
+    asked once a pass's `JevGuard` has stopped: `JevStopped`). The allowlist or a rule to a
     keep category (`policy.flags_only`): Jev only for the flags, no search. Any other rule: the
     search only if it could stop an unsubscribe (`_rule_needs_contact`, on `list_row`, which
     `process` reuses to unsubscribe; read here when not given). `timer` times the stages.
     Raises `JevError` when Jev decides the email and the call fails.
     """
     account, gmail = src.account, src.gmail
-    timer = timer or _StageTimer()
+    timer = timer or StageTimer()
     if not is_allowed(account, sig) and rule is None:
-        if isinstance(src.classifier, JevGuard):
-            src.classifier.check()  # no sent-mail search for an email Jev won't decide
+        if src.guard is not None:
+            src.guard.check()  # no sent-mail search for an email Jev won't decide
         with timer.stage("lookup"):
             contact = previous_contact(gmail, account.email, sig.sender, src.scans)
         with timer.stage("jev"):
@@ -867,7 +747,7 @@ def gather_inputs(
             flags = flags_classification(src.classifier, email, account, src.body_chars, sig)
         return Inputs(rule, flags, None)
     if rule is not None:
-        list_row = list_row or _ListRow(src.session, account.email, sig.list_key)
+        list_row = list_row or ListRow(src.session, account.email, sig.list_key)
         with timer.stage("lookup"):
             if _rule_needs_contact(src.cfg, account, sig, rule.category, src.mode, list_row):
                 contact = previous_contact(gmail, account.email, sig.sender, src.scans)
@@ -966,7 +846,7 @@ def _log_processed(
     inputs: Inputs,
     decision: Decision,
     actions: Plan,
-    timer: _StageTimer,
+    timer: StageTimer,
 ) -> None:
     """The "message processed" line: what was decided and applied, and how long each stage took
     (`timings_ms`). Metadata only, never the email's content."""
@@ -1004,11 +884,11 @@ def flags_classification(
     """
     try:
         return classifier.classify(build_state(email, account.email, body_chars, None, sig))
-    except _JevStopped:
+    except JevStopped:
         return None  # the run's error and the "stopped asking Jev" log line say why
     except JevError as exc:
         failure = exc
-    # Outside the `except`, so nothing raised here chains the Jev error's text (see _run_pass).
+    # Outside the `except`, so nothing raised here chains the Jev error's text (see _attempt).
     log.warning(
         "flags-only Jev call failed",
         extra={
@@ -1087,100 +967,6 @@ def backfill_senders(session: Session, gmail: GmailApi, account: Account) -> tup
     return len(rows), updated, skipped
 
 
-class DomainScanRows:
-    """An account's sent-mail domain scans (`gmail.DomainScans`) in `sent_domain_scans`.
-
-    On the caller's session and never committed here: a scan is saved with the email it was
-    made for (a rolled-back email loses it, and the next check reads those emails again). Its
-    own session would wait on the pass's write lock in SQLite.
-
-    `save` is an upsert, so a row another process inserted since `load` (`run` and
-    `unsubscribe-retry` checking the same new domain) can't fail the commit with a unique
-    conflict: the last scan saved wins, except over a `person` made under the same rules, which
-    stays (it is final). Either scan is gap-free on its own, so the next check goes on from it.
-    """
-
-    def __init__(self, session: Session, account: str) -> None:
-        # Checked here, not at the first save: `previous_contact` must not reach a domain
-        # verdict it then can't store (its caller would see an unknown contact, no veto).
-        self._dialect = session.get_bind().dialect.name
-        _require_scan_upsert(self._dialect)
-        self._session, self._account = session, account
-
-    def load(self, domain: str) -> DomainScan | None:
-        # populate_existing: `save` writes with Core, so a row already in the session is stale.
-        row = self._session.scalar(
-            select(SentDomainScan)
-            .where(SentDomainScan.account == self._account, SentDomainScan.domain == domain)
-            .execution_options(populate_existing=True)
-        )
-        if row is None:
-            return None
-        return DomainScan(
-            domain=row.domain,
-            rules=row.rules,
-            verdict=DomainVerdict(row.verdict),
-            verdict_at=_utc(row.verdict_at),
-            newest_s=row.newest_s,
-            newest_ids=list(row.newest_ids or []),
-            oldest_s=row.oldest_s,
-            oldest_ids=list(row.oldest_ids or []),
-            reached_end=row.reached_end,
-            read=row.read,
-        )
-
-    def save(self, scan: DomainScan) -> None:
-        self._session.execute(scan_upsert(self._dialect, self._account, scan))
-
-
-# The databases with the ON CONFLICT upsert `scan_upsert` writes: the ones the app documents.
-_SCAN_UPSERT_DIALECTS = ("sqlite", "postgresql")
-
-
-def _require_scan_upsert(dialect: str) -> None:
-    """Raise NotImplementedError on a database `scan_upsert` has no statement for."""
-    if dialect not in _SCAN_UPSERT_DIALECTS:
-        raise NotImplementedError(f"no upsert for sent_domain_scans on {dialect}")
-
-
-def scan_upsert(dialect: str, account: str, scan: DomainScan) -> Executable:
-    """The statement `DomainScanRows.save` runs: insert the scan, or update the account's row
-    for its domain unless that row is a `person` made under the same rules. ON CONFLICT exists
-    in the databases the app documents, SQLite and Postgres."""
-    _require_scan_upsert(dialect)
-    insert: sqlite.Insert | postgresql.Insert
-    if dialect == "sqlite":
-        insert = sqlite.insert(SentDomainScan)
-    else:
-        insert = postgresql.insert(SentDomainScan)
-    values = {
-        "rules": scan.rules,
-        "verdict": scan.verdict.value,
-        "verdict_at": scan.verdict_at,
-        "newest_s": scan.newest_s,
-        "newest_ids": list(scan.newest_ids),
-        "oldest_s": scan.oldest_s,
-        "oldest_ids": list(scan.oldest_ids),
-        "reached_end": scan.reached_end,
-        "read": scan.read,
-        "updated_at": now(),
-    }
-    insert = insert.values(account=account, domain=scan.domain, **values)
-    stored = SentDomainScan
-    return insert.on_conflict_do_update(
-        index_elements=[stored.account, stored.domain],
-        set_=values,
-        where=or_(
-            stored.verdict != DomainVerdict.PERSON.value, stored.rules != insert.excluded.rules
-        ),
-    )
-
-
-def _utc(at: datetime | None) -> datetime | None:
-    """`at` as an aware UTC datetime: SQLite returns naive ones (stored as UTC)."""
-    return at.replace(tzinfo=UTC) if at is not None and at.tzinfo is None else at
-
-
 def previous_contact(
     gmail: GmailApi, account: str, sender: str, scans: DomainScans | None = None
 ) -> PreviousContact | None:
@@ -1232,12 +1018,12 @@ def _learn_correction(
 
 
 def _user_edited(cfg: CategoriesConfig, account: Account, msg: Message, current: set[str]) -> bool:
-    """Whether the user edited an email labeled by an earlier pass (`_user_edit`), logged.
+    """Whether the user edited an email labeled by an earlier pass (`user_edit`), logged.
 
     Read-only: `process` records any correction first (`_learn_correction`), so a corrected
     email is only handed off when starred.
     """
-    edit = _user_edit(cfg, msg, current)
+    edit = user_edit(cfg, msg, current)
     if edit is None:
         return False
     reason, labels = edit
@@ -1248,7 +1034,7 @@ def _user_edited(cfg: CategoriesConfig, account: Account, msg: Message, current:
     return True
 
 
-def _current_label_names(email: Email, label_ids: dict[str, str]) -> set[str]:
+def current_label_names(email: Email, label_ids: dict[str, str]) -> set[str]:
     """The email's current Gmail labels by name, from `label_ids` (name -> id).
 
     An id missing from `label_ids` is kept as is: system labels' ids are their names.
@@ -1257,7 +1043,7 @@ def _current_label_names(email: Email, label_ids: dict[str, str]) -> set[str]:
     return {names.get(i, i) for i in email.label_ids}
 
 
-def _user_edit(
+def user_edit(
     cfg: CategoriesConfig, msg: Message, current: set[str]
 ) -> tuple[str, list[str]] | None:
     """How the user edited an email we labeled, from its current label names, or None. Pure.
@@ -1284,7 +1070,7 @@ def _rule_needs_contact(
     sig: Signals,
     category: str,
     mode: Mode,
-    list_row: _ListRow,
+    list_row: ListRow,
 ) -> bool:
     """A rule hit that would unsubscribe unless I wrote to the sender: worth the Gmail searches.
 
@@ -1301,185 +1087,6 @@ def _rule_needs_contact(
     return not _unsub_settled(list_row.get())
 
 
-def retry_unsubscribes(
-    ctx: Context, session: Session, gmail: GmailApi, account: Account
-) -> list[tuple[str, str]]:
-    """Retry `failed` unsubscribes with the checks `run` applies. Returns (list, outcome) pairs.
-
-    Before any Gmail call: the stored email must exist and not be restored or corrected by the
-    user, the mode must be act and the run cap (MAX_UNSUBSCRIBES_PER_RUN per call) not reached.
-    After fetching the email: it must not be reported as spam or in the trash, show a correction
-    in its live labels (Jev label changed, pulled back to the inbox) or any edit `run` leaves
-    alone (`_user_edit`: starred, a label of ours removed, another of our labels added). Its
-    category is the current sender rule's, else the stored one, which must be an unsubscribing
-    category in `act_categories`. A stored category that a rule decided needs that rule to still
-    exist (`run` would ask Jev again otherwise); a stored Jev category needs its current
-    confidence threshold (account override included) and must not be low-confidence. The sender
-    (resolved, group author) must pass `policy.unsubscribe_gate` (not allowlisted, DMARC +
-    List-Unsubscribe, not a group or own list) and, for categories that spare known contacts,
-    the sent-mail search must say I never wrote to them.
-
-    Rows that the user or the sender ruled out (restored, corrected, reported as spam, trashed,
-    starred or relabeled, a rule to a keep category, allowlisted, group, unverified, known
-    contact) become `skipped`, so `run` won't retry them either. Rows held back by settings or
-    transient state (mode, act_categories, a removed rule, confidence, the cap, a failed sent-mail
-    search, a deleted email, no stored message) are left as they are.
-
-    Raises `NotImplementedError` before reading any row or calling Gmail on a database without
-    the sent-mail scan upsert (`DomainScanRows`), as `run` does at the start of its pass.
-    """
-    scans = DomainScanRows(session, account.email)  # a database without the upsert: fails here
-    mode = effective_mode(ctx.settings, account, None)
-    rows = session.scalars(
-        select(Unsubscribe).where(
-            Unsubscribe.account == account.email,
-            Unsubscribe.status == UnsubscribeStatus.FAILED,
-            Unsubscribe.attempts < MAX_UNSUB_ATTEMPTS,
-        )
-    ).all()
-    if mode != Mode.ACT:
-        return [(row.list_key, f"held: mode is {mode}") for row in rows]
-    budget = UnsubscribeBudget(ctx.settings.max_unsubscribes_per_run)
-    out: list[tuple[str, str]] = []
-    for row in rows:
-        out.append(_retry_one(ctx, session, gmail, account, mode, row, budget, scans))
-    session.commit()  # the sent-mail scans of rows held back (DomainScanRows)
-    return out
-
-
-def _retry_one(
-    ctx: Context,
-    session: Session,
-    gmail: GmailApi,
-    account: Account,
-    mode: Mode,
-    row: Unsubscribe,
-    budget: UnsubscribeBudget,
-    scans: DomainScanRows,
-) -> tuple[str, str]:
-    """One failed unsubscribe through `retry_unsubscribes`' checks, in order: (list, outcome)."""
-    msg = _find_message(session, account.email, row.gmail_id)
-    if msg is None:
-        return row.list_key, "held: no stored message"
-    if reason := _stored_user_decision(msg):
-        return _skip(session, row, reason)
-    if budget.exhausted:
-        return row.list_key, "held: run cap reached"
-    try:
-        email = gmail.get(row.gmail_id)
-    except Exception as exc:
-        if is_not_found(exc):
-            return row.list_key, "held: email deleted in Gmail"
-        raise
-    current = _current_label_names(email, gmail.labels())
-    sig = signals_for(email, account)
-    rule = rule_for(ctx, account, rules.load(session, account.email, sig.sender))
-    rule_category = rule.category if rule else None
-    if reason := _live_user_decision(ctx.cfg, msg, current, rule_category):
-        return _skip(session, row, reason)
-    category = rule_category or msg.category
-    if (
-        category is None
-        or not unsubscribes(ctx.cfg, category)
-        or not acts_on(mode, account.act_categories, category)
-    ):
-        return row.list_key, f"held: category {category} doesn't unsubscribe here"
-    if rule_category is None and (held := _stale_decision(ctx.cfg, account, msg, category)):
-        return row.list_key, f"held: {held}"
-    gate = unsubscribe_gate(ctx.cfg, account, sig, category, previous_contact=None)
-    if gate.allowed and gate.contact_unknown:
-        contact = previous_contact(gmail, account.email, sig.sender, scans)
-        if contact is None:  # stricter than run: nothing in a manual retry is urgent
-            return row.list_key, "held: sent-mail search failed"
-        gate = unsubscribe_gate(ctx.cfg, account, sig, category, contact)
-    if gate.veto is not None:
-        return _skip(session, row, _retry_skip_reason(gate.veto))
-    # Take SQLite's write lock before the irreversible request, so a locked DB (e.g. `run`
-    # holding it) fails this row before it unsubscribes rather than rolling back the attempt's
-    # row after. The flush needs a write to take the lock: the row may have nothing pending
-    # (no sent-mail search, a cached verdict, or nothing new to save), so stamp the attempt's
-    # time now; `record_attempt` sets it again after the request.
-    row.attempted_at = now()
-    session.flush()
-    result = unsub.unsubscribe(sig, send_mail=gmail.send)
-    record_attempt(row, result)
-    session.commit()
-    budget.spend()
-    return row.list_key, result.status
-
-
-def _stored_user_decision(msg: Message) -> str | None:
-    """Why the stored row rules a retry out (restored or corrected by the user), or None."""
-    if msg.restored:
-        return "restored by the user"
-    if msg.corrected_category is not None:
-        return f"corrected to {msg.corrected_category}"
-    return None
-
-
-def _live_user_decision(
-    cfg: CategoriesConfig, msg: Message, current: set[str], rule_category: str | None
-) -> str | None:
-    """Why the email's live labels or the current sender rule rule a retry out, or None.
-
-    Reported as spam (unsubscribing would confirm the address), in the trash, a correction
-    (`corrections.detect`), any edit `run` leaves alone (`_user_edit`), or a sender rule to a
-    category that doesn't unsubscribe.
-    """
-    if SPAM in current:
-        return "reported as spam"
-    if TRASH in current:
-        return "in the trash"
-    if corrected := corrections.detect(msg, current, cfg):
-        return f"corrected in Gmail to {corrected}"
-    if edit := _user_edit(cfg, msg, current):
-        what, labels = edit
-        return f"label {what} in Gmail: {', '.join(labels)}" if labels else what
-    if rule_category and not unsubscribes(cfg, rule_category):
-        return f"sender rule says {rule_category}"
-    return None
-
-
-def _stale_decision(
-    cfg: CategoriesConfig, account: Account, msg: Message, category: str
-) -> str | None:
-    """Why the stored decision, with no sender rule now, no longer backs a retry, or None.
-
-    A stored rule decision needs that rule to still exist (`run` would ask Jev again; not worth
-    it for a retry); a stored Jev decision must still clear the category's current threshold.
-    """
-    if msg.source != DecisionSource.JEV:
-        return "rule since removed"
-    if not _confident(cfg, account, msg, category):
-        return f"confidence {msg.confidence} below the {category} threshold"
-    return None
-
-
-# The `skipped: …` reason unsubscribe-retry stores for a gate veto is the veto's own text, except
-# the unverified and group vetoes, which share one. NOT_UNSUBSCRIBING never gets here: the
-# category is checked (and held) first.
-_RETRY_SKIP_REASON_OVERRIDES = {
-    Veto.UNVERIFIED: "unverified sender, group or own list",
-    Veto.GROUP: "unverified sender, group or own list",
-}
-
-
-def _retry_skip_reason(veto: Veto) -> str:
-    return _RETRY_SKIP_REASON_OVERRIDES.get(veto, veto.value)
-
-
-def _skip(session: Session, row: Unsubscribe, reason: str) -> tuple[str, str]:
-    row.status, row.error, row.attempted_at = UnsubscribeStatus.SKIPPED, f"retry: {reason}", now()
-    session.commit()
-    return row.list_key, f"skipped: {reason}"
-
-
-def _confident(cfg: CategoriesConfig, account: Account, msg: Message, category: str) -> bool:
-    """Jev's stored answer still clears the category's current threshold, as `decide` requires."""
-    threshold = account.min_confidence.get(category, cfg.by_key[category].min_confidence)
-    return not msg.low_confidence and msg.confidence is not None and msg.confidence >= threshold
-
-
 def _unsub_row(session: Session, account: str, list_key: str) -> Unsubscribe | None:
     return session.scalar(
         select(Unsubscribe).where(Unsubscribe.account == account, Unsubscribe.list_key == list_key)
@@ -1493,14 +1100,7 @@ def _unsub_settled(row: Unsubscribe | None) -> bool:
     )
 
 
-def _unsubscribe(
-    session: Session,
-    gmail: GmailApi,
-    account: Account,
-    email: Email,
-    sig: Signals,
-    list_row: _ListRow,
-) -> bool:
+def _unsubscribe(p: AccountPass, email: Email, sig: Signals, list_row: ListRow) -> bool:
     """Unsubscribe once per (account, list). Returns True if an attempt was made."""
     row = list_row.get()
     if _unsub_settled(row):
@@ -1509,11 +1109,11 @@ def _unsubscribe(
     # Write the email's row (taking SQLite's write lock) before the irreversible request, so a
     # locked DB fails the email before it unsubscribes rather than rolling back the attempt's row.
     # There is always a write: `_store_outcome` has just set the row's `processed_at`.
-    session.flush()
-    result = unsub.unsubscribe(sig, send_mail=gmail.send)
+    p.session.flush()
+    result = p.ctx.unsubscriber(sig, p.gmail.send)
     if row is None:
-        row = Unsubscribe(account=account.email, list_key=sig.list_key, attempts=0)
-        session.add(row)
+        row = Unsubscribe(account=p.account.email, list_key=sig.list_key, attempts=0)
+        p.session.add(row)
     row.sender, row.gmail_id = sig.sender, email.id
     record_attempt(row, result)
     return True
@@ -1540,7 +1140,7 @@ def record_attempt(row: Unsubscribe, result: unsub.Result) -> None:
     )
 
 
-def _find_message(session: Session, account: str, gmail_id: str) -> Message | None:
+def find_message(session: Session, account: str, gmail_id: str) -> Message | None:
     return session.scalar(
         select(Message).where(Message.account == account, Message.gmail_id == gmail_id)
     )
@@ -1578,7 +1178,7 @@ def _record_error(
     when it refused every call the same way (ADR 0035) it is an ordinary failure, with backoff.
     """
     session, account, mode = p.session, p.account, p.mode
-    msg = _find_message(session, account.email, message_id)
+    msg = find_message(session, account.email, message_id)
     if msg is None:
         msg = Message(account=account.email, gmail_id=message_id, thread_id="", sender="")
         session.add(msg)

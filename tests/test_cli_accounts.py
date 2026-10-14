@@ -7,7 +7,7 @@ import pytest
 from fakes import FakeGmail
 from typer.testing import CliRunner
 
-from inbox_jev import cli, labels, triage
+from inbox_jev import cli, labels, triage, unsubscribe_retry
 from inbox_jev.db import Run, open_sessions
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -72,7 +72,9 @@ def test_digest_needs_no_jev_key(env, monkeypatch):
 
 
 def test_unsubscribe_retry_goes_on_after_a_failed_account_and_closes_jev(env, monkeypatch, opened):
-    monkeypatch.setattr(triage, "retry_unsubscribes", lambda ctx, s, g, acc: [("news.x", "ok")])
+    monkeypatch.setattr(
+        unsubscribe_retry, "retry_unsubscribes", lambda ctx, s, g, acc: [("news.x", "ok")]
+    )
     closed = []
     monkeypatch.setattr(triage.Context, "close", lambda self: closed.append(True))
     result = CliRunner().invoke(cli.app, ["unsubscribe-retry"])

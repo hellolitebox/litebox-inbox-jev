@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from . import __version__, labels, logs, rules, triage
 from . import digest as digest_mod
 from . import gmail as gmail_mod
+from . import unsubscribe_retry as retry_mod
 from .config import (
     Account,
     CategoriesConfig,
@@ -114,12 +115,16 @@ def _each_account(
     what: str,
     work: Callable[[Account], None],
     expected: tuple[type[Exception], ...] = (),
+    *,
+    logs_its_failures: bool = False,
 ) -> None:
     """Do `work` for each account: one failing (token, Gmail, Slack, Jev, DB) doesn't stop the
     others. Each failure is logged and printed; the command exits 1 if any account failed.
 
     An `expected` exception (the command refusing, e.g. `labels.LabelRenameRefused`) is printed
-    as `refused`, without logging a traceback."""
+    as `refused`, without logging a traceback. `logs_its_failures`: `work` has already logged
+    its failure's traceback (`triage.run_account`, tagged with its `run_id`), so it is only
+    printed here."""
     failed = False
     for acc in accounts:
         try:
@@ -129,7 +134,8 @@ def _each_account(
             typer.echo(f"{acc.email}: refused: {exc}", err=True)
         except Exception as exc:
             failed = True
-            log.exception(f"{what} failed", extra={"account": acc.email})
+            if not logs_its_failures:
+                log.exception(f"{what} failed", extra={"account": acc.email})
             reason = triage.describe_run_error(exc, acc.email)
             typer.echo(f"{acc.email}: {what} failed: {reason}", err=True)
     if failed:
@@ -216,7 +222,7 @@ def run(
         def run_one(acc: Account) -> None:
             triage.run_account(ctx, acc, mode, limit, lookback)
 
-        _each_account(accounts, "account run", run_one)
+        _each_account(accounts, "account run", run_one, logs_its_failures=True)
 
 
 @app.command()
@@ -322,7 +328,7 @@ def unsubscribe_retry(account: AccountOpt = None) -> None:
 
         def retry(acc: Account) -> None:
             with closing(ctx.gmail(acc.email)) as gmail, ctx.sessions() as session:
-                for list_key, outcome in triage.retry_unsubscribes(ctx, session, gmail, acc):
+                for list_key, outcome in retry_mod.retry_unsubscribes(ctx, session, gmail, acc):
                     typer.echo(f"{acc.email} {list_key}: {outcome}")
 
         _each_account(accounts, "unsubscribe retry", retry)

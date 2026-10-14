@@ -142,10 +142,11 @@ or post email bodies.
   length 100), mypy (`[tool.mypy]` in `pyproject.toml`: `src`, `scripts` and `tests/fakes.py`,
   with `disallow_untyped_defs`, `disallow_incomplete_defs`, `disallow_any_generics` and
   `warn_return_any`; the fakes are typed and checked, with `gmail.Gmail`, against the protocols
-  they stand in for: `triage.GmailApi`, `corrections.LabelReader`, `labels.LabelApi`; only
-  `yaml`, `googleapiclient` and `google_auth_oauthlib` are untyped, their objects are `Any`),
-  pytest. No network calls in tests: use the fakes in `tests/fakes.py`, injected (`Context(…,
-  gmail=…, classifier=…)`), not monkeypatched into modules.
+  they stand in for: `triage.GmailApi`, `corrections.LabelReader`, `labels.LabelApi` (and
+  `gmail.Gmail` against `sent_scan.SentMail`); only `yaml`, `googleapiclient` and
+  `google_auth_oauthlib` are untyped, their objects are `Any`), pytest. No network calls in
+  tests: use the fakes in `tests/fakes.py`, injected (`Context(…, gmail=…, classifier=…,
+  unsubscriber=…)`), not monkeypatched into modules.
 - pytest turns `ResourceWarning` (and the unraisable-exception warning a finalizer's
   `ResourceWarning` becomes) into errors, so an engine, file or client left open fails the
   tests: open the DB with `db.open_sessions` (a context manager that disposes the engine), and
@@ -154,7 +155,10 @@ or post email bodies.
   fails under `[tool.coverage.report] fail_under` in `pyproject.toml`. Locally,
   `uv run pytest --cov` does the same. Raise `fail_under` when coverage grows; never lower it to
   get a PR through.
-- `policy.py` stays pure (no I/O). Gmail access goes in `gmail.py` and orchestration in `triage.py`.
+- `policy.py` stays pure (no I/O). Gmail access goes in `gmail.py` (body extraction in `body.py`,
+  the sent-mail search in `sent_scan.py`) and orchestration in `triage.py` (the pass's Jev client
+  in `jev_guard.py`, the stored domain scans in `scan_rows.py`, `unsubscribe-retry` in
+  `unsubscribe_retry.py`).
 - New categories or labels go in `categories.yaml`, not in code.
 - Anything keyed on the sender (rules, corrections, `previous_contact`, allowlist) uses
   `triage.signals_for()` (resolved signals), never `Email.extract_signals()` directly. Rules for
@@ -166,8 +170,8 @@ or post email bodies.
   `policy.unsubscribe_gate` and the mode / `act_categories` check is `policy.acts_on`: call them,
   never re-implement them. Once-per-list, confidence and the run cap stay with the caller, and
   an attempt is stored with `triage.record_attempt`. `run` and `unsubscribe-retry`
-  (`triage.retry_unsubscribes`) both do; `tests/test_safety_gates.py` runs the same scenarios
-  through every path, so add a new path there.
+  (`unsubscribe_retry.retry_unsubscribes`) both do; `tests/test_safety_gates.py` runs the same
+  scenarios through every path, so add a new path there.
 - Keep README.md, `categories.yaml` comments and `accounts.example.yaml` in sync with behaviour
   in the same PR.
 - Secrets live only in `.env`, `secrets/` and `accounts.yaml`, which are gitignored. Never log
@@ -196,11 +200,13 @@ change to decision logic must, **in the same PR**:
 
 Decision logic means: `categories.yaml` (categories, actions, thresholds, criteria, archive group,
 needs_reply, tags, auto_rule), `policy.py`, `triage.py` (pipeline, `previous_contact`, user edits,
-unsubscribe paths), `rules.py`, `corrections.py`, `signals.py`, `psl.py` and the vendored
-`public_suffix_list.dat` (except a PSL-lane update of the list alone), `unsubscribe.py`, the
-classifier state and questions (`classifier.py`), body extraction (`gmail.extract_body`), the sent-mail
-search and its cache (`gmail.has_written_to`), `config.py` (`FREE_MAIL`, `PUBLIC_GROUP_HOSTS`,
-`group_domains` normalisation and rejection, the `act_categories` and
+the `run` unsubscribe path), `unsubscribe_retry.py` (the `unsubscribe-retry` path),
+`jev_guard.py` (when a pass stops asking Jev, whose fault a refusal is), `rules.py`,
+`corrections.py`, `signals.py`, `psl.py` and the vendored `public_suffix_list.dat` (except a
+PSL-lane update of the list alone), `unsubscribe.py`, the classifier state and questions
+(`classifier.py`), body extraction (`body.py`), the sent-mail search and its cache
+(`Gmail.has_written_to`, `sent_scan.py`, `scan_rows.py`), `config.py` (`FREE_MAIL`,
+`PUBLIC_GROUP_HOSTS`, `group_domains` normalisation and rejection, the `act_categories` and
 `archive_group_reply_keep_probability` validators, and the `Settings` defaults `MODE`,
 `LOOKBACK`, `MAX_MESSAGES_PER_RUN`, `MAX_UNSUBSCRIBES_PER_RUN`, `BODY_CHARS`), and the `cli.py`
 commands that change decisions or stored state (`restore`, `reprocess`, `rules set` /

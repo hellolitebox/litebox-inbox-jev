@@ -10,6 +10,8 @@ import pytest
 from fakes import HttpError, age_errors
 from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
+from sqlalchemy import event
+from sqlalchemy.exc import OperationalError
 from typer.testing import CliRunner
 
 from inbox_jev import cli, digest, logs, triage
@@ -469,3 +471,62 @@ def test_a_failed_pass_still_closes_its_gmail_client(triage_setup, monkeypatch):
     with pytest.raises(HttpError):
         triage.run_account(ctx, account, Mode.ACT)
     assert gmail.closes == 1
+
+
+def test_a_failed_pass_logs_its_traceback_with_the_run_id(triage_setup, monkeypatch, caplog):
+    ctx, gmail, account = triage_setup
+    caplog.handler.addFilter(logs.RunIdFilter())  # as `logs.setup` does on the real handler
+
+    def list_inbox_ids(lookback, limit):
+        raise HttpError(503)
+
+    monkeypatch.setattr(gmail, "list_inbox_ids", list_inbox_ids)
+    with caplog.at_level(logging.INFO), pytest.raises(HttpError):
+        triage.run_account(ctx, account, Mode.ACT)
+    [failed] = [r for r in caplog.records if r.getMessage() == "account run failed"]
+    [run] = _runs(ctx)
+    assert failed.run_id == run.id and failed.account == account.email
+    assert failed.exc_info is not None and isinstance(failed.exc_info[1], HttpError)
+
+
+def test_failing_to_store_the_run_row_logs_its_traceback_without_a_run_id(triage_setup, caplog):
+    """`cli run` doesn't log a failed account itself: when the `runs` INSERT fails (database
+    locked, disk full), `run_account`'s own log line is the only traceback left."""
+    ctx, gmail, account = triage_setup
+    caplog.handler.addFilter(logs.RunIdFilter())  # as `logs.setup` does on the real handler
+
+    def locked(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("INSERT INTO runs"):
+            raise OperationalError(statement, {}, Exception("database is locked"))
+
+    engine = ctx.sessions.kw["bind"]
+    event.listen(engine, "before_cursor_execute", locked)
+    try:
+        with caplog.at_level(logging.INFO), pytest.raises(OperationalError):
+            triage.run_account(ctx, account, Mode.ACT)
+    finally:
+        event.remove(engine, "before_cursor_execute", locked)
+
+    [failed] = [r for r in caplog.records if r.getMessage() == "account run failed"]
+    assert failed.account == account.email and not hasattr(failed, "run_id")
+    assert failed.exc_info is not None and isinstance(failed.exc_info[1], OperationalError)
+    assert _runs(ctx) == [] and gmail.closes == 0  # failed before the pass touched Gmail
+
+
+def test_cli_run_logs_each_failed_accounts_traceback_once_with_its_run_id(
+    monkeypatch, tmp_path, caplog
+):
+    accounts = tmp_path / "accounts.yaml"
+    accounts.write_text("accounts:\n  - email: a@acme.com\n  - email: b@acme.com\n")
+    monkeypatch.setenv("ACCOUNTS_FILE", str(accounts))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'db.sqlite'}")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "")  # every pass fails before Gmail
+    monkeypatch.setattr(cli.logs, "setup", lambda level: None)  # keep the test's logging as is
+    caplog.handler.addFilter(logs.RunIdFilter())
+    with caplog.at_level(logging.INFO):
+        result = CliRunner().invoke(cli.app, ["run"])
+    assert result.exit_code == 1
+    failed = [r for r in caplog.records if r.getMessage() == "account run failed"]
+    assert [r.account for r in failed] == ["a@acme.com", "b@acme.com"]
+    assert [r.run_id for r in failed] == [1, 2]
+    assert all(r.exc_info is not None for r in failed)
