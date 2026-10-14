@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$CLAUDE_PROJECT_DIR/scripts/guard_main.py\"; test -f \"$f\" || exit 0; exec python3 -I \"$f\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

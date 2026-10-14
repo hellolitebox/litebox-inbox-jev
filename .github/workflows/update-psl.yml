@@ -4,7 +4,7 @@ name: Update public suffix list
 # (src/inbox_jev/public_suffix_list.dat) with `scripts/update_psl.py --check`, which downloads and
 # validates it but never writes it. When there is one, it opens an issue labeled `psl-update` (or
 # updates the open one). The workflow never pushes or opens a PR: a session picks the issue up and
-# ships the update through a normal PR (the "PSL lane" in CLAUDE.md, /ship). Actions are pinned by
+# ships the update through a normal PR (the "PSL lane" in /ship). Actions are pinned by
 # commit SHA (the version is the comment); Dependabot bumps both.
 on:
   schedule:
@@ -57,7 +57,7 @@ jobs:
 
           `scripts/update_psl.py --check` downloaded and validated it ([run](%s)); the workflow wrote nothing to the repo.
 
-          To ship it, follow the PSL lane (CLAUDE.md, `/ship`): branch off `main`, run `uv run python scripts/update_psl.py`, open a normal PR that closes this issue, and take it through the checks and QA.
+          To ship it, follow the PSL lane (`/ship`, `.claude/skills/ship/SKILL.md`): branch off `main`, run `uv run python scripts/update_psl.py`, open a normal PR that closes this issue, and take it through the checks and QA.
           EOF
           )
           body=$(mktemp)

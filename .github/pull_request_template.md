@@ -6,11 +6,12 @@
 
 ## Verification
 
-<!-- ruff format / ruff check / mdformat / mypy / pytest counts. A bug fix: the new test run
+<!-- `scripts/check.sh` (ruff, mdformat, mypy, pytest counts). A bug fix: the new test run
 without the fix, and how it failed. A change to classification (categories.yaml
 criteria, classifier state, body extraction) or to a destructive path (archive, spam,
-unsubscribe, unsubscribe-retry) also needs the read-only real-mail check: paste the output of
-`scripts/check_branch.sh` (From/Subject truncated, never bodies), or say why it isn't needed.
+unsubscribe, unsubscribe-retry) also needs the read-only real-mail check (README, "Checking a
+branch against real mail"): paste the output of `scripts/check_branch.sh` (From/Subject truncated,
+never bodies), or say why it isn't needed.
 A classification change adds the reference summary (`check_branch.sh … --reference --quiet`). -->
 
 ## Deploy notes
@@ -20,8 +21,8 @@ A classification change adds the reference summary (`check_branch.sh … --refer
 - Config (`accounts.yaml`, `.env`) to add before or after: none
 - Rollback: `scripts/deploy.sh <previous sha>`, nothing else
 
-<!-- Decision logic (see CLAUDE.md → "Decision logic docs"): spec, EX-NN examples and tests, ADR
+<!-- Decision logic (`.claude/rules/decision-logic.md`): spec, EX-NN examples and tests, ADR
 updated in this PR, or an explicit "no behaviour change" justification. -->
 
-Skills applied: <!-- names from the routing table in .claude/agents/qa-reviewer.md, or
+Skills applied: <!-- names from .claude/rules/python-skills.md, or
 "none: docs-only"; then the concrete changes they drove -->

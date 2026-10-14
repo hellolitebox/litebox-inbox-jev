@@ -54,3 +54,4 @@ decision changes: add a new one and mark the old one `Superseded by NNNN`.
 | [0041](0041-accounts-checked-against-categories-at-start.md) | Check the accounts file against the categories file when a command starts | Accepted | #41 |
 | [0042](0042-phishing-signals-for-jev.md) | Give Jev phishing signals; passing authentication is not legitimacy | Accepted | #50 |
 | [0043](0043-authentication-results-parsed-per-rfc-8601.md) | Authentication-Results is parsed per RFC 8601 | Accepted | #50 |
+| [0044](0044-instructions-rules-by-path-one-check-hook.md) | Instructions: invariants in CLAUDE.md, rules by path, one check script, a hook for the hard prohibitions | Accepted | #52 |

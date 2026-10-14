@@ -14,8 +14,8 @@ change them, the setting is named.
   [`tests/test_spec_examples.py`](../tests/test_spec_examples.py) that runs the real code. A test
   fails if an ID exists on only one side.
 - **Changing decision logic?** Update this document, the matching examples and tests, and add an ADR
-  when it is a design decision, in the same PR (see [CLAUDE.md](../CLAUDE.md)). When the change
-  alters something the [guide](guide.md) explains, update the guide too.
+  when it is a design decision, in the same PR (the rule in `.claude/rules/decision-logic.md`). When
+  the change alters something the [guide](guide.md) explains, update the guide too.
 
 Contents:
 

@@ -20,7 +20,8 @@ sent-mail search), `gmail.modify`/`send` are never called, a SQLite DB is opened
 nothing is committed. Calls Jev (TYPESAFE_API_KEY) as `run` would: once per email, except for
 rules to archive or spam categories (allowlisted and keep-rule emails are asked for the flags
 only), and runs the sent-mail search only where `run` does (in the account's mode).
-See CLAUDE.md "Validating behaviour changes" for the docker compose command.
+`scripts/check_branch.sh` runs it on the server, in the app container (README, "Checking a
+branch against real mail").
 """
 
 from __future__ import annotations

@@ -5,9 +5,9 @@ description: Run inbox-jev's QA ⇄ Dev loop on an open pull request and merge i
 
 # Ship a pull request
 
-Input: a PR number (`/ship 23`). This is CLAUDE.md → "Development workflow", steps 4 to 6, made
-explicit so that no gate is skipped. Never `--admin`, never edit the ruleset, never merge on a
-verdict for an older commit.
+Input: a PR number (`/ship 23`). This is CLAUDE.md's step 4 (the QA ⇄ Dev loop, the merge gates, the
+merge) and the deploy hand-over, made explicit so that no gate is skipped. Never `--admin`, never
+edit the ruleset, never merge on a verdict for an older commit.
 
 ## 0. Preconditions
 
@@ -132,6 +132,6 @@ It never pushes or opens a PR. A session that sees the issue ships the update as
    `https://github.com/publicsuffix/list/commit/<COMMIT>` link, rules added/removed in a line), Why
    (ADR 0037), Verification (the checks and the step 5 output, no bodies), deploy notes (none;
    rollback as usual), `Skills applied: none: data update`, and `Closes #$i`. The `.dat` alone is
-   exempt from the decision-logic docs (CLAUDE.md).
+   exempt from the decision-logic docs (`.claude/rules/decision-logic.md`).
 7. `/ship <n>` from step 0: the normal round loop with `qa-reviewer`, merge gates and merge. The
    merge closes the issue; deploy as usual (no one-off steps).

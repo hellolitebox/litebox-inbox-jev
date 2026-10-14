@@ -27,17 +27,16 @@ You receive a PR number (and, on later rounds, the previous review and the dev's
    WT="$ROOT-qa-<n>"; UV=$(command -v uv || echo "$ROOT/.venv/bin/uv")
    git -C "$ROOT" worktree remove "$WT" --force 2>/dev/null; git -C "$ROOT" branch -D qa-<n> 2>/dev/null
    git -C "$ROOT" fetch origin pull/<n>/head:qa-<n> && git -C "$ROOT" worktree add "$WT" qa-<n>
-   cd "$WT" && "$UV" sync --frozen --extra dev \
-     && "$UV" run --frozen ruff check src tests scripts && "$UV" run --frozen ruff format --check src tests scripts \
-     && git ls-files -z '*.md' | xargs -0 "$UV" run --frozen mdformat --check \
-     && "$UV" run --frozen mypy && "$UV" run --frozen pytest -q
+   cd "$WT" && UV="$UV" scripts/check.sh
    ```
-   `uv sync --frozen` builds the worktree's own `.venv` from `uv.lock`, exactly as CI does, so a
-   dependency change in the PR is installed and a stale venv can't hide a failure. Also run
+   `scripts/check.sh` is what CI's `test` job runs: it syncs the worktree's own `.venv` from
+   `uv.lock`, exactly as CI does, so a dependency change in the PR is installed and a stale venv
+   can't hide a failure, then runs ruff, mdformat, mypy and pytest with coverage. Also run
    `gh pr checks <n>` for the CI result. Clean up afterwards with the same `worktree remove` /
    `branch -D` pair.
-4. **Load the Python skills the PR's paths select** (see "Python skills" below) with the Skill tool,
-   before judging the code, and apply their checklists to the changed code and the code it calls.
+4. **Load the Python skills the PR's paths select** (`.claude/rules/python-skills.md`, see "Python
+   skills" below) with the Skill tool, before judging the code, and apply their checklists to the
+   changed code and the code it calls.
 5. Review against the checklist below. For each issue, verify it: trace the code path, and when
    cheap, prove it with a failing test idea or a concrete input. Drop anything you cannot
    substantiate.
@@ -47,37 +46,18 @@ You receive a PR number (and, on later rounds, the previous review and the dev's
 
 ## Python skills
 
-Load skills by the paths the PR changes (`gh pr view <n> --json files`), every round, before judging
-the code: the routing table below is the single list, and `dev-fixer` and implementers use it too. A
-PR that touches none of the listed paths (docs, ADRs, README, agents, skills, workflows without
-Python) loads no skill and writes `Skills: none: docs-only`. The skills are installed in the
-maintainer's Claude Code environment; if one isn't available, say so on the review's `Skills` line
-and continue.
+Load, every round and before judging the code, the skills that `.claude/rules/python-skills.md`
+selects for the paths the PR changes (`gh pr view <n> --json files`). Read that file: it is the one
+list, and `dev-fixer` and implementers use it too. A PR that touches none of its paths (docs, ADRs,
+README, agents, skills, workflows without Python) loads no skill and the review says
+`Skills: none: docs-only`. The skills are installed in the maintainer's Claude Code environment; if
+one isn't available, say so on the review's `Skills` line and continue.
 
-| Skill | Load when the PR touches | Use it for |
-| -- | -- | -- |
-| `python-anti-patterns` | any `.py` under `src/` or `scripts/` | the anti-pattern checklist, on every changed function |
-| `python-code-style` | any `.py` | naming, docstrings, formatting beyond ruff |
-| `python-design-patterns` | any `.py` | KISS, separation of concerns, duplication vs. abstraction, coupling |
-| `python-project-structure` | any `.py` | module boundaries and public API (`policy` pure, I/O in `gmail`/`triage` and the modules split from them) |
-| `python-type-safety` | any `.py` | names, enums vs. loose strings, `Any` where a type exists (mypy covers annotations and `None`) |
-| `python-error-handling` | any `.py` | exception scope, partial failures in a run, errors that hide or abort |
-| `python-resilience` | `gmail.py`, `body.py`, `sent_scan.py`, `classifier.py`, `unsubscribe.py`, `triage.py`, `jev_guard.py`, `scan_rows.py`, `unsubscribe_retry.py`, `digest.py` | retries, backoff, timeouts on Gmail/Jev/HTTP calls |
-| `python-resource-management` | those I/O modules, `db.py` | sessions, HTTP clients, files: context managers and cleanup |
-| `python-observability` | those I/O modules, `logs.py`, `cli.py` | structured logs (and never email bodies), what a failure leaves behind |
-| `python-configuration` | `config.py`, `categories.yaml`, `accounts.example.yaml`, `.env.example`, `docker-compose.yml` | `Settings`/YAML validation, secrets, defaults |
-| `python-testing-patterns` | `tests/` | test quality: behaviour over implementation, fixtures, fakes, no network |
-| `python-performance-optimization` | `triage.py`, `jev_guard.py`, `scan_rows.py`, `unsubscribe_retry.py`, `gmail.py`, `body.py`, `sent_scan.py`, `db.py`, `rules.py`, `corrections.py` | API calls and DB queries per email/run, N+1, unbounded loops |
-| `python-packaging` | `pyproject.toml`, `uv.lock`, `Dockerfile`, `.github/workflows/` | `pyproject.toml`, `uv.lock`, entry points, the Docker build |
-| `python-background-jobs` | `triage.py`, `jev_guard.py`, `scan_rows.py`, `unsubscribe_retry.py`, `cli.py`, `deploy/` | the timer-driven runs: idempotency, overlap, retries |
-| `async-python-patterns` | async code is added (the codebase is sync today) | event loop, blocking calls, cancellation |
-| `temporal-python-testing` | Temporal is introduced | otherwise "n/a" |
-
-Repo conventions (CLAUDE.md, the ruff config in `pyproject.toml`, existing style) override a skill's
-generic advice. Only raise a skill finding on code the PR changes or calls, and never ask for new
-tooling beyond what CI runs (ruff, mypy, pytest): no structlog, tenacity, Celery… unless the PR is
-about it. mypy already checks types; `python-type-safety` is for what it can't judge (names, enums
-vs. loose strings, `Any` where a type exists).
+Repo conventions (CLAUDE.md, `.claude/rules/`, the ruff config in `pyproject.toml`, existing style)
+override a skill's generic advice. Only raise a skill finding on code the PR changes or calls, and
+never ask for new tooling beyond what CI runs (ruff, mypy, pytest): no structlog, tenacity, Celery…
+unless the PR is about it. mypy already checks types; `python-type-safety` is for what it can't
+judge (names, enums vs. loose strings, `Any` where a type exists).
 
 Report findings from a skill like any other (severity rules below), citing the skill, e.g.
 `[minor][hygiene][python-type-safety]`. Don't pad the review: a skill with nothing to add gets no
@@ -100,19 +80,19 @@ eval; new dependencies (maintained? pinned sensibly?).
 thresholds, allowlist and mode gating; unsubscribes must stay once-per-list and capped; `restore`
 must still be able to undo.
 
-**Real-mail check** (CLAUDE.md, "Validating behaviour changes"): if the PR changes classification
-(`categories.yaml` criteria, the classifier state or questions, `body.extract_body`) or a
-destructive path (archive, spam, unsubscribe, `unsubscribe-retry`), the PR body must include the
-output of `scripts/check_branch.sh` (`dry_classify.py` on real mail, read-only) or an explicit
-reason it isn't needed, borne out by the diff. Missing: **major**. Output that contains email
-bodies: **blocker**. A classification change also needs the reference summary
-(`check_branch.sh <branch> … --reference --quiet`, CLAUDE.md "Validating behaviour changes") next to
-the per-email check: missing, **major**. Read it: the branch's accuracy against the corrections must
-not fall below the stored baseline without an explanation (`broken` pairs the PR accepts on purpose;
-the baseline covers only the corrections Jev decided, the `baseline_unknown` ones count for the
-branch alone), and a change meant to move borderline emails should show it in the ±0.05 / ±0.10 band
-counts. A reference set too small to say anything (a handful of corrections) is fine if the PR says
-so.
+**Real-mail check** (README, "Checking a branch against real mail"; the rule in
+`.claude/rules/decision-logic.md`): if the PR changes classification (`categories.yaml` criteria,
+the classifier state or questions, `body.extract_body`) or a destructive path (archive, spam,
+unsubscribe, `unsubscribe-retry`), the PR body must include the output of `scripts/check_branch.sh`
+(`dry_classify.py` on real mail, read-only) or an explicit reason it isn't needed, borne out by the
+diff. Missing: **major**. Output that contains email bodies: **blocker**. A classification change
+also needs the reference summary (`check_branch.sh <branch> … --reference --quiet`, README "Checking
+a branch against real mail") next to the per-email check: missing, **major**. Read it: the branch's
+accuracy against the corrections must not fall below the stored baseline without an explanation
+(`broken` pairs the PR accepts on purpose; the baseline covers only the corrections Jev decided, the
+`baseline_unknown` ones count for the branch alone), and a change meant to move borderline emails
+should show it in the ±0.05 / ±0.10 band counts. A reference set too small to say anything (a
+handful of corrections) is fine if the PR says so.
 
 **Performance & cost**: Gmail API calls per run (quota: per-user units/sec), Jev calls per email
 (avoid repeats; rules should skip Jev), N+1 DB queries, unbounded loops or result sets, timeouts on
@@ -125,21 +105,17 @@ helpers, type hints, small functions, comments only where non-obvious.
 
 **Tests**: new behaviour has tests; tests assert behaviour, not implementation; no network in tests.
 
-**Proof the test fails without the fix** (CLAUDE.md, step 2): a bug fix, or a test added for a
-finding about a missing test, must say in the PR body ("Verification") or the dev reply that the new
-test was run against the code without the fix and failed, and how (stash, parent commit, the error).
-Missing: **minor**. When it is cheap (a one-line guard, a changed condition), spot-check it by
-mutation in your worktree: revert the fix (`git stash`, or edit the line back), run the test, see it
-fail, restore. A test that still passes is a **major** finding: it doesn't cover the bug.
+**Proof the test fails without the fix** (`.claude/rules/tests.md`): a bug fix, or a test added for
+a finding about a missing test, must say in the PR body ("Verification") or the dev reply that the
+new test was run against the code without the fix and failed, and how (stash, parent commit, the
+error). Missing: **minor**. When it is cheap (a one-line guard, a changed condition), spot-check it
+by mutation in your worktree: revert the fix (`git stash`, or edit the line back), run the test, see
+it fail, restore. A test that still passes is a **major** finding: it doesn't cover the bug.
 
-**Decision-logic docs** (see CLAUDE.md, "Decision logic docs"): if the PR changes `categories.yaml`,
-`policy.py`, `triage.py`, `unsubscribe_retry.py`, `jev_guard.py`, `rules.py`, `corrections.py`,
-`signals.py`, `psl.py`, `unsubscribe.py`, the classifier state/questions, `body.py`, the sent-mail
-search (`Gmail.has_written_to`, `sent_scan.py`, `scan_rows.py`), `config.py` (`FREE_MAIL`,
-`PUBLIC_GROUP_HOSTS`, `group_domains` / `act_categories` / `archive_group_reply_keep_probability`
-validation, the `Settings` defaults `MODE`, `LOOKBACK`, `MAX_MESSAGES_PER_RUN`,
-`MAX_UNSUBSCRIBES_PER_RUN`, `BODY_CHARS`) or the `cli.py` commands `restore`, `reprocess`,
-`rules set` / `rules delete`, `unsubscribe-retry`, check that `docs/how-it-decides.md` was updated
+**Decision-logic docs** (`.claude/rules/decision-logic.md`): if the PR changes something that rule's
+first paragraph names as decision logic (its `paths` are where the rule loads: they also cover the
+spec, the guide, the ADRs and the tests it maintains, and the whole of `gmail.py`, `cli.py` and
+`config.py`, of which only the named parts count), check that `docs/how-it-decides.md` was updated
 to match (tables, numbers, flowcharts, "Known gaps"), that affected `EX-NN` examples and their
 `tests/test_spec_examples.py` tests were added or updated (a new rule or guard that changes an
 outcome needs a new `EX-NN`), and that a design decision has an ADR in `docs/decisions/` (with the
@@ -150,7 +126,7 @@ plain-language guide: a change that alters something it explains (labels and wha
 confidence bars, safety nets, learning from corrections, the digest, privacy) must update it in the
 same PR. A guide left stale, or a guide statement the code contradicts, is a **minor** finding.
 
-**Public Suffix List update** (CLAUDE.md and `/ship`, "PSL lane"): a PR that changes only
+**Public Suffix List update** (`/ship`, "PSL lane"): a PR that changes only
 `src/inbox_jev/public_suffix_list.dat` needs no spec update. Check that the diff is the list alone,
 that its `VERSION`/`COMMIT` header matches the body and the upstream commit it links, that the rules
 added and removed are listed, and that "Verification" has a `check_branch.sh` run (with a `--query`)

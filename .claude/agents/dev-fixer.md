@@ -43,31 +43,25 @@ is to resolve every blocker, major and minor finding on the PR branch, plus any 
      without the fix doesn't cover the finding: rewrite it.
    - **Dispute it**: only when it is genuinely wrong or out of scope. Give concrete reasoning (code
      path, input, why it can't happen). Don't dispute to avoid work. Nits are optional. Before
-     changing code, load with the Skill tool, every round, the Python skills that the routing table
-     in `.claude/agents/qa-reviewer.md` ("Python skills") selects for the files you change, plus any
-     skill a finding cites (e.g. `[python-type-safety]`: read that one most closely), and apply them
-     to your fixes (repo conventions win over a skill's generic advice). List the skills you loaded
-     on the reply's `Skills:` line (`none: docs-only` when the fix touches no listed path); if a
-     skill isn't available, say so there and continue.
+     changing code, load with the Skill tool, every round, the Python skills that
+     `.claude/rules/python-skills.md` selects for the files you change, plus any skill a finding
+     cites (e.g. `[python-type-safety]`: read that one most closely), and apply them to your fixes
+     (repo conventions win over a skill's generic advice). List the skills you loaded on the reply's
+     `Skills:` line (`none: docs-only` when the fix touches no listed path); if a skill isn't
+     available, say so there and continue.
 4. Don't expand scope. Don't refactor unrelated code. If you find a new bug outside the PR, mention
-   it in your reply instead of fixing it. When a fix changes decision logic (`categories.yaml`,
-   `policy`, `triage`, `unsubscribe_retry`, `jev_guard`, `rules`, `corrections`, `signals`,
-   `unsubscribe`, classifier state, body extraction (`body`), the sent-mail search
-   (`Gmail.has_written_to`, `sent_scan`, `scan_rows`), `config.py` constants/validators/`Settings`
-   defaults, or the `cli.py` commands `restore`, `reprocess`, `rules set`/`delete`,
-   `unsubscribe-retry`), update `docs/how-it-decides.md`, the affected `EX-NN` examples and
-   `tests/test_spec_examples.py` (a new rule or guard that changes an outcome gets a new `EX-NN`),
-   the ADR in `docs/decisions/` if the fix changes a design decision, and `docs/guide.md` when the
-   change alters something it explains (keep its plain-language style), in the same push (see
-   CLAUDE.md, "Decision logic docs").
+   it in your reply instead of fixing it. When a fix changes a file that
+   `.claude/rules/decision-logic.md` covers, do what that rule says in the same push: update
+   `docs/how-it-decides.md`, the affected `EX-NN` examples and `tests/test_spec_examples.py` (a new
+   rule or guard that changes an outcome gets a new `EX-NN`), the ADR in `docs/decisions/` if the
+   fix changes a design decision, and `docs/guide.md` when the change alters something it explains
+   (keep its plain-language style).
 5. Make the checks green in the worktree's own venv, built from `uv.lock` exactly as CI does:
    ```
-   cd "$WT" && UV=$(command -v uv || echo "$ROOT/.venv/bin/uv") && "$UV" sync --frozen --extra dev \
-     && "$UV" run --frozen ruff format src tests scripts && "$UV" run --frozen ruff check src tests scripts \
-     && git ls-files -z '*.md' | xargs -0 "$UV" run --frozen mdformat \
-     && "$UV" run --frozen mypy && "$UV" run --frozen pytest -q
+   cd "$WT" && UV=$(command -v uv || echo "$ROOT/.venv/bin/uv") scripts/check.sh --fix
    ```
-   If you change `pyproject.toml`, run `"$UV" lock` first and commit `uv.lock` with it.
+   `--fix` formats first (ruff, mdformat), then runs what CI's `test` job runs. If you change
+   `pyproject.toml`, run `"$UV" lock` first and commit `uv.lock` with it.
 6. Stage files by explicit path (`git add <file> …`), commit with a message describing what was
    fixed (end with the repo's `Co-Authored-By` trailer if the session provides one) and push with
    `cd "$WT" && git push origin HEAD:"$BR"`. The push moves the head, so the `qa-verdict` status

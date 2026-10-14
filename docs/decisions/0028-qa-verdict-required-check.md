@@ -48,3 +48,12 @@ diff, or no review at all.
   status appears once the comment-triggered run sees the session's review.
 - Anyone can post a comment that starts with `## QA review`; the gate trusts the loop's actors, as
   the ruleset already did. The repo is private and the author is the only committer.
+
+## Addendum (2026-10-14, PR #52)
+
+The `hellolitebox` org ruleset "AI review gate" requires a human approval on every PR; `inbox-jev`
+is excluded from it by repo **name** (the ruleset's `conditions.repository_name.exclude`, currently
+`litebox-inbox-jev`), and the repo ruleset above replaces it. Renaming the repo applies the org gate
+again (one human approval per PR) until that exclude list is updated, which needs the `admin:org`
+scope. The maintainer chose to keep name-based targeting. Since ADR 0044 a hook refuses `--admin`, a
+push to `main` and writes to the rulesets, whatever a session decides.

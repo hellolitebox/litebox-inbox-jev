@@ -50,18 +50,11 @@ jobs:
             exit 1
           fi
           echo "uv $ci_uv in both CI and Dockerfile"
-      - run: uv lock --check            # uv.lock matches pyproject.toml
-      - run: uv sync --frozen --extra dev
-      - run: uv run --frozen ruff format --check src tests scripts
-      - run: uv run --frozen ruff check src tests scripts
-      # Every tracked Markdown file (.mdformat.toml: prose wrapped at 100 columns).
-      - run: git ls-files -z '*.md' | xargs -0 uv run --frozen mdformat --check
-      - run: uv run --frozen mypy
-      # Coverage report in the log and the job summary; fails under [tool.coverage.report]
-      # fail_under in pyproject.toml.
-      - run: >-
-          uv run --frozen pytest -q --cov --cov-report=term-missing:skip-covered
-          --cov-report=markdown-append:"$GITHUB_STEP_SUMMARY"
+      # The same checks a developer runs (scripts/check.sh): uv.lock matches pyproject.toml, ruff,
+      # mdformat on every tracked .md, mypy, pytest with coverage (fails under
+      # [tool.coverage.report] fail_under in pyproject.toml). The coverage report also goes to the
+      # job summary, through PYTEST_ADDOPTS.
+      - run: PYTEST_ADDOPTS="--cov-report=markdown-append:$GITHUB_STEP_SUMMARY" scripts/check.sh
 
   # The tests on the oldest supported Python, so code that needs a newer one (syntax, stdlib)
   # fails here rather than for someone installing on it. A required check, like `test`.

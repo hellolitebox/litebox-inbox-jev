@@ -9,7 +9,7 @@ never written: the script exits non-zero.
 
 `.github/workflows/update-psl.yml` runs `--check` weekly and opens (or updates) an issue when a
 newer list exists; a session then runs this script without `--check` on a branch and opens a PR
-(the "PSL lane" in CLAUDE.md): `uv run python scripts/update_psl.py`. The app itself never
+(the "PSL lane" in `/ship`): `uv run python scripts/update_psl.py`. The app itself never
 fetches the list. Standard library plus `inbox_jev.psl` only, so `PYTHONPATH=src python3` runs
 it without installing the package.
 """
