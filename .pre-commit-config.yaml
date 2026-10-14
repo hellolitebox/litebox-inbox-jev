@@ -9,3 +9,9 @@ repos:
       - id: ruff
         args: [--fix]
       - id: ruff-format
+  # Pinned twice, like ruff: here and in the dev extra of pyproject.toml. Bump both together.
+  - repo: https://github.com/hukkin/mdformat
+    rev: 1.0.0
+    hooks:
+      - id: mdformat
+        additional_dependencies: [mdformat-gfm==1.0.0, mdformat-frontmatter==2.1.2]

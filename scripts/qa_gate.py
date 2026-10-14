@@ -10,7 +10,9 @@ a commit status on the PR's head, so the repo ruleset can require it:
 - `pending`: there is no review yet, or the head moved since the latest review.
 
 Runs from `.github/workflows/qa-gate.yml` on every push to the PR and on every comment. Needs
-`gh` and a token with `statuses: write` (`GH_TOKEN`). Standard library only.
+`gh` and a token with `statuses: write` (`GH_TOKEN`). Standard library only. Exits 0 once the
+status is posted, whatever its state: the verdict is the status, and the job that runs this only
+says the gate ran. Exits 1 when a `gh api` call fails.
 """
 
 from __future__ import annotations

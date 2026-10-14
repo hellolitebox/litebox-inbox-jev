@@ -54,6 +54,8 @@ jobs:
       - run: uv sync --frozen --extra dev
       - run: uv run --frozen ruff format --check src tests scripts
       - run: uv run --frozen ruff check src tests scripts
+      # Every tracked Markdown file (.mdformat.toml: prose wrapped at 100 columns).
+      - run: git ls-files -z '*.md' | xargs -0 uv run --frozen mdformat --check
       - run: uv run --frozen mypy
       # Coverage report in the log and the job summary; fails under [tool.coverage.report]
       # fail_under in pyproject.toml.

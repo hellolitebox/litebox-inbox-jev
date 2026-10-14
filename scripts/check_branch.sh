@@ -9,7 +9,10 @@
 # The branch is fetched into a throwaway worktree next to the deployment (never over it: the
 # running app uses this checkout) and its src/, categories.yaml and dry_classify.py are mounted
 # into the app image ahead of the installed package. The image's dependencies are the deployed
-# ones, so a branch that changes pyproject.toml or uv.lock is refused: build a separate image.
+# ones, so a branch whose runtime dependencies differ is refused (build a separate image): uv.lock
+# differs, or pyproject.toml's requires-python, dependencies or a non-dev optional-dependency
+# group (scripts/runtime_deps.py, with the host's python3). Tool config changes (ruff, mypy,
+# coverage) pass.
 # dry_classify.py never writes Gmail or the DB. Put the output in the PR, never email bodies.
 # Run it as the user that owns the checkout (the one that runs `git pull`; with sudo if that
 # is root): git refuses or leaves root-owned files behind otherwise.
@@ -18,14 +21,16 @@ set -euo pipefail
 branch=${1:?usage: $0 <branch> --account EMAIL [dry_classify.py options]}
 shift
 deploy=$(cd "$(dirname "$0")/.." && pwd)
-wt=/tmp/inbox-jev-check
+wt=${TMPDIR:-/tmp}/inbox-jev-check
 
 cleanup() { git -C "$deploy" worktree remove --force "$wt" 2>/dev/null || true; }
 trap cleanup EXIT
 cleanup
 
 git -C "$deploy" fetch origin "$branch"
-if ! git -C "$deploy" diff --quiet HEAD FETCH_HEAD -- pyproject.toml uv.lock; then
+if ! git -C "$deploy" diff --quiet HEAD FETCH_HEAD -- uv.lock ||
+  ! python3 -I "$deploy/scripts/runtime_deps.py" \
+    <(git -C "$deploy" show HEAD:pyproject.toml) <(git -C "$deploy" show FETCH_HEAD:pyproject.toml); then
   echo "$branch changes pyproject.toml or uv.lock: build a separate image instead" >&2
   exit 1
 fi

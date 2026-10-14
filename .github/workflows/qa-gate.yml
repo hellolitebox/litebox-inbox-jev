@@ -16,17 +16,27 @@ permissions:
   issues: read          # the PR comments
   statuses: write       # the qa-verdict status
 
+# One group per PR and trigger: a newer push supersedes the run for an older head, a newer comment
+# an older comment's run. A comment never cancels a push's run: dev-fixer pushes and replies
+# within seconds, and the cancelled run left a cancelled "QA gate" check on the new head (the PR
+# showed UNSTABLE) even though it had already posted `qa-verdict` (pending). A comment's run is
+# checked against `main`'s commit, not the PR head, so cancelling it marks nothing on the PR. Both
+# kinds read the PR's current state and post on the head they read, so the latest run's status
+# stands.
 concurrency:
-  group: qa-gate-${{ github.event.pull_request.number || github.event.issue.number }}
+  group: qa-gate-${{ github.event.pull_request.number || github.event.issue.number }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
   gate:
     name: QA gate
     # Only the commit status is called `qa-verdict`: a job of that name would be a check run
-    # with the same name, green whenever the script exits 0. Dependabot's pull_request runs
-    # get a read-only token and can't post statuses, so they are skipped: its PRs get the
-    # status from the comment-triggered run, once the session posts its review.
+    # with the same name, green whenever the script exits 0. The job passes whenever it posted a
+    # status, `pending` and `failure` included (the verdict is the status, which the ruleset
+    # requires, not this job); it fails only when the gate couldn't run (a `gh api` error).
+    # Dependabot's pull_request runs get a read-only token and can't post statuses, so they are
+    # skipped: its PRs get the status from the comment-triggered run, once the session posts its
+    # review.
     if: >-
       (github.event_name == 'pull_request' && github.actor != 'dependabot[bot]')
       || github.event.issue.pull_request

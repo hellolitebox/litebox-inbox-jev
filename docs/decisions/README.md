@@ -1,16 +1,16 @@
 # Architecture decision records
 
-Short records of the design decisions behind inbox-jev's behaviour: the context, the decision,
-the alternatives that were rejected and the consequences. The behaviour itself is specified in
+Short records of the design decisions behind inbox-jev's behaviour: the context, the decision, the
+alternatives that were rejected and the consequences. The behaviour itself is specified in
 [`docs/how-it-decides.md`](../how-it-decides.md).
 
-Add a record when a PR makes a design decision (a new rule, a guard, a trade-off between safety
-and coverage), in the same PR. Name it `NNNN-short-title.md` with the next number and the
-sections Context, Decision, Alternatives considered, Consequences. Don't rewrite an accepted
-record when the decision changes: add a new one and mark the old one `Superseded by NNNN`.
+Add a record when a PR makes a design decision (a new rule, a guard, a trade-off between safety and
+coverage), in the same PR. Name it `NNNN-short-title.md` with the next number and the sections
+Context, Decision, Alternatives considered, Consequences. Don't rewrite an accepted record when the
+decision changes: add a new one and mark the old one `Superseded by NNNN`.
 
 | # | Decision | Status | PR |
-|---|---|---|---|
+| -- | -- | -- | -- |
 | [0001](0001-needs-reply-only-on-kept-emails.md) | Flag "needs reply" only on emails that stay in the inbox | Accepted | #2 |
 | [0002](0002-container-uid-not-1000.md) | Run the container as a configurable uid, not 1000 | Accepted | #4 |
 | [0003](0003-gradual-act-rollout.md) | Roll out `act` gradually with `act_categories` | Accepted | #6 |

@@ -19,7 +19,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<10", "pytest-cov>=7", "ruff==0.17.0", "mypy>=2.4", "pre-commit>=3"]
+dev = [
+    "pytest>=8,<10",
+    "pytest-cov>=7",
+    "ruff==0.17.0",
+    "mypy>=2.4",
+    "pre-commit>=3",
+    # Markdown formatter (.mdformat.toml); pinned here and in .pre-commit-config.yaml.
+    "mdformat==1.0.0",
+    "mdformat-gfm==1.0.0",
+    "mdformat-frontmatter==2.1.2",
+]
 
 [project.scripts]
 inbox-jev = "inbox_jev.cli:app"

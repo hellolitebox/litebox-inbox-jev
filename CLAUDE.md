@@ -4,112 +4,121 @@ See [README.md](README.md) for what the tool does and how it is configured.
 
 ## Development workflow (mandatory for every change)
 
-`main` is production: the VPS deploys from it. The repo ruleset "main: PR + CI" only accepts
-changes through squash-merged pull requests whose branch is up to date with `main`, with green
-`test`, `test-min-python`, `secrets`, `docker` and `qa-verdict` checks and no unresolved review
-threads; it requires no approving review. `qa-verdict` is the QA reviewer's verdict for the exact
-head commit, set by the `QA gate` workflow (`scripts/qa_gate.py`, ADR 0028). Every change, however
-small, follows this loop; `/ship <n>` (`.claude/skills/ship`) runs steps 4 and 5:
+`main` is production: the VPS deploys from it. The repo ruleset "main: PR + CI" only accepts changes
+through squash-merged pull requests whose branch is up to date with `main`, with green `test`,
+`test-min-python`, `secrets`, `docker` and `qa-verdict` checks and no unresolved review threads; it
+requires no approving review. `qa-verdict` is the QA reviewer's verdict for the exact head commit,
+set by the `QA gate` workflow (`scripts/qa_gate.py`, ADR 0028). Every change, however small, follows
+this loop; `/ship <n>` (`.claude/skills/ship`) runs steps 4 and 5:
 
 1. **Branch** off `main`: `feat/…`, `fix/…`, `chore/…`.
 2. **Implement** with tests. Before writing code, load with the Skill tool the Python skills that
-   the routing table in `.claude/agents/qa-reviewer.md` ("Python skills") selects for the paths
-   you change (a change that touches none of them, e.g. docs only, loads none), and apply them;
-   the repo's own conventions win over a skill's generic advice. The PR body gets a
-   `Skills applied:` line naming the skills (or `none: docs-only`) and any concrete change they
-   drove; if a skill isn't available, say so on that line and continue. Whoever implements (this
-   session or a spawned agent) does this; a spawned agent needs the Skill tool. Before pushing,
-   run `ruff format`, `ruff check`, `mypy` and `pytest` and make them green (`pre-commit install`
-   once per clone runs ruff and gitleaks on every commit). A change to decision logic also updates
-   the spec, its examples and their tests in the same PR (see
-   [Decision logic docs](#decision-logic-docs-mandatory)).
+   the routing table in `.claude/agents/qa-reviewer.md` ("Python skills") selects for the paths you
+   change (a change that touches none of them, e.g. docs only, loads none), and apply them; the
+   repo's own conventions win over a skill's generic advice. The PR body gets a `Skills applied:`
+   line naming the skills (or `none: docs-only`) and any concrete change they drove; if a skill
+   isn't available, say so on that line and continue. Whoever implements (this session or a spawned
+   agent) does this; a spawned agent needs the Skill tool. Before pushing, run `ruff format`,
+   `ruff check`, `mypy` and `pytest`, and `mdformat` on the Markdown you changed, and make them
+   green (`pre-commit install` once per clone runs ruff, mdformat and gitleaks on every commit; CI
+   runs `mdformat --check` on every tracked `.md`). A change to decision logic also updates the
+   spec, its examples and their tests in the same PR (see
+   [Decision logic docs](#decision-logic-docs-mandatory)). **Prove the test fails without the fix**:
+   for a bug fix, or a test added for a QA finding about a missing test, run the new test against
+   the code without the fix (stash or revert the fix, or check out the parent commit) and see it
+   fail. The PR body ("Verification"), or the dev reply, says so and how: e.g. "`test_x` fails on
+   `main` with `AssertionError: …`". A test that passes without the fix proves nothing.
 3. **Open a PR** (`gh pr create`) with the template (`.github/pull_request_template.md`): what
    changed, why, how it was verified, deploy notes.
 4. **QA ⇄ Dev loop**:
    - Spawn the `qa-reviewer` subagent with the PR number. It posts its review on the PR, with a
      `Head: <sha>` line naming the commit it reviewed. Every review loads the Python skills the
-     routing table selects (Skill tool), so if you spawn a generic agent pointed at that file,
-     it must have the Skill tool.
-   - If the verdict is `CHANGES_REQUESTED`, spawn the `dev-fixer` subagent with the PR number
-     and the full review. It pushes fixes and posts a reply.
+     routing table selects (Skill tool), so if you spawn a generic agent pointed at that file, it
+     must have the Skill tool.
+   - If the verdict is `CHANGES_REQUESTED`, spawn the `dev-fixer` subagent with the PR number and
+     the full review. It pushes fixes and posts a reply.
    - Spawn `qa-reviewer` again with the PR number, its previous review and the dev reply.
    - Repeat until QA returns `APPROVED`.
-   - After **5 rounds** without approval, stop and summarize the open disagreements for the
-     user instead of looping further.
+   - After **5 rounds** without approval, stop and summarize the open disagreements for the user
+     instead of looping further.
 5. **Merge to production**, only after the final push, with all of these true:
-   - `qa-verdict` is `success` for the current head commit: QA's latest verdict is `APPROVED`
-     and its `Head:` is this commit (or this commit is that one merged with `main` by
+   - `qa-verdict` is `success` for the current head commit: QA's latest verdict is `APPROVED` and
+     its `Head:` is this commit (or this commit is that one merged with `main` by
      `gh pr update-branch`). A verdict for an older commit is `pending`: run another QA round.
-   - CI is green (`gh pr checks <n>`) and the branch is up to date with `main`
-     (`mergeStateStatus` is `CLEAN`; when `BEHIND`, `gh pr update-branch <n>` and wait for CI).
+   - CI is green (`gh pr checks <n>`) and the branch is up to date with `main` (`mergeStateStatus`
+     is `CLEAN`; when `BEHIND`, `gh pr update-branch <n>` and wait for CI).
    - No unresolved review threads (human or bot). `dev-fixer` addresses or replies to them.
    - The ruleset enforces all three. Then the orchestrating session runs
      `gh pr merge <n> --squash --delete-branch`. The user authorized this as the standing merge
      path; no human approval is needed.
-6. **Deploy**: on the server, `scripts/deploy.sh` (README → "Updating a deployment"). It stops
-   the triage timer and waits for any running pass (the oneshot service's `ActiveState` is
-   `activating` while it runs, so `systemctl is-active` doesn't wait), backs up
-   `data/inbox-jev.db`, checks out `origin/main` (or the ref you pass: `scripts/deploy.sh
-   <previous sha>` rolls back), pulls the image CI built for that commit (ADR 0029), records its
-   tag in `.env` and checks `inbox-jev --version` against the checkout. It keeps the
-   `DEPLOY_BACKUPS_KEEP` (10) newest DB backups. Failed runs, a stale triage (no successful pass
-   in 60 min) and failed nightly off-site backups (`rclone` to Google Drive) post Slack alerts
-   from host-side scripts (README → "Alerts", "Off-site backups"); after a deploy that changes
-   `deploy/systemd/`, copy the units and `daemon-reload`.
-   When the PR has one-off deploy steps (e.g. `reprocess`, `senders backfill`, deleting rules
-   that no longer fit), run `scripts/deploy.sh --hold`, the steps, then start the timer. Server
-   config (`accounts.yaml`, `.env`) is not in git: back it up before editing it.
+6. **Deploy**: on the server, `scripts/deploy.sh` (README → "Updating a deployment"). It stops the
+   triage timer and waits for any running pass (the oneshot service's `ActiveState` is `activating`
+   while it runs, so `systemctl is-active` doesn't wait), backs up `data/inbox-jev.db`, checks out
+   `origin/main` (or the ref you pass: `scripts/deploy.sh <previous sha>` rolls back), pulls the
+   image CI built for that commit (ADR 0029), records its tag in `.env` and checks
+   `inbox-jev --version` against the checkout. It keeps the `DEPLOY_BACKUPS_KEEP` (10) newest DB
+   backups. Failed runs, a stale triage (no successful pass in 60 min) and failed nightly off-site
+   backups (`rclone` to Google Drive) post Slack alerts from host-side scripts (README → "Alerts",
+   "Off-site backups"); after a deploy that changes `deploy/systemd/`, copy the units and
+   `daemon-reload`. When the PR has one-off deploy steps (e.g. `reprocess`, `senders backfill`,
+   deleting rules that no longer fit), run `scripts/deploy.sh --hold`, the steps, then start the
+   timer. Server config (`accounts.yaml`, `.env`) is not in git: back it up before editing it.
 
 **Dependabot PRs** take a lighter lane (see `/ship`, "Dependabot lane"): no `qa-reviewer` or
 `dev-fixer`; the orchestrating session checks that the diff is only pins and lockfile, reads the
-release notes of major or sensitive bumps, posts the same `## QA review` comment with its
-`Head:` so the gate can pass, and merges through the same gates. A bump that needs code changes
-goes through the full loop.
+release notes of major or sensitive bumps, posts the same `## QA review` comment with its `Head:` so
+the gate can pass, and merges through the same gates. A bump that needs code changes goes through
+the full loop.
 
-**Public Suffix List updates** start from an issue, not a PR (see `/ship`, "PSL lane"). The
-weekly `Update public suffix list` workflow runs `scripts/update_psl.py --check` (download,
-validate, compare; it never writes to the repo) and, when a newer valid list exists, opens or
-updates the open issue labeled `psl-update` with the validated VERSION and COMMIT. A session that
-sees it branches off `main`, runs `scripts/update_psl.py`, checks that the diff is only
+**Public Suffix List updates** start from an issue, not a PR (see `/ship`, "PSL lane"). The weekly
+`Update public suffix list` workflow runs `scripts/update_psl.py --check` (download, validate,
+compare; it never writes to the repo) and, when a newer valid list exists, opens or updates the open
+issue labeled `psl-update` with the validated VERSION and COMMIT. A session that sees it branches
+off `main`, runs `scripts/update_psl.py`, checks that the diff is only
 `src/inbox_jev/public_suffix_list.dat` and reads the rules added and removed, runs
-`scripts/check_branch.sh <branch> --account <email> --query 'in:inbox newer_than:1d' --limit 1`
-once on the server (it loads the whole production accounts file with the new list, whatever
-`--account` names, so a `group_domains` entry of any account that became a suffix fails there,
-before it can fail a deploy), and opens a normal PR with that output in
-"Verification" and `Closes #<issue>`. The PR takes the normal loop above (`qa-reviewer`, merge
-gates); merging it closes the issue.
+`scripts/check_branch.sh <branch> --account <email> --query 'in:inbox newer_than:1d' --limit 1` once
+on the server (it loads the whole production accounts file with the new list, whatever `--account`
+names, so a `group_domains` entry of any account that became a suffix fails there, before it can
+fail a deploy), and opens a normal PR with that output in "Verification" and `Closes #<issue>`. The
+PR takes the normal loop above (`qa-reviewer`, merge gates); merging it closes the issue.
 
 Never merge with failing CI, an unresolved review thread or a QA verdict other than APPROVED.
 Subagents (`qa-reviewer`, `dev-fixer`) never merge, approve or use `--admin`, and never post a
 `## QA review` comment except `qa-reviewer` itself.
 
 ### Merge and approval
-`inbox-jev` is excluded from the `hellolitebox` org ruleset "AI review gate" (which requires a
-human approval); the repo ruleset above replaces it. Never use `--admin`, and never weaken or
-bypass the ruleset. If a check fails, fix it through the loop. The `qa-verdict` check is only
-ever satisfied by a real review: `qa-reviewer`'s comment, or the session's own review of a
-Dependabot bump. Posting a `## QA review` comment to get past it is bypassing the ruleset.
+
+`inbox-jev` is excluded from the `hellolitebox` org ruleset "AI review gate" (which requires a human
+approval); the repo ruleset above replaces it. The exclusion is keyed on the repo **name** (the
+ruleset's `conditions.repository_name.exclude`, currently `litebox-inbox-jev`): renaming the repo
+applies the gate again (one human approval per PR) until that exclude list is updated, which needs
+the `admin:org` scope. The maintainer chose to keep name-based targeting. Never use `--admin`, and
+never weaken or bypass the ruleset. If a check fails, fix it through the loop. The `qa-verdict`
+check is only ever satisfied by a real review: `qa-reviewer`'s comment, or the session's own review
+of a Dependabot bump. Posting a `## QA review` comment to get past it is bypassing the ruleset.
 
 ### Secret scanning
-CI runs gitleaks over the full history. If it flags a real secret, **rotate it first**, then add
-its fingerprint to `.gitleaksignore`. Never just ignore it.
+
+CI runs gitleaks over the full history. If it flags a real secret, **rotate it first**, then add its
+fingerprint to `.gitleaksignore`. Never just ignore it.
 
 ## Validating behaviour changes
-Changes to classification (`categories.yaml` criteria, `classifier.py` state, body extraction)
-or to destructive actions (archive, spam, unsubscribe) must be checked against real mail before
-merging, not only with unit tests. Use [`scripts/dry_classify.py`](scripts/dry_classify.py)
-in the app container on the server, with the branch's code and `categories.yaml`. For each email
-it prints the category stored in the DB, then the branch's category, confidence, outcome
-(REVIEW / ARCHIVE / KEEP / SPAM, group / unsubscribe flags) and top-3 probabilities, with From
-and Subject truncated. It calls Jev (one classification per email) and the sent-mail search, but
-never modifies Gmail, opens SQLite read-only and commits nothing.
+
+Changes to classification (`categories.yaml` criteria, `classifier.py` state, body extraction) or to
+destructive actions (archive, spam, unsubscribe) must be checked against real mail before merging,
+not only with unit tests. Use [`scripts/dry_classify.py`](scripts/dry_classify.py) in the app
+container on the server, with the branch's code and `categories.yaml`. For each email it prints the
+category stored in the DB, then the branch's category, confidence, outcome (REVIEW / ARCHIVE / KEEP
+/ SPAM, group / unsubscribe flags) and top-3 probabilities, with From and Subject truncated. It
+calls Jev (one classification per email) and the sent-mail search, but never modifies Gmail, opens
+SQLite read-only and commits nothing.
 
 [`scripts/check_branch.sh`](scripts/check_branch.sh), run on the server from the deployment
 checkout, does the whole thing: it fetches the branch into a throwaway worktree next to the
 deployment (never over it: the running app uses `/opt/inbox-jev`), mounts the branch's
-`src/inbox_jev`, `categories.yaml` and `dry_classify.py` into the app image ahead of the
-installed package (the image has it non-editable in site-packages, so a `PYTHONPATH` directory
-comes first), runs it, and removes the worktree:
+`src/inbox_jev`, `categories.yaml` and `dry_classify.py` into the app image ahead of the installed
+package (the image has it non-editable in site-packages, so a `PYTHONPATH` directory comes first),
+runs it, and removes the worktree:
 
 ```bash
 cd /opt/inbox-jev
@@ -118,77 +127,83 @@ scripts/check_branch.sh <branch> --account you@example.com --ids ID …   # --ig
 scripts/check_branch.sh <branch> --account you@example.com --reference --quiet [--accepted 7]
 ```
 
-**Reference set**: a per-email check is judged by eye, and Jev's run-to-run noise flips
-borderline emails (a notification at 0.82, then 0.77, around a 0.80 threshold). `--reference`
-turns the user's own corrections into a score: it checks the account's `done` emails whose
-category the user corrected (`corrected_category`, as `corrections.detect` learns it: a
-different category label, the Review label removed from a suggestion, or an archived or spammed
-email pulled back to the inbox, which counts as `important`), the correction being the truth. With
-`--accepted DAYS` (opt-in, weaker, reported separately) it adds emails from a `label`/`act` pass
-at least DAYS days old that the user left alone: no correction, not restored, not left in Review,
-and no edit in their current Gmail labels; their truth is the stored decision. `--limit N` caps
-each kind (newest first) and `--since DAYS` keeps rows processed in the last DAYS days. It always
-asks Jev (a correction is also a sender rule to the truth) and ends with a summary: the branch's
-accuracy against the truth and the stored decision's (what Jev decided then, on the deployed
-code) as the baseline, with `fixed` / `broken` counts. The baseline only covers corrections whose
-stored decision was Jev's (`source` `jev`); the others are scored for the branch alone and counted
-as `baseline_unknown`: a rule or the allowlist decided them (not like-for-like with a branch that
-ignores rules), or a later pass redid them (an `act` pass over `label` rows, `reprocess`) and
-stored the correction rule's answer over Jev's. It also prints the mismatches as
-`truth -> answer` category pairs, how many of Jev's answers are within ±0.05 and ±0.10 of their
-category's threshold (the borderline band) and the Jev calls; emails deleted from Gmail, accepted
-ones edited since and failed Jev calls are counted, not scored. `--quiet` prints only that
-summary: category names and counts, no ids, From or Subject.
+**Reference set**: a per-email check is judged by eye, and Jev's run-to-run noise flips borderline
+emails (a notification at 0.82, then 0.77, around a 0.80 threshold). `--reference` turns the user's
+own corrections into a score: it checks the account's `done` emails whose category the user
+corrected (`corrected_category`, as `corrections.detect` learns it: a different category label, the
+Review label removed from a suggestion, or an archived or spammed email pulled back to the inbox,
+which counts as `important`), the correction being the truth. With `--accepted DAYS` (opt-in,
+weaker, reported separately) it adds emails from a `label`/`act` pass at least DAYS days old that
+the user left alone: no correction, not restored, not left in Review, and no edit in their current
+Gmail labels; their truth is the stored decision. `--limit N` caps each kind (newest first) and
+`--since DAYS` keeps rows processed in the last DAYS days. It always asks Jev (a correction is also
+a sender rule to the truth) and ends with a summary: the branch's accuracy against the truth and the
+stored decision's (what Jev decided then, on the deployed code) as the baseline, with `fixed` /
+`broken` counts. The baseline only covers corrections whose stored decision was Jev's (`source`
+`jev`); the others are scored for the branch alone and counted as `baseline_unknown`: a rule or the
+allowlist decided them (not like-for-like with a branch that ignores rules), or a later pass redid
+them (an `act` pass over `label` rows, `reprocess`) and stored the correction rule's answer over
+Jev's. It also prints the mismatches as `truth -> answer` category pairs, how many of Jev's answers
+are within ±0.05 and ±0.10 of their category's threshold (the borderline band) and the Jev calls;
+emails deleted from Gmail, accepted ones edited since and failed Jev calls are counted, not scored.
+`--quiet` prints only that summary: category names and counts, no ids, From or Subject.
 
-A PR that changes classification puts both in "Verification": the per-email check on recent
-mail and the `--reference --quiet` summary, with the branch's accuracy next to the stored
-baseline (run it on `main` too when the stored decisions predate a change already deployed).
+A PR that changes classification puts both in "Verification": the per-email check on recent mail and
+the `--reference --quiet` summary, with the branch's accuracy next to the stored baseline (run it on
+`main` too when the stored decisions predate a change already deployed).
 
 The compose service still mounts `data/` read-write; the script must never write it (no
-`db.make_engine` or `db.open_sessions`, which run `create_all`). A branch that changes
-`pyproject.toml` or `uv.lock` is refused: build a separate image instead. Put the output in the
-PR's "Verification" section (QA checks for it, see the reviewer's "Real-mail check"); never log
-or post email bodies.
+`db.make_engine` or `db.open_sessions`, which run `create_all`). A branch whose runtime dependencies
+differ from the deployment's is refused (build a separate image instead): `uv.lock` differs, or
+`pyproject.toml`'s `requires-python`, `dependencies` or an optional-dependency group other than
+`dev` (`scripts/runtime_deps.py`, run with the host's `python3`). A change to tool config
+(`[tool.ruff]`, `[tool.mypy]`, coverage) passes. A change to the version or the `dev` extra is
+refused anyway: `uv.lock` records both, so it changes with them. Put the output in the PR's
+"Verification" section (QA checks for it, see the reviewer's "Real-mail check"); never log or post
+email bodies.
 
 ## Conventions
+
 - Dependencies are locked in `uv.lock`: after changing `pyproject.toml`, run `uv lock` and commit
-  both (CI runs `uv lock --check`; the Docker image installs with `uv sync --frozen`).
-  Dependabot opens weekly update PRs, which take the Dependabot lane (see the workflow above).
+  both (CI runs `uv lock --check`; the Docker image installs with `uv sync --frozen`). Dependabot
+  opens weekly update PRs, which take the Dependabot lane (see the workflow above).
 - `ruff` is pinned twice: in the `dev` extra of `pyproject.toml` and as `rev` in
-  `.pre-commit-config.yaml`. Bump both together (Dependabot only updates `pyproject.toml`).
-- `uv` is pinned twice: the `ghcr.io/astral-sh/uv` stage tag in the `Dockerfile` and
-  `UV_VERSION` in `.github/workflows/ci.yml` (every job's `setup-uv`). Bump both together:
-  Dependabot only updates the Dockerfile tag, and CI's `test` job fails when the two differ. Don't
-  add `[tool.uv] required-version`: Dependabot's bundled uv would refuse to lock and no
-  dependency PRs would be opened.
-- The base image's Python (`python:3.x-slim` in the `Dockerfile`) must equal `PYTHON_VERSION`
-  in `ci.yml`. The `docker` job checks it, so a Dependabot base-image bump needs `PYTHON_VERSION`
-  bumped in the same PR. The `docker` job also builds the image, smoke-tests it as a non-root
-  uid, as production runs it, and on `main` pushes it to GHCR: that image is what
-  `scripts/deploy.sh` deploys (ADR 0029). Base images are pinned by tag **and** digest, and
-  GitHub Actions by commit SHA with the version as a comment; Dependabot bumps both halves, so
-  keep that shape when editing them by hand.
+  `.pre-commit-config.yaml`. Bump both together (Dependabot only updates `pyproject.toml`). So is
+  `mdformat` with its plugins `mdformat-gfm` and `mdformat-frontmatter`: in the `dev` extra and as
+  the mdformat hook's `rev` and `additional_dependencies`. Its settings are in `.mdformat.toml`
+  (prose wrapped at 100 columns, consecutive list numbers, unpadded tables).
+- `uv` is pinned twice: the `ghcr.io/astral-sh/uv` stage tag in the `Dockerfile` and `UV_VERSION` in
+  `.github/workflows/ci.yml` (every job's `setup-uv`). Bump both together: Dependabot only updates
+  the Dockerfile tag, and CI's `test` job fails when the two differ. Don't add
+  `[tool.uv] required-version`: Dependabot's bundled uv would refuse to lock and no dependency PRs
+  would be opened.
+- The base image's Python (`python:3.x-slim` in the `Dockerfile`) must equal `PYTHON_VERSION` in
+  `ci.yml`. The `docker` job checks it, so a Dependabot base-image bump needs `PYTHON_VERSION`
+  bumped in the same PR. The `docker` job also builds the image, smoke-tests it as a non-root uid,
+  as production runs it, and on `main` pushes it to GHCR: that image is what `scripts/deploy.sh`
+  deploys (ADR 0029). Base images are pinned by tag **and** digest, and GitHub Actions by commit SHA
+  with the version as a comment; Dependabot bumps both halves, so keep that shape when editing them
+  by hand.
 - Python ≥ 3.11 (`requires-python`; CI's `test-min-python` job runs the tests on
   `MIN_PYTHON_VERSION` and checks it equals `requires-python`, so bump them together), ruff (line
-  length 100), mypy (`[tool.mypy]` in `pyproject.toml`: `src`, `scripts` and `tests/fakes.py`,
-  with `disallow_untyped_defs`, `disallow_incomplete_defs`, `disallow_any_generics` and
-  `warn_return_any`; the fakes are typed and checked, with `gmail.Gmail`, against the protocols
-  they stand in for: `triage.GmailApi`, `corrections.LabelReader`, `labels.LabelApi` (and
-  `gmail.Gmail` against `sent_scan.SentMail`); only `yaml`, `googleapiclient` and
-  `google_auth_oauthlib` are untyped, their objects are `Any`), pytest. No network calls in
-  tests: use the fakes in `tests/fakes.py`, injected (`Context(…, gmail=…, classifier=…,
-  unsubscriber=…)`), not monkeypatched into modules.
+  length 100), mypy (`[tool.mypy]` in `pyproject.toml`: `src`, `scripts` and `tests/fakes.py`, with
+  `disallow_untyped_defs`, `disallow_incomplete_defs`, `disallow_any_generics` and
+  `warn_return_any`; the fakes are typed and checked, with `gmail.Gmail`, against the protocols they
+  stand in for: `triage.GmailApi`, `corrections.LabelReader`, `labels.LabelApi` (and `gmail.Gmail`
+  against `sent_scan.SentMail`); only `yaml`, `googleapiclient` and `google_auth_oauthlib` are
+  untyped, their objects are `Any`), pytest. No network calls in tests: use the fakes in
+  `tests/fakes.py`, injected (`Context(…, gmail=…, classifier=…, unsubscriber=…)`), not
+  monkeypatched into modules.
 - pytest turns `ResourceWarning` (and the unraisable-exception warning a finalizer's
-  `ResourceWarning` becomes) into errors, so an engine, file or client left open fails the
-  tests: open the DB with `db.open_sessions` (a context manager that disposes the engine), and
-  in tests with the `make_sessions` fixture.
-- Coverage: CI's `test` job runs `pytest --cov` (report in the log and the job summary) and
-  fails under `[tool.coverage.report] fail_under` in `pyproject.toml`. Locally,
-  `uv run pytest --cov` does the same. Raise `fail_under` when coverage grows; never lower it to
-  get a PR through.
+  `ResourceWarning` becomes) into errors, so an engine, file or client left open fails the tests:
+  open the DB with `db.open_sessions` (a context manager that disposes the engine), and in tests
+  with the `make_sessions` fixture.
+- Coverage: CI's `test` job runs `pytest --cov` (report in the log and the job summary) and fails
+  under `[tool.coverage.report] fail_under` in `pyproject.toml`. Locally, `uv run pytest --cov` does
+  the same. Raise `fail_under` when coverage grows; never lower it to get a PR through.
 - `policy.py` stays pure (no I/O). Gmail access goes in `gmail.py` (body extraction in `body.py`,
-  the sent-mail search in `sent_scan.py`) and orchestration in `triage.py` (the pass's Jev client
-  in `jev_guard.py`, the stored domain scans in `scan_rows.py`, `unsubscribe-retry` in
+  the sent-mail search in `sent_scan.py`) and orchestration in `triage.py` (the pass's Jev client in
+  `jev_guard.py`, the stored domain scans in `scan_rows.py`, `unsubscribe-retry` in
   `unsubscribe_retry.py`).
 - New categories or labels go in `categories.yaml`, not in code.
 - Anything keyed on the sender (rules, corrections, `previous_contact`, allowlist) uses
@@ -197,23 +212,23 @@ or post email bodies.
   address, never on the author they claim.
 - Every new path that can unsubscribe must go through the same checks and respect what the user
   decided since (sender rules, corrections, restore, star). Unsubscribes are irreversible. The
-  sender checks (category, allowlist, verified, group, known contact) are
-  `policy.unsubscribe_gate` and the mode / `act_categories` check is `policy.acts_on`: call them,
-  never re-implement them. Once-per-list, confidence and the run cap stay with the caller, and
-  an attempt is stored with `triage.record_attempt`. `run` and `unsubscribe-retry`
-  (`unsubscribe_retry.retry_unsubscribes`) both do; `tests/test_safety_gates.py` runs the same
-  scenarios through every path, so add a new path there.
-- Keep README.md, `categories.yaml` comments and `accounts.example.yaml` in sync with behaviour
-  in the same PR.
-- Secrets live only in `.env`, `secrets/` and `accounts.yaml`, which are gitignored. Never log
-  email bodies.
+  sender checks (category, allowlist, verified, group, known contact) are `policy.unsubscribe_gate`
+  and the mode / `act_categories` check is `policy.acts_on`: call them, never re-implement them.
+  Once-per-list, confidence and the run cap stay with the caller, and an attempt is stored with
+  `triage.record_attempt`. `run` and `unsubscribe-retry` (`unsubscribe_retry.retry_unsubscribes`)
+  both do; `tests/test_safety_gates.py` runs the same scenarios through every path, so add a new
+  path there.
+- Keep README.md, `categories.yaml` comments and `accounts.example.yaml` in sync with behaviour in
+  the same PR.
+- Secrets live only in `.env`, `secrets/` and `accounts.yaml`, which are gitignored. Never log email
+  bodies.
 - Schema changes: the project uses `create_all` with no migrations yet. A change to an existing
   table needs a migration story (or an explicit note in the PR) for databases already deployed.
-- Agents create their worktrees as siblings of the checkout (`<repo>-qa-<n>`, `<repo>-dev-<n>`)
-  and remove them when done; Claude Code's own go under `.claude/worktrees/`, which is
-  gitignored.
+- Agents create their worktrees as siblings of the checkout (`<repo>-qa-<n>`, `<repo>-dev-<n>`) and
+  remove them when done; Claude Code's own go under `.claude/worktrees/`, which is gitignored.
 
 ## Decision logic docs (mandatory)
+
 [`docs/how-it-decides.md`](docs/how-it-decides.md) is the functional spec of how an email is
 decided, and [`docs/decisions/`](docs/decisions/README.md) holds the ADRs explaining why. Every
 change to decision logic must, **in the same PR**:
@@ -221,26 +236,25 @@ change to decision logic must, **in the same PR**:
 - update `docs/how-it-decides.md` (flowcharts, tables, numbers, "Known gaps") so it matches the
   code;
 - add or update the worked examples (`EX-NN`) it affects, and their tests in
-  `tests/test_spec_examples.py` (`test_exNN_…`, docstring citing `EX-NN`). A **new** rule or
-  guard that changes an outcome (what is labeled, archived, spammed, unsubscribed or learned) gets
-  a **new** `EX-NN` showing it. The test `test_doc_examples_match_tests` fails when an ID exists
-  on only one side, or when the doc's "**Test**:" name isn't the test's name;
-- add an ADR (`docs/decisions/NNNN-title.md`, plus the index) when the change is a design
-  decision: a new rule or guard, a changed threshold or default, a trade-off between safety and
-  coverage. Supersede an old ADR instead of rewriting it.
+  `tests/test_spec_examples.py` (`test_exNN_…`, docstring citing `EX-NN`). A **new** rule or guard
+  that changes an outcome (what is labeled, archived, spammed, unsubscribed or learned) gets a
+  **new** `EX-NN` showing it. The test `test_doc_examples_match_tests` fails when an ID exists on
+  only one side, or when the doc's "**Test**:" name isn't the test's name;
+- add an ADR (`docs/decisions/NNNN-title.md`, plus the index) when the change is a design decision:
+  a new rule or guard, a changed threshold or default, a trade-off between safety and coverage.
+  Supersede an old ADR instead of rewriting it.
 
 Decision logic means: `categories.yaml` (categories, actions, thresholds, criteria, archive group,
 needs_reply, tags, auto_rule), `policy.py`, `triage.py` (pipeline, `previous_contact`, user edits,
-the `run` unsubscribe path), `unsubscribe_retry.py` (the `unsubscribe-retry` path),
-`jev_guard.py` (when a pass stops asking Jev, whose fault a refusal is), `rules.py`,
-`corrections.py`, `signals.py`, `psl.py` and the vendored `public_suffix_list.dat` (except a
-PSL-lane update of the list alone), `unsubscribe.py`, the classifier state and questions
-(`classifier.py`), body extraction (`body.py`), the sent-mail search and its cache
-(`Gmail.has_written_to`, `sent_scan.py`, `scan_rows.py`), `config.py` (`FREE_MAIL`,
-`PUBLIC_GROUP_HOSTS`, `group_domains` normalisation and rejection, the `act_categories` and
-`archive_group_reply_keep_probability` validators, and the `Settings` defaults `MODE`,
-`LOOKBACK`, `MAX_MESSAGES_PER_RUN`, `MAX_UNSUBSCRIBES_PER_RUN`, `BODY_CHARS`), and the `cli.py`
-commands that change decisions or stored state (`restore`, `reprocess`, `rules set` /
-`rules delete`, `unsubscribe-retry`). QA rejects a PR that changes any of these without the
-matching doc, example and test updates (or an explicit "no behaviour change" justification in
-the PR body, e.g. a pure refactor).
+the `run` unsubscribe path), `unsubscribe_retry.py` (the `unsubscribe-retry` path), `jev_guard.py`
+(when a pass stops asking Jev, whose fault a refusal is), `rules.py`, `corrections.py`,
+`signals.py`, `psl.py` and the vendored `public_suffix_list.dat` (except a PSL-lane update of the
+list alone), `unsubscribe.py`, the classifier state and questions (`classifier.py`), body extraction
+(`body.py`), the sent-mail search and its cache (`Gmail.has_written_to`, `sent_scan.py`,
+`scan_rows.py`), `config.py` (`FREE_MAIL`, `PUBLIC_GROUP_HOSTS`, `group_domains` normalisation and
+rejection, the `act_categories` and `archive_group_reply_keep_probability` validators, and the
+`Settings` defaults `MODE`, `LOOKBACK`, `MAX_MESSAGES_PER_RUN`, `MAX_UNSUBSCRIBES_PER_RUN`,
+`BODY_CHARS`), and the `cli.py` commands that change decisions or stored state (`restore`,
+`reprocess`, `rules set` / `rules delete`, `unsubscribe-retry`). QA rejects a PR that changes any of
+these without the matching doc, example and test updates (or an explicit "no behaviour change"
+justification in the PR body, e.g. a pure refactor).

@@ -158,3 +158,29 @@ def test_main_reports_which_api_call_failed(monkeypatch, capsys):
     assert qa_gate.main(["--repo", "o/r", "--pr", "7"]) == 1
     err = capsys.readouterr().err
     assert "repos/o/r/pulls/7" in err and "HTTP 403" in err
+
+
+def test_main_posts_pending_and_succeeds_for_a_new_head(monkeypatch, capsys):
+    """A push with no review for the new head: the status is `pending` and the job still passes
+    (exit 0); only a failed `gh api` call fails it."""
+    calls = []
+
+    def gh_api(path, *args):
+        calls.append((path, args))
+        if path == "repos/o/r/pulls/7":
+            return {"head": {"sha": HEAD}, "base": {"ref": "main"}}
+        if path == "repos/o/r/issues/7/comments":
+            return [[review(head=OLD)]]  # --paginate --slurp: a list of pages
+        if path.startswith("repos/o/r/commits/"):
+            return {"parents": [{"sha": OLD}]}  # a plain commit: new work
+        if path == f"repos/o/r/statuses/{HEAD}":
+            return {}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(qa_gate, "gh_api", gh_api)
+
+    assert qa_gate.main(["--repo", "o/r", "--pr", "7"]) == 0
+    path, fields = calls[-1]
+    assert path == f"repos/o/r/statuses/{HEAD}"
+    assert "state=pending" in fields and "context=qa-verdict" in fields
+    assert "pending" in capsys.readouterr().out

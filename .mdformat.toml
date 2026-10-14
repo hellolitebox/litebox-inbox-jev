@@ -1,0 +1,8 @@
+# mdformat (pinned in the dev extra and .pre-commit-config.yaml): every tracked .md file is
+# formatted, prose wrapped at 100 columns like the code. CI runs `mdformat --check`.
+wrap = 100
+number = true  # 1. 2. 3., not 1. 1. 1.
+end_of_line = "lf"
+
+[plugin.tables]
+compact_tables = true  # no column padding: a table edit stays a one-line diff
