@@ -217,7 +217,10 @@ message instead of misbehaving later:
 - `.env`: `MODE` is `dry_run`, `label` or `act`; `LOOKBACK` a Gmail `newer_than` value (`2d`,
   `3m`, `1y`); `LOG_LEVEL` one of `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` (any case);
   `MAX_MESSAGES_PER_RUN` and `BODY_CHARS` at least 1; `MAX_UNSUBSCRIBES_PER_RUN` at least 0 (0
-  never unsubscribes).
+  never unsubscribes). The "Host-side ops scripts" settings (`ALERT_*`, `WATCHDOG_*`,
+  `BACKUP_*`, `DEPLOY_BACKUPS_KEEP`) aren't the app's: the scripts that read them check them when
+  they run (a count that isn't a whole number in range exits 2, which the watchdog and backup
+  services turn into an alert).
 - `categories.yaml`: every `min_confidence`, `threshold`, `max_keep_probability` and
   `archive_group_*` value is between 0 and 1, `auto_rule.hits` at least 1, plus the checks in
   its comments.
@@ -275,8 +278,11 @@ docker compose run --rm app --version                       # the commit the ima
 docker compose run --rm app run --mode dry_run --limit 20   # smoke test
 sudo cp deploy/systemd/* /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now inbox-jev-triage.timer inbox-jev-digest.timer
+sudo systemctl enable --now inbox-jev-triage.timer inbox-jev-digest.timer \
+  inbox-jev-watchdog.timer inbox-jev-backup.timer
 ```
+
+When a PR changes `deploy/systemd/`, copy the units and `daemon-reload` again after deploying it.
 
 - Triage runs every 10 minutes, so a new email can sit in the inbox for up to ~10 minutes before
   it is handled; the digest runs daily at 08:00 America/Argentina/Buenos_Aires (edit
@@ -290,6 +296,9 @@ sudo systemctl enable --now inbox-jev-triage.timer inbox-jev-digest.timer
   `senders backfill` also go on with the other accounts when one fails, and exit non-zero.
   Jev errors are stored and logged as type, HTTP status and request id only, never Jev's
   message (it can quote the email).
+- Failures post a Slack alert and a watchdog checks that passes keep succeeding (see
+  [Alerts](#alerts)); the DB is backed up off-site every night (see
+  [Off-site backups](#off-site-backups)).
 - Browse the DB: `docker compose --profile viewer up -d viewer`, then
   `ssh -L 8001:localhost:8001 <host>` and open http://localhost:8001. It is bound to localhost
   on the server, never public.
@@ -333,7 +342,8 @@ sudo systemctl start inbox-jev-triage.timer
 ```
 
 The script stops the triage timer and waits for a running pass, backs up the SQLite DB
-(`data/inbox-jev.db.bak-<stamp>`), fetches and checks out `origin/main` (detached: the checkout
+(`data/inbox-jev.db.bak-<stamp>`, keeping the `DEPLOY_BACKUPS_KEEP` newest, 10 by default; older
+ones are deleted, and so are older `.env.bak-<stamp>` copies), fetches and checks out `origin/main` (detached: the checkout
 only ever holds what is deployed), pulls the image for that commit and writes its tag to `.env`
 as `IMAGE_TAG` (the timers' `docker compose run` reads it), checks that `inbox-jev --version`
 inside the image reports the checkout's commit, and starts the timer. If a step fails after the
@@ -345,6 +355,73 @@ for a commit older than the registry, `scripts/deploy.sh --build <sha>`).
 
 New `act_categories` keys go into `accounts.yaml` only after the code that knows them is
 deployed (see [Rolling out a category change](#rolling-out-a-category-change)).
+
+## Alerts
+
+Production failures post to Slack, so they aren't only in the journal. The scripts run on the
+host (bash, curl, the host's `python3` standard library, `journalctl`), never in the app image,
+so an alert still goes out when the image is broken or can't be pulled. They read their settings
+from `.env` (the "Host-side ops scripts" section of `.env.example`) and post with the digest's
+`SLACK_BOT_TOKEN` (scope `chat:write`), which they hand to curl on stdin, never on a command line
+or in a log.
+
+- **A failed run.** The triage, digest, backup and watchdog services have
+  `OnFailure=inbox-jev-alert@%n.service`, which runs `scripts/alert.sh <unit>`. The alert has the
+  unit, host, time, the unit's result and exit status, and the failed run's last
+  `ALERT_LOG_LINES` (20) app log lines, reduced to time, level, `msg`, `account`, `run_id`, the
+  run counts and the exception's type (the `exc_type` field the app's log formatter writes).
+  `msg` is kept only for the app's own loggers (`inbox_jev…`), whose messages are fixed texts; a
+  library's line (googleapiclient, urllib3, the Jev SDK) keeps only its logger name and level,
+  since its message can quote a request URL or a response. Tracebacks (whose message can quote a
+  Gmail or HTTP response), senders, labels and anything else stay in the journal. A unit that
+  keeps failing (an expired Gmail token fails every pass) is alerted about once, then again only
+  after `ALERT_REPEAT_HOURS` (6).
+- **Staleness.** `inbox-jev-watchdog.timer` runs `scripts/watchdog.sh` every 30 minutes. It
+  alerts when no triage pass succeeded (systemd's "Finished" job message) in the last
+  `WATCHDOG_MAX_AGE_MINUTES` (60): the timer is stopped (a `deploy.sh --hold` left that way),
+  passes hang until their timeout, or every pass fails. Once per incident, then a "succeed again"
+  message when passes are back. When the passes fail, `alert.sh` has already alerted about the
+  first failure, so the watchdog stays quiet while that alert is younger than
+  `ALERT_REPEAT_HOURS` and reminds once after that. It also posts "succeeds again" for each unit
+  `alert.sh` alerted about once its last run succeeded (for the watchdog itself: its next run
+  that gets that far).
+- `ALERT_SLACK_CHANNEL` is a channel ID (`C…`, invite the bot) or a user ID (`U…`, a DM from the
+  bot). Unset, alerts are off: each would-be alert logs a line instead. The dedupe state lives in
+  `/var/lib/inbox-jev` (systemd's `StateDirectory=`).
+
+Test an alert by hand: `sudo /opt/inbox-jev/scripts/alert.sh inbox-jev-triage.service` (it
+describes the unit's last run; delete `/var/lib/inbox-jev/alerted-inbox-jev-triage.service` to
+send it again).
+
+## Off-site backups
+
+`inbox-jev-backup.timer` runs `scripts/backup.sh` every night at 04:15
+America/Argentina/Buenos_Aires. It snapshots `data/inbox-jev.db` with sqlite3's `.backup` (the
+online backup API: a consistent copy, WAL included, while a pass may be writing; sqlite3 runs as
+`APP_UID`, so a `-wal` or `-shm` file it creates stays the app's), checks it with
+`PRAGMA quick_check`, gzips it, uploads it with `rclone copyto` to `BACKUP_RCLONE_REMOTE` as
+`inbox-jev-<UTC stamp>.db.gz`, and deletes the remote's backups older than
+`BACKUP_RETENTION_DAYS` (30): only `inbox-jev-*.db.gz` at the remote's top level, never in a
+subfolder (keep a copy by hand in one, e.g. `pre-migration/`). A failure posts an alert. It is off while `BACKUP_RCLONE_REMOTE`
+is unset. Only SQLite is backed up: with a hosted `DATABASE_URL`, use the provider's backups.
+
+One-time setup, as root on the server (rclone's config is root's: the service runs as root):
+
+```bash
+sudo apt-get install -y rclone      # or https://rclone.org/install/ for a newer one
+# rclone's Google sign-in redirects to localhost:53682 on the server: forward that port from
+# your laptop first, in another terminal:  ssh -L 53682:localhost:53682 root@<server>
+sudo rclone config create gdrive drive scope=drive.file
+# open the URL it prints in your laptop's browser and allow access. drive.file only lets rclone
+# see the files it creates, not the rest of the Drive.
+sudo rclone mkdir gdrive:inbox-jev-backups
+echo 'BACKUP_RCLONE_REMOTE=gdrive:inbox-jev-backups' | sudo tee -a /opt/inbox-jev/.env
+sudo systemctl start inbox-jev-backup.service && journalctl -u inbox-jev-backup -n 20
+```
+
+Restore: `rclone copyto gdrive:inbox-jev-backups/<file>.db.gz ./restore.db.gz`, `gunzip` it,
+stop the triage timer, replace `data/inbox-jev.db` (removing its `-wal` and `-shm`), give it to
+`APP_UID:APP_GID`, and start the timer.
 
 ## Database
 

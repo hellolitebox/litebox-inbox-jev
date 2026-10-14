@@ -1,0 +1,10 @@
+[Unit]
+Description=Back up the inbox-jev DB off-site every night
+
+[Timer]
+OnCalendar=*-*-* 04:15:00 America/Argentina/Buenos_Aires
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

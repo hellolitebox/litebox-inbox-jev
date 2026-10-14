@@ -1,0 +1,15 @@
+[Unit]
+Description=inbox-jev Slack alert: %i failed
+# It posts to Slack: a unit failing right after boot (Persistent= timers) waits for the network.
+After=network-online.target
+Wants=network-online.target
+# No OnFailure= here: a failing alert must not alert about itself.
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/inbox-jev
+# Runs on the host (bash, curl, python3), not in the app image: it works when the image doesn't.
+ExecStart=/opt/inbox-jev/scripts/alert.sh %i
+# /var/lib/inbox-jev: which units were alerted about, so a failing unit alerts once per incident.
+StateDirectory=inbox-jev
+TimeoutStartSec=2min

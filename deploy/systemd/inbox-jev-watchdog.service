@@ -1,0 +1,13 @@
+[Unit]
+Description=inbox-jev watchdog: alert when triage stops succeeding, and on recoveries
+# It posts to Slack: wait for the network after boot (Persistent= timer).
+After=network-online.target
+Wants=network-online.target
+OnFailure=inbox-jev-alert@%n.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/inbox-jev
+ExecStart=/opt/inbox-jev/scripts/watchdog.sh
+StateDirectory=inbox-jev
+TimeoutStartSec=2min

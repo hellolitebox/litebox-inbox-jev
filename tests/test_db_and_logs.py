@@ -3,6 +3,7 @@
 import contextlib
 import json
 import logging
+import sys
 from unittest import mock
 
 import httpx2
@@ -284,3 +285,35 @@ def test_setup_writes_the_run_id_in_the_json_line(monkeypatch, capsys):
         logging.getLogger("inbox_jev.test").info("message processed", extra={"id": "m1"})
     line = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert (line["msg"], line["id"], line["run_id"]) == ("message processed", "m1", 42)
+
+
+class _MultiLineError(Exception):
+    """An exception whose message ends with a line that looks like a type (`Subject: …`)."""
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (ValueError("bad\nSubject: Your invoice"), "ValueError"),
+        (_MultiLineError("x\nSubject: Your invoice"), f"{__name__}._MultiLineError"),
+        (httpx2.ConnectError("boom\nSubject: x"), "httpx2.ConnectError"),
+    ],
+)
+def test_json_formatter_writes_the_exact_exception_type(exc, expected):
+    """`exc_type` is the class, not parsed from the traceback's last line (which, for a
+    multi-line message, is the end of the message)."""
+    try:
+        raise exc
+    except Exception:
+        record = logging.getLogger("inbox_jev.test").makeRecord(
+            "inbox_jev.test", logging.ERROR, __file__, 1, "run failed", (), sys.exc_info()
+        )
+    line = json.loads(logs.JsonFormatter().format(record))
+    assert line["exc_type"] == expected
+    assert "Subject" in line["exc"]  # the full traceback stays in the journal
+
+
+def test_json_formatter_without_an_exception_has_no_exc_type():
+    line = json.loads(logs.JsonFormatter().format(_record("fine")))
+    assert "exc" not in line
+    assert "exc_type" not in line

@@ -15,6 +15,15 @@ from .config import LogLevel
 _RESERVED = set(vars(logging.makeLogRecord({}))) | {"message", "asctime"}
 
 
+def exception_type_name(exc_type: type[BaseException]) -> str:
+    """The exception class as a traceback names it (`ValueError`, `google.auth.exceptions.
+    RefreshError`): its type only, never its message, so it is safe to forward (ops alerts)."""
+    module = exc_type.__module__
+    if module in ("builtins", "__main__"):
+        return exc_type.__qualname__
+    return f"{module}.{exc_type.__qualname__}"
+
+
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         data = {
@@ -26,6 +35,8 @@ class JsonFormatter(logging.Formatter):
         data.update({k: v for k, v in vars(record).items() if k not in _RESERVED})
         if record.exc_info:
             data["exc"] = self.formatException(record.exc_info)
+            if record.exc_info[0] is not None:
+                data["exc_type"] = exception_type_name(record.exc_info[0])
         return json.dumps(data, default=str, ensure_ascii=False)
 
 

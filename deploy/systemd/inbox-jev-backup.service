@@ -1,0 +1,14 @@
+[Unit]
+Description=inbox-jev off-site DB backup (rclone)
+After=network-online.target
+Wants=network-online.target
+OnFailure=inbox-jev-alert@%n.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/inbox-jev
+# Runs as root: it reads data/ (mode 700) and root's rclone config; sqlite3 drops to APP_UID.
+ExecStart=/opt/inbox-jev/scripts/backup.sh
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=30min

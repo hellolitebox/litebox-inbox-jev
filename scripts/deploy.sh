@@ -10,7 +10,8 @@
 #   scripts/deploy.sh <ref>           # a commit, tag or branch (origin/<branch>): the previous
 #                                     # sha rolls back
 #
-# Steps: stop the triage timer and wait for a running pass; back up the SQLite DB; fetch and
+# Steps: stop the triage timer and wait for a running pass; back up the SQLite DB, keeping the
+# DEPLOY_BACKUPS_KEEP (default 10) newest data/inbox-jev.db.bak-* and .env.bak-*; fetch and
 # check out the ref, detached (the checkout only ever holds what is deployed); pull (or build)
 # the image for that commit and record its tag in .env as IMAGE_TAG, which the timers'
 # `docker compose run` reads; check that the image reports the checkout's commit
@@ -21,7 +22,12 @@
 # switched), then start the timer by hand. Run it as the user that owns the checkout.
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+# bash reads a script as it runs it, and the checkout below rewrites this file: the braces make
+# it parse everything up to the closing one first, so it never resumes inside the new version.
+{
+# shellcheck source=ops_common.sh
+. "$(dirname "$0")/ops_common.sh"
+cd "$OPS_ROOT"
 build=0
 hold=0
 ref=origin/main
@@ -34,9 +40,12 @@ for arg in "$@"; do
   esac
 done
 [ -f .env ] || { echo ".env not found: run from the deployment checkout" >&2; exit 2; }
+keep=$(env_value DEPLOY_BACKUPS_KEEP 10)
+require_count DEPLOY_BACKUPS_KEEP "$keep" 1
 stamp=$(date +%Y%m%d%H%M)
 env_switched=0
 
+# shellcheck disable=SC2317,SC2329 # run by the EXIT trap (older shellcheck: SC2317, newer: SC2329)
 on_exit() {
   status=$?
   if [ "$status" -ne 0 ]; then
@@ -61,6 +70,7 @@ echo "== backing up the database"
 # The DB runs in WAL mode: sqlite3's .backup copies a consistent DB, WAL included.
 if sudo test -f data/inbox-jev.db; then
   sudo sqlite3 data/inbox-jev.db ".backup 'data/inbox-jev.db.bak-$stamp'"
+  prune_oldest "$keep" data inbox-jev.db.bak- sudo
 else
   echo "   no data/inbox-jev.db (hosted DB?): nothing to back up"
 fi
@@ -85,6 +95,7 @@ elif ! IMAGE_TAG=$tag docker compose pull app; then
 fi
 # Record the tag: compose reads .env for ${IMAGE_TAG}, so the timers run this image from now on.
 cp -p .env ".env.bak-$stamp"
+prune_oldest "$keep" . .env.bak-
 if grep -q '^IMAGE_TAG=' .env; then
   sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=$tag/" .env
 else
@@ -106,3 +117,5 @@ else
   sudo systemctl start inbox-jev-triage.timer
   echo "== done: $tag deployed, timer started"
 fi
+exit
+}

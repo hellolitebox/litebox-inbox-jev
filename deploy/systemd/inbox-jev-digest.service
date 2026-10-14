@@ -2,6 +2,8 @@
 Description=inbox-jev daily Slack digest
 After=docker.service network-online.target
 Requires=docker.service
+# A failed run posts a Slack alert (scripts/alert.sh); off without ALERT_SLACK_CHANNEL.
+OnFailure=inbox-jev-alert@%n.service
 
 [Service]
 Type=oneshot

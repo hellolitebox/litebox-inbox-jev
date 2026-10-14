@@ -51,7 +51,11 @@ small, follows this loop; `/ship <n>` (`.claude/skills/ship`) runs steps 4 and 5
    `activating` while it runs, so `systemctl is-active` doesn't wait), backs up
    `data/inbox-jev.db`, checks out `origin/main` (or the ref you pass: `scripts/deploy.sh
    <previous sha>` rolls back), pulls the image CI built for that commit (ADR 0029), records its
-   tag in `.env` and checks `inbox-jev --version` against the checkout.
+   tag in `.env` and checks `inbox-jev --version` against the checkout. It keeps the
+   `DEPLOY_BACKUPS_KEEP` (10) newest DB backups. Failed runs, a stale triage (no successful pass
+   in 60 min) and failed nightly off-site backups (`rclone` to Google Drive) post Slack alerts
+   from host-side scripts (README → "Alerts", "Off-site backups"); after a deploy that changes
+   `deploy/systemd/`, copy the units and `daemon-reload`.
    When the PR has one-off deploy steps (e.g. `reprocess`, `senders backfill`, deleting rules
    that no longer fit), run `scripts/deploy.sh --hold`, the steps, then start the timer. Server
    config (`accounts.yaml`, `.env`) is not in git: back it up before editing it.

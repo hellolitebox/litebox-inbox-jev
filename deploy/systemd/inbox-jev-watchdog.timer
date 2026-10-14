@@ -1,0 +1,9 @@
+[Unit]
+Description=Check every 30 minutes that inbox-jev triage passes still succeed
+
+[Timer]
+OnCalendar=*:5/30
+Persistent=true
+
+[Install]
+WantedBy=timers.target
