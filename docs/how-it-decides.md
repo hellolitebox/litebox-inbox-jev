@@ -315,9 +315,18 @@ Held rows stay `failed`.
 | ESP / sequence tool (Mailchimp, Instantly…) | `From` | `from` header | Per 3.3 (they don't send `List-Post`) |
 
 - `group_domains` is opt-in and empty by default, not even the account's own domain. Entries are
-  normalised (lowercase, no trailing dot, no leading `@`) and rejected when they aren't a domain,
-  are a bare public suffix like `co.uk` / `com.ar`, or are (or end in) a public mail provider,
-  `googlegroups.com` or `groups.google.com`.
+  normalised (lowercase, no trailing dot, no leading `@`) and rejected, failing the accounts file
+  at load, when they aren't a domain (`signals.DOMAIN`: letters, digits and hyphens, ending in a
+  TLD of 2+ letters or a punycode IDN TLD such as `xn--p1ai`), are a bare ccTLD public suffix
+  (`signals.is_public_suffix`: a two-letter TLD under a second-level label in
+  `signals.PUBLIC_SLDS`, e.g. `co.uk`, `com.ar`, `gouv.fr`, `nhs.uk`, `adv.br`, `govt.nz`), or
+  are (or end in) a public mail provider (`config.FREE_MAIL`, country domains included),
+  `googlegroups.com` or `groups.google.com`. A short name under a ccTLD (`acme.io`, `sap.de`) is a
+  domain. Under the ccTLDs sold as generic names (`signals.GENERIC_CCTLD_SLDS`: `.ai`, `.co`,
+  `.io`, `.me`, `.tv`) only the second levels the Public Suffix List names there are suffixes
+  (`com.ai`, `com.co`, `com.io`, `org.me`; none under `.tv`), so a company at `adv.ai`, `sch.ai`
+  or `plc.io` is a domain. Deeper suffixes (`wa.gov.au`) aren't recognised (see Known gaps). See
+  [EX-27](#ex-27--a-public-suffix-in-group_domains-is-refused).
 - **Allowlist**: `allow_senders` / `allow_domains` are matched against the resolved sender. For a
   trusted group that is the author, so `allow_domains: [yourco.com]` does **not** trust strangers
   writing to `hello@yourco.com`; put the group's exact address in `allow_senders` to allowlist
@@ -331,7 +340,7 @@ Held rows stay `failed`.
 
 | Rule source | Created by | Key | Overrides |
 |---|---|---|---|
-| `manual` | `inbox-jev rules set -a EMAIL SENDER CATEGORY` | address or `@domain` | Replaces any rule on the same key (`rules.set_rule`), including correction and auto rules |
+| `manual` | `inbox-jev rules set -a EMAIL SENDER CATEGORY` | address or `@domain`, lowercased; anything else (a bare domain, a display name) or a category not in `categories.yaml` is refused (exit 2) | Replaces any rule on the same key (`rules.set_rule`), including correction and auto rules |
 | `correction` | A detected correction ([3.7](#37-corrections-user-edits-and-restore)) | exact resolved sender address | Replaces any rule on the same key |
 | `auto` | `rules.record_auto` after consistent Jev answers | exact resolved sender address | Never changes manual/correction rules |
 
@@ -404,7 +413,7 @@ Keep categories can earn a rule too.
   pass that the new plan doesn't add are removed (never `SPAM`).
 - `inbox-jev reprocess -a EMAIL --category KEY [--low-confidence-only]` sets act rows that are
   `done`, not archived, spammed or restored, back to `label`, so the next `act` run (within its
-  `--lookback`) redoes them.
+  `--lookback`) redoes them. A `KEY` not in `categories.yaml` is refused (exit 2).
 
 ### 3.7 Corrections, user edits and restore
 
@@ -446,7 +455,10 @@ them `restored`. Restored emails are never processed again, aren't learned as co
 their failed unsubscribes are `skipped` by `unsubscribe-retry`. Unsubscribes can't be undone.
 An email Gmail no longer has (HTTP 404) is skipped, its row left unchanged, and counted in the
 command's output; any other Gmail error stops the command (emails restored before it stay
-restored). See [EX-20](#ex-20--restore-with-an-email-deleted-in-gmail).
+restored). See [EX-20](#ex-20--restore-with-an-email-deleted-in-gmail). `--category` must be a
+category in `categories.yaml` or one this account's stored emails still carry (so a category
+removed since can still be undone); anything else is refused (exit 2) before Gmail is touched,
+instead of restoring nothing.
 
 ## 4. What it checks and how
 
@@ -461,9 +473,12 @@ restored). See [EX-20](#ex-20--restore-with-an-email-deleted-in-gmail).
 2. Unless the sender is a [machine address](#48-machine-and-no-reply-addresses) (writing to
    `noreply@` or a bounce address doesn't make anyone a contact, so it isn't searched): Gmail
    search `in:sent to:<sender>` (`maxResults=1`). A hit → `wrote_to_sender`.
-3. Unless the sender's domain is a free-mail provider (`gmail.com`, `googlemail.com`,
-   `outlook.com`, `hotmail.com`, `live.com`, `msn.com`, `yahoo.com`, `icloud.com`, `me.com`,
-   `aol.com`, `proton.me`, `protonmail.com`, `gmx.com`) or the account's own domain: search
+3. Unless the sender's domain is a free-mail provider (`config.FREE_MAIL`: Gmail, Outlook /
+   Hotmail / Live / MSN, Yahoo, iCloud, AOL, Proton, Tuta, Fastmail, GMX / Web.de, Mail.com,
+   Yandex, Mail.ru and large regional ones, with the big providers' country domains such as
+   `yahoo.com.ar`, `hotmail.co.uk`, `outlook.com.br`, `live.com.mx`;
+   [EX-26](#ex-26--writing-to-a-friend-on-country-free-mail-makes-no-known-contact)) or the
+   account's own domain: search
    `in:sent to:<domain>` (`maxResults=25`, `gmail.SENT_DOMAIN_SAMPLE`), then read the `To`, `Cc`
    and `Bcc` headers (`format=metadata`, no body) of the matches, newest first, one at a time.
    The first email with a recipient on the domain (or a subdomain) that isn't a machine address
@@ -614,7 +629,12 @@ dangerous direction ([ADR 0032](decisions/0032-machine-addresses-make-no-known-c
   or the last three when the TLD has two letters and the label before it has at most 4
   characters, so it can be a ccTLD's public suffix (`reply.com.ar`, `reply.co.uk`,
   `bounces.com.br`, `x.gob.ar`, `x.adv.br`, `x.gouv.fr`). Erring long only makes fewer machine
-  hosts: a short name under a ccTLD (`bounce.sap.de`) isn't recognised, the safe side.
+  hosts: a short name under a ccTLD (`bounce.sap.de`) isn't recognised, the safe side. Every
+  second-level label `signals.is_public_suffix` knows by name (`signals.PUBLIC_SLDS` and
+  `signals.GENERIC_CCTLD_SLDS`, used for `group_domains`) is within that length, so the two never
+  disagree on a listed suffix. They differ only on short names the length rule takes as a suffix
+  and `is_public_suffix` doesn't (`adv.ai`, `sap.de`): here that means `bounce.adv.ai` isn't a
+  machine host, the safe side.
 - `is_automated_address` is used by `previous_contact`: a machine sender isn't searched for itself,
   and the domain search ignores sent emails whose recipients on the domain are all machines. In
   the domain search the labels of the searched domain (the sender's) never count either, so a
@@ -968,6 +988,41 @@ the probabilities that matter are shown; the rest are ~0.
   categories (an action may still be needed). A `Reply-To` elsewhere makes it replyable again
   ([ADR 0032](decisions/0032-machine-addresses-make-no-known-contact.md)).
 
+### EX-26 — Writing to a friend on country free mail makes no known contact
+
+- **Test**: `test_ex26_writing_to_a_friend_on_country_free_mail_makes_no_known_contact`
+- **Input**: a sequence pitch from `growth.lead@hotmail.com.ar` ("Escalá tus ventas"), DMARC
+  pass, `List-Unsubscribe: <https://unsub.sequencer.example/u/xyz>` with one-click. Your sent
+  mail has emails to your cousin `primo@hotmail.com.ar`, none to the sender. Jev: cold_outreach
+  0.96.
+- **Outcome**: `previous_contact` = `never`: only the address is searched, not the domain.
+  Archived with `Jev/Outreach` and unsubscribed (one-click `POST`), as EX-04.
+- **Why**: `hotmail.com.ar` is free mail like `hotmail.com`: anyone can get an address there, so
+  having written to one person on it says nothing about the others. Before, it was searched as a
+  company domain, so `wrote_to_their_domain` made every `hotmail.com.ar` sender a known contact:
+  no unsubscribe, the reply veto on the archive group, and no auto rule
+  ([ADR 0033](decisions/0033-free-mail-country-domains-and-named-public-suffixes.md)).
+
+### EX-27 — A public suffix in group_domains is refused
+
+- **Test**: `test_ex27_a_public_suffix_in_group_domains_is_refused`
+- **Input**: an account `me@exemple.gouv.fr` with `group_domains: [gouv.fr]`; then
+  `group_domains: [exemple.gouv.fr]` and a Google Group email from
+  `"'Dana' via Info" <info@autre.gouv.fr>` (`X-Original-Sender: dana@pitchco.example`, DMARC
+  pass), and the same from `info@exemple.gouv.fr`. Also `group_domains: [com.ai]` and
+  `group_domains: [adv.ai]`.
+- **Outcome**: `gouv.fr` fails the accounts file at load ("is a public suffix, not a domain").
+  With `exemple.gouv.fr`, the group on `autre.gouv.fr` stays keyed on the group address
+  (untrusted); only the own `exemple.gouv.fr` group is resolved to Dana. `com.ai` is refused
+  too, but `adv.ai` loads: `.ai` is sold as a generic name, and `adv` isn't a public suffix
+  there.
+- **Why**: `gouv.fr` is a suffix every French public body registers under, not a domain anyone
+  controls: trusting it would trust every `*.gouv.fr` group's claim about its author. Before,
+  only `co.uk`-style suffixes from a short list were refused
+  ([ADR 0033](decisions/0033-free-mail-country-domains-and-named-public-suffixes.md)). Under
+  `.ai`, `.co`, `.io`, `.me` and `.tv` only the Public Suffix List's own names are suffixes, so a
+  real company there isn't refused.
+
 ## 6. Glossary
 
 - **Action**: what a category does: `keep`, `archive`, `archive_unsubscribe`, `spam`.
@@ -1034,6 +1089,18 @@ Behaviour found while writing this spec, documented as it is today:
   public suffix (`wa.gov.au`, `kommune.no`, `blogspot.com`), a company whose own name is `reply`,
   `bounce` or `bounces` (`kim@reply.wa.gov.au`) is taken as a machine sender and isn't searched
   for itself (its domain search is unaffected). Rare enough not to need a dependency.
+- `group_domains` only refuses public suffixes it knows by name (`signals.PUBLIC_SLDS`, two
+  labels): a deeper one (`wa.gov.au`, `nsw.gov.au`) is accepted, since without the public
+  suffix list nothing tells it from an agency's own `ato.gov.au`. `PUBLIC_SLDS` applies under
+  every two-letter TLD except the generic-use ones in `signals.GENERIC_CCTLD_SLDS` (`.ai`, `.co`,
+  `.io`, `.me`, `.tv`, which use their own Public Suffix List names), so a company whose domain
+  is one of those names under another ccTLD sold as a generic name (`plc.ly`, `sch.gg`) is
+  refused: add that TLD to `GENERIC_CCTLD_SLDS` with its PSL names. IDN ccTLD suffixes in
+  punycode (`xn--…`) are never refused. `group_domains` is opt-in; list only domains whose Google
+  Workspace you control.
+- `FREE_MAIL` is a list: a free-mail provider missing from it (a small regional one) is still
+  searched as a company domain, so writing to one person there makes its other users known
+  contacts. Adding one is always safe.
 - Machine addresses that need context to recognise (`notifications@`, `updates@`, opaque VERP
   tokens on a normal host, a ticketing system's `support+123@`) are not detected: they still
   make a known contact. Being wrong there keeps more mail, the safe side.

@@ -118,13 +118,19 @@ def save_token(path: Path, data: str) -> None:
 
 
 def _fsync_dir(directory: Path) -> None:
-    """Persist a rename in `directory` (POSIX); a no-op where directories can't be opened."""
+    """Persist a rename in `directory` (POSIX), best effort.
+
+    The rename has already happened, so this only makes it durable sooner: where a directory
+    can't be opened, or can't be fsynced (EINVAL on some filesystems), it is skipped.
+    """
     try:
         fd = os.open(directory, os.O_RDONLY)
     except OSError:
         return
     try:
         os.fsync(fd)
+    except OSError as exc:
+        log.debug("fsync of %s skipped: %s", directory, exc)
     finally:
         os.close(fd)
 

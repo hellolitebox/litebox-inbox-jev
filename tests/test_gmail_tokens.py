@@ -73,6 +73,26 @@ def test_failed_save_keeps_the_previous_token_and_no_temporary_file(tmp_path, mo
     assert _leftovers(tmp_path, path.name) == []
 
 
+def test_save_token_tolerates_a_directory_that_cant_be_fsynced(tmp_path, monkeypatch):
+    """Some filesystems refuse fsync on a directory (EINVAL): the token is saved anyway."""
+    path = tmp_path / "me@acme.com.json"
+    real_fsync = os.fsync
+    refused = []
+
+    def fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            refused.append(fd)
+            raise OSError(22, "Invalid argument")
+        real_fsync(fd)
+
+    monkeypatch.setattr(gmail_module.os, "fsync", fsync)
+    save_token(path, '{"token": "new"}')
+    assert refused  # the directory fsync was attempted and refused
+    assert path.read_text() == '{"token": "new"}'
+    assert _mode(path) == 0o600
+    assert _leftovers(tmp_path, path.name) == []
+
+
 class _TokenEndpoint(google.auth.transport.Request):
     """The OAuth token endpoint answering every refresh with a new access token."""
 

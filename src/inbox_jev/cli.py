@@ -12,12 +12,22 @@ from typing import Annotated
 
 import typer
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from . import __version__, labels, logs, rules, triage
 from . import digest as digest_mod
 from . import gmail as gmail_mod
-from .config import Account, Mode, Settings, check_lookback, load_accounts, load_categories
+from .config import (
+    Account,
+    CategoriesConfig,
+    Mode,
+    Settings,
+    check_lookback,
+    load_accounts,
+    load_categories,
+)
 from .db import Message, MessageStatus, SenderRule, now, open_sessions
+from .signals import ADDRESS, DOMAIN
 
 app = typer.Typer(no_args_is_help=True, help="Triage Gmail with TypeSafe Jev.")
 auth_app = typer.Typer(no_args_is_help=True, help="Manage Gmail OAuth tokens.")
@@ -108,6 +118,31 @@ def _lookback_option(value: str | None) -> str | None:
         raise typer.BadParameter(str(exc)) from exc
 
 
+def _category(cfg: CategoriesConfig, key: str, param: str) -> str:
+    """`key` if it is a category in categories.yaml, else a usage error naming `param`."""
+    if key not in cfg.by_key:
+        raise typer.BadParameter(
+            f"unknown category {key!r}; one of {', '.join(cfg.by_key)}", param_hint=param
+        )
+    return key
+
+
+def _sender_key(value: str) -> str:
+    """A sender rule key: an address or `@domain`, lowercased; else a usage error.
+
+    Anything else (a bare domain, a display name, a typo) would be stored as a rule no sender
+    ever matches (`policy.rule_keys` looks up the exact address, then `@domain`).
+    """
+    key = value.strip().lower()
+    domain = key.removeprefix("@")
+    if ADDRESS.match(key) or (key.startswith("@") and DOMAIN.match(domain)):
+        return key
+    raise typer.BadParameter(
+        f"{value!r} is neither an address (ana@example.com) nor @domain (@example.com)",
+        param_hint="SENDER",
+    )
+
+
 def _parse_since(value: str) -> timedelta:
     match = re.fullmatch(r"(\d+)([hd])", value.strip())
     if not match:
@@ -187,14 +222,26 @@ def restore(
     since: Annotated[str, typer.Option(help="e.g. 12h, 3d")] = "1d",
     category: Annotated[str | None, typer.Option(help="Only this category.")] = None,
 ) -> None:
-    """Undo: move processed emails back to the inbox and remove Jev labels."""
+    """Undo: move processed emails back to the inbox and remove Jev labels.
+
+    --category must be a category in categories.yaml, or one this account's stored emails still
+    carry (a category removed since can still be undone).
+    """
     s = _settings()
     window = _parse_since(since)
-    gmail = gmail_mod.connect(s.google_tokens_dir, account)
     with open_sessions(s.database_url) as sessions, sessions() as session:
+        if category is not None and not _stored_category(session, account, category):
+            _category(load_categories(s.categories_file), category, "--category")
+        gmail = gmail_mod.connect(s.google_tokens_dir, account)
         result = triage.restore(session, gmail, account, window, category)
     deleted = f" Skipped {result.deleted} deleted in Gmail." if result.deleted else ""
     typer.echo(f"Restored {result.restored} emails.{deleted} Unsubscribes cannot be undone.")
+
+
+def _stored_category(session: Session, account: str, category: str) -> bool:
+    """Whether any stored email of `account` has `category` (decided before it was removed)."""
+    query = select(Message.id).where(Message.account == account, Message.category == category)
+    return session.scalar(query.limit(1)) is not None
 
 
 @app.command()
@@ -208,11 +255,9 @@ def reprocess(
     """Have the next act run redo CATEGORY emails Jev left in the inbox."""
     s = _settings()
     cfg = load_categories(s.categories_file)
+    _category(cfg, category, "--category")
     with open_sessions(s.database_url) as sessions, sessions() as session:
-        try:
-            count = triage.mark_for_reprocess(session, cfg, account, category, low_confidence_only)
-        except ValueError as exc:
-            raise typer.BadParameter(str(exc)) from exc
+        count = triage.mark_for_reprocess(session, cfg, account, category, low_confidence_only)
     typer.echo(
         f"Marked {count} emails for reprocessing. The next `run` in act mode redoes them, but "
         "only those inside its window: use `run --lookback` wide enough to reach the oldest one."
@@ -318,15 +363,14 @@ def rules_set(
     sender: Annotated[str, typer.Argument(help="Address or @domain.")],
     category: str,
 ) -> None:
-    """Always classify SENDER as CATEGORY."""
+    """Always classify SENDER (an address or @domain) as CATEGORY."""
+    key = _sender_key(sender)
     s = _settings()
-    cfg = load_categories(s.categories_file)
-    if category not in cfg.by_key:
-        raise typer.BadParameter(f"unknown category; one of {', '.join(cfg.by_key)}")
+    _category(load_categories(s.categories_file), category, "CATEGORY")
     with open_sessions(s.database_url) as sessions, sessions() as session:
-        rules.set_rule(session, account, sender.lower(), category, source=rules.RuleSource.MANUAL)
+        rules.set_rule(session, account, key, category, source=rules.RuleSource.MANUAL)
         session.commit()
-    typer.echo(f"{sender} → {category}")
+    typer.echo(f"{key} → {category}")
 
 
 @rules_app.command("delete")

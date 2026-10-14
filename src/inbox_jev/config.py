@@ -11,45 +11,124 @@ import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from .signals import domain_of, on_domain
+from .signals import DOMAIN, domain_of, is_public_suffix, on_domain
 
 # Gmail `newer_than:` units: days, months, years.
 LOOKBACK_RE = re.compile(r"^\d+[dmy]$")
 
 # Public mail providers: anyone can get an address there, so they say nothing about who a sender
-# is (previous_contact) and can never be an account's trusted group domain.
+# is (previous_contact) and can never be an account's trusted group domain. The big consumer
+# providers with their country domains (writing to a friend at yahoo.com.ar must not make every
+# yahoo.com.ar sender a known contact), and the largest regional ones. A provider missing here
+# only costs a domain search that can make a stranger look known; adding one is always safe.
 FREE_MAIL = frozenset(
     {
+        # Google
         "gmail.com",
         "googlemail.com",
+        # Microsoft
         "outlook.com",
+        "outlook.com.ar",
+        "outlook.com.br",
+        "outlook.cl",
+        "outlook.de",
+        "outlook.es",
+        "outlook.fr",
+        "outlook.it",
         "hotmail.com",
+        "hotmail.be",
+        "hotmail.ca",
+        "hotmail.co.uk",
+        "hotmail.com.ar",
+        "hotmail.com.br",
+        "hotmail.com.mx",
+        "hotmail.de",
+        "hotmail.es",
+        "hotmail.fr",
+        "hotmail.it",
+        "hotmail.nl",
         "live.com",
+        "live.be",
+        "live.ca",
+        "live.cl",
+        "live.co.uk",
+        "live.com.ar",
+        "live.com.mx",
+        "live.de",
+        "live.fr",
+        "live.it",
+        "live.nl",
         "msn.com",
+        # Yahoo
         "yahoo.com",
+        "yahoo.ca",
+        "yahoo.co.in",
+        "yahoo.co.jp",
+        "yahoo.co.uk",
+        "yahoo.com.ar",
+        "yahoo.com.au",
+        "yahoo.com.br",
+        "yahoo.com.mx",
+        "yahoo.de",
+        "yahoo.es",
+        "yahoo.fr",
+        "yahoo.it",
+        "ymail.com",
+        "rocketmail.com",
+        # Apple, AOL
         "icloud.com",
         "me.com",
+        "mac.com",
         "aol.com",
+        "aim.com",
+        # Privacy-focused
         "proton.me",
         "protonmail.com",
+        "protonmail.ch",
+        "pm.me",
+        "tutanota.com",
+        "tuta.io",
+        "fastmail.com",
+        # GMX / 1&1, Mail.com
         "gmx.com",
+        "gmx.net",
+        "gmx.de",
+        "gmx.at",
+        "gmx.ch",
+        "web.de",
+        "mail.com",
+        # Regional webmail and ISP mail
+        "yandex.com",
+        "yandex.ru",
+        "mail.ru",
+        "qq.com",
+        "163.com",
+        "126.com",
+        "naver.com",
+        "uol.com.br",
+        "bol.com.br",
+        "terra.com.br",
+        "fibertel.com.ar",
+        "arnet.com.ar",
+        "libero.it",
+        "orange.fr",
+        "wanadoo.fr",
+        "free.fr",
+        "laposte.net",
+        "t-online.de",
+        "btinternet.com",
     }
 )
 # Public group hosts: anyone can create a group there.
 PUBLIC_GROUP_HOSTS = frozenset({"googlegroups.com", "groups.google.com"})
-# Second-level labels that ccTLDs sell names under (co.uk, com.ar, ac.jp…): "co.uk" alone is a
-# public suffix, not a domain anyone controls. Best effort; group_domains is opt-in anyway.
-_PUBLIC_SLD = frozenset({"ac", "co", "com", "edu", "gob", "go", "gov", "ne", "net", "or", "org"})
-_DOMAIN = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)+$")
 
 
 def normalize_group_domain(value: str) -> str:
     """Normalised group_domains entry, or ValueError if it isn't a domain someone can own."""
     domain = value.strip().lower().rstrip(".").removeprefix("@")
-    if not _DOMAIN.match(domain):
+    if not DOMAIN.match(domain):
         raise ValueError(f"group_domains entry {value!r} isn't a domain like example.org")
-    labels = domain.split(".")
-    if len(labels) == 2 and len(labels[1]) == 2 and labels[0] in _PUBLIC_SLD:
+    if is_public_suffix(domain):
         raise ValueError(f"group_domains entry {value!r} is a public suffix, not a domain")
     public = next((p for p in FREE_MAIL | PUBLIC_GROUP_HOSTS if on_domain(domain, p)), None)
     if public:

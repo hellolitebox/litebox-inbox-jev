@@ -63,6 +63,9 @@ class ContactGmail:
         ({"corp.com"}, "b@corp.com", "wrote_to_their_domain", ["b@corp.com", "corp.com"]),
         ((), "b@corp.com", "never", ["b@corp.com", "corp.com"]),
         ({"gmail.com"}, "x@gmail.com", "never", ["x@gmail.com"]),  # free mail: no domain check
+        # Free mail under a country domain is free mail too: no domain check.
+        ({"yahoo.com.ar"}, "ana@yahoo.com.ar", "never", ["ana@yahoo.com.ar"]),
+        ({"hotmail.co.uk"}, "bo@hotmail.co.uk", "never", ["bo@hotmail.co.uk"]),
         ({"acme.com"}, "y@acme.com", "never", ["y@acme.com"]),  # my own domain
         ((), "x@corp.com OR from:me", None, []),  # never builds a query from odd input
         # A machine sender is never searched for itself, only its domain.

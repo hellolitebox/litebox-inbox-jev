@@ -2,6 +2,7 @@
 
 import contextlib
 import logging
+from unittest import mock
 
 import httpx2
 import pytest
@@ -10,7 +11,7 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 from typesafe_sdk import Noul, RetryPolicy, TypeSafeClient, TypeSafeError
 
-from inbox_jev import logs
+from inbox_jev import db, logs
 from inbox_jev.config import DigestLanguage, Mode, load_categories
 from inbox_jev.db import SQLITE_BUSY_TIMEOUT_MS, Base, Message, MessageStatus, make_engine
 from inbox_jev.digest import build
@@ -133,6 +134,28 @@ def test_make_engine_rejects_not_null_column_without_default(tmp_path, monkeypat
     monkeypatch.setattr(col, "default", None)
     with pytest.raises(RuntimeError, match="messages.restored is NOT NULL"):
         make_engine(url)
+
+
+def test_make_engine_disposes_the_engine_when_the_upgrade_fails(tmp_path, monkeypatch):
+    """A failed `_add_missing_columns` must not leave the engine's connections open."""
+    made = []
+    real_create_engine = db.create_engine
+
+    def create(url):
+        engine = real_create_engine(url)
+        monkeypatch.setattr(engine, "dispose", mock.Mock(wraps=engine.dispose))
+        made.append(engine)
+        return engine
+
+    def fail(engine):
+        raise RuntimeError("upgrade failed")
+
+    monkeypatch.setattr(db, "create_engine", create)
+    monkeypatch.setattr(db, "_add_missing_columns", fail)
+    with pytest.raises(RuntimeError, match="upgrade failed"):
+        make_engine(f"sqlite:///{tmp_path / 'db.sqlite'}")
+    assert len(made) == 1
+    made[0].dispose.assert_called_once_with()
 
 
 def _record(msg, *args, level=logging.INFO):

@@ -26,6 +26,7 @@ from fakes import (
     jev_http_error,
     sent_mail_gmail,
 )
+from pydantic import ValidationError
 from typesafe_sdk import (
     TypeSafeAPITimeoutError,
     TypeSafeAuthenticationError,
@@ -47,7 +48,7 @@ from inbox_jev.db import (
 from inbox_jev.gmail import Email, extract_body
 from inbox_jev.policy import decide, plan
 from inbox_jev.rules import RuleSource
-from inbox_jev.signals import extract
+from inbox_jev.signals import extract, resolve_relay
 
 DOC = Path(__file__).resolve().parents[1] / "docs" / "how-it-decides.md"
 
@@ -958,3 +959,58 @@ def test_doc_examples_match_tests():
         doc_tests[section[3:5]] = named.group(1)
     test_names = {name[7:9]: name for name in tests}
     assert doc_tests == test_names, "the doc's **Test**: names don't match the test functions"
+
+
+# --- EX-26 -----------------------------------------------------------------------------------
+
+
+def test_ex26_writing_to_a_friend_on_country_free_mail_makes_no_known_contact(spec, monkeypatch):
+    """EX-26 (docs/how-it-decides.md §5, §4.7 previous_contact, config.FREE_MAIL)."""
+    ctx, gmail, account = spec
+    # I wrote to my cousin at hotmail.com.ar: a domain search would say "yes" for anyone there.
+    gmail.written = frozenset({"primo@hotmail.com.ar", "hotmail.com.ar"})
+    gmail.emails = {
+        "1": email(
+            "1",
+            "Growth <growth.lead@hotmail.com.ar>",
+            "Escalá tus ventas",
+            list_unsubscribe="<https://unsub.sequencer.example/u/xyz>",
+            list_unsubscribe_post="List-Unsubscribe=One-Click",
+        )
+    }
+    ctx.classifier.answers["Escalá tus ventas"] = answer("cold_outreach", cold_outreach=0.96)
+    posts = _one_click_posts(monkeypatch)
+    triage.run_account(ctx, account, Mode.ACT)
+
+    assert gmail.written_queries == ["growth.lead@hotmail.com.ar"]  # no domain search
+    assert ctx.classifier.states[0]["previous_contact"] == "never"
+    assert gmail.modified[-1][2] == ["INBOX"]
+    assert [url for url, _ in posts] == ["https://unsub.sequencer.example/u/xyz"]
+    with ctx.sessions() as s:
+        assert s.query(Unsubscribe).one().status == "ok"
+
+
+# --- EX-27 -----------------------------------------------------------------------------------
+
+
+def test_ex27_a_public_suffix_in_group_domains_is_refused():
+    """EX-27 (docs/how-it-decides.md §5, §3.4 group_domains, ADR 0033)."""
+    with pytest.raises(ValidationError, match="'gouv.fr' is a public suffix"):
+        Account(email="me@exemple.gouv.fr", group_domains=["gouv.fr"])
+    with pytest.raises(ValidationError, match="'com.ai' is a public suffix"):
+        Account(email="me@acme.com", group_domains=["com.ai"])
+    # .ai is sold as a generic name: only its Public Suffix List names are suffixes there.
+    assert Account(email="me@adv.ai", group_domains=["adv.ai"]).group_domains == ["adv.ai"]
+
+    account = Account(email="me@exemple.gouv.fr", group_domains=["exemple.gouv.fr"])
+    group = {
+        "from": ["\"'Dana' via Info\" <info@autre.gouv.fr>"],
+        "x-original-sender": ["dana@pitchco.example"],
+        "mailing-list": ["list info@autre.gouv.fr; contact info+owners@autre.gouv.fr"],
+        "authentication-results": ["mx.google.com; dmarc=pass header.from=autre.gouv.fr"],
+    }
+    other = resolve_relay(extract(group), account.group_domains)
+    assert (other.sender, other.relayed_by) == ("info@autre.gouv.fr", None)  # not trusted
+    own = {k: [v[0].replace("autre", "exemple")] for k, v in group.items()}
+    mine = resolve_relay(extract(own), account.group_domains)
+    assert (mine.sender, mine.relayed_by) == ("dana@pitchco.example", "info@exemple.gouv.fr")

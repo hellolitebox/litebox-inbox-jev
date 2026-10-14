@@ -77,7 +77,7 @@ def test_group_domains_are_opt_in():
     assert account("").group_domains == []
     assert account("group_domains: [Sister.org]\n").group_domains == ["sister.org"]
     # An unlisted public provider (not in FREE_MAIL) trusts nothing either.
-    assert Account.model_validate({"email": "me@mac.com"}).group_domains == []
+    assert Account.model_validate({"email": "me@hey.com"}).group_domains == []
 
 
 @pytest.mark.parametrize(
@@ -87,6 +87,17 @@ def test_group_domains_are_opt_in():
         (" Example.ORG. ", "example.org"),
         ("eu.example.org", "eu.example.org"),
         ("acme.co.uk", "acme.co.uk"),
+        # Short names under a ccTLD are real domains (only listed second levels are suffixes).
+        ("acme.io", "acme.io"),
+        ("sap.de", "sap.de"),
+        # Under a ccTLD sold as a generic name, only its own PSL second levels are suffixes.
+        ("adv.ai", "adv.ai"),
+        ("sch.ai", "sch.ai"),
+        ("plc.io", "plc.io"),
+        ("web.co", "web.co"),  # no longer on the PSL
+        # IDN TLDs in punycode (.рф, .中国).
+        ("XN--80AK6AA92E.xn--p1ai", "xn--80ak6aa92e.xn--p1ai"),
+        ("example.xn--fiqs8s", "example.xn--fiqs8s"),
     ],
 )
 def test_group_domains_are_normalised(value, expected):
@@ -102,6 +113,8 @@ def test_group_domains_are_normalised(value, expected):
         "groups.google.com",
         "eu.googlegroups.com",  # ends in a public host
         "mail.yahoo.com",
+        "yahoo.com.ar",  # free mail under a country domain
+        "eu.hotmail.co.uk",
     ],
 )
 def test_group_domains_rejects_public_domains(domain):
@@ -109,13 +122,39 @@ def test_group_domains_rejects_public_domains(domain):
         account(f"group_domains: ['{domain}']\n")
 
 
-@pytest.mark.parametrize("domain", ["com", "co.uk", "com.ar", "ac.jp"])
+@pytest.mark.parametrize(
+    "domain",
+    [
+        "co.uk",
+        "com.ar",
+        "ac.jp",
+        "gouv.fr",
+        "nhs.uk",
+        "adv.br",
+        "govt.nz",
+        "asso.fr",
+        "com.ai",
+        "com.co",
+        "com.io",
+        "org.io",
+        "gov.io",
+        "org.me",
+    ],
+)
 def test_group_domains_rejects_public_suffixes(domain):
-    with pytest.raises(ValidationError, match="group_domains entry"):
+    with pytest.raises(ValidationError, match="is a public suffix"):
         account(f"group_domains: ['{domain}']\n")
 
 
-@pytest.mark.parametrize("domain", ["hello@example.org", "example .org", "", "@"])
+def test_group_domains_deeper_public_suffix_is_a_known_gap():
+    """wa.gov.au is a public suffix too, but no rule without the public suffix list tells it
+    from an agency's own ato.gov.au: accepted (docs/how-it-decides.md, Known gaps)."""
+    assert account("group_domains: [wa.gov.au]\n").group_domains == ["wa.gov.au"]
+
+
+@pytest.mark.parametrize(
+    "domain", ["hello@example.org", "example .org", "", "@", "com", "a.b1", "example.xn--"]
+)
 def test_group_domains_rejects_non_domains(domain):
     with pytest.raises(ValidationError, match="isn't a domain"):
         account(f"group_domains: ['{domain}']\n")
