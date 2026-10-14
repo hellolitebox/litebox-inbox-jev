@@ -1,19 +1,27 @@
 import base64
 import time
+from datetime import UTC, datetime, timedelta
 
 import pytest
-from fakes import HttpError, SentMailService, sent_mail_gmail
+from fakes import SENT_BASE_S, HttpError, SentMailService, sent_mail_gmail
 
 from inbox_jev import gmail as gmail_module
 from inbox_jev.classifier import CATEGORY_Q, NEEDS_REPLY_Q, TAG_PREFIX, build_questions, build_state
 from inbox_jev.gmail import (
     BATCH_SIZE,
-    SENT_DOMAIN_SAMPLE,
+    NEVER_VERDICT_TTL,
+    SENT_ADDRESS_READS,
+    SENT_DOMAIN_READS,
+    SENT_NEWER_LIMIT,
     SINGLE_RETRIES,
+    DomainScan,
+    DomainVerdict,
     Email,
     Gmail,
+    MemoryScans,
     extract_body,
     is_not_found,
+    scan_rules,
 )
 
 
@@ -399,14 +407,62 @@ def test_list_inbox_ids_and_list_ids_share_paging(monkeypatch):
 LINKEDIN_REPLIES = {f"s{i}": {"To": f"m-a17{i}@bounce.linkedin.com"} for i in range(12)}
 
 
-def test_has_written_to_address_is_one_search_without_reads(monkeypatch):
+def test_has_written_to_address_reads_the_newest_match(monkeypatch):
     svc = SentMailService({"s1": {"To": "Jane <jane@corp.com>"}})
     gmail = sent_mail_gmail(monkeypatch, svc)
     assert gmail.has_written_to("jane@corp.com")
     assert not gmail.has_written_to("bob@corp.com")
     assert svc.queries == ["in:sent to:jane@corp.com", "in:sent to:bob@corp.com"]
-    assert svc.reads == []
-    assert svc.retries == [SINGLE_RETRIES] * 2
+    assert svc.reads == ["s1"]  # bob@ has no match: nothing to read
+    assert svc.retries == [SINGLE_RETRIES] * 3
+
+
+def test_has_written_to_address_ignores_a_loose_match(monkeypatch):
+    # Gmail's to:ana@corp.com also matched diana@corp.com: the recipients say who it went to.
+    svc = SentMailService({"s0": {"To": "Diana <diana@corp.com>"}, "s1": {"Cc": "ANA@Corp.com"}})
+    assert sent_mail_gmail(monkeypatch, svc).has_written_to("ana@corp.com")
+    assert svc.reads == ["s0", "s1"]
+    svc = SentMailService({"s0": {"To": "Diana <diana@corp.com>"}})
+    assert not sent_mail_gmail(monkeypatch, svc).has_written_to("ana@corp.com")
+
+
+@pytest.mark.parametrize(
+    ("sent_to", "sender", "same"),
+    [
+        ("Jane.Doe+news@gmail.com", "janedoe@gmail.com", True),
+        ("janedoe@googlemail.com", "jane.doe@gmail.com", True),
+        ("jane+sales@corp.com", "jane@corp.com", False),  # Workspace or not: compared as written
+        ("j.ane@corp.com", "jane@corp.com", False),
+    ],
+)
+def test_has_written_to_address_applies_gmails_own_address_rules_only(
+    monkeypatch, sent_to, sender, same
+):
+    svc = SentMailService({"s0": {"Bcc": sent_to}})
+    svc.list = _match_everything(svc.list)
+    assert sent_mail_gmail(monkeypatch, svc).has_written_to(sender) is same
+
+
+def _match_everything(list_call):
+    """A `SentMailService.list` whose `to:` matches every sent email (Gmail's own notion)."""
+    return lambda userId, q, maxResults, **kw: list_call(userId, "in:sent to:@", maxResults, **kw)
+
+
+def test_has_written_to_address_with_more_loose_matches_than_it_reads_counts(monkeypatch, caplog):
+    caplog.set_level("INFO", logger="inbox_jev.gmail")
+    sent = {f"s{i}": {"To": f"x{i}ana@corp.com"} for i in range(SENT_ADDRESS_READS + 1)}
+    svc = SentMailService(sent)
+    assert sent_mail_gmail(monkeypatch, svc).has_written_to("ana@corp.com")
+    assert len(svc.reads) == SENT_ADDRESS_READS
+    assert "sent-mail address check inconclusive" in caplog.text
+
+
+def test_has_written_to_address_skips_deleted_matches_and_counts_hidden_recipients(monkeypatch):
+    svc = SentMailService({"s0": {"To": "ana@corp.com"}}, get_errors={"s0": HttpError(404)})
+    assert not sent_mail_gmail(monkeypatch, svc).has_written_to("ana@corp.com")
+    # No recipient in the headers at all: Gmail matched something they don't show.
+    svc = SentMailService({"s0": {"To": "undisclosed-recipients:;", "X": "ana@corp.com"}})
+    assert sent_mail_gmail(monkeypatch, svc).has_written_to("ana@corp.com")
 
 
 def test_has_written_to_domain_ignores_sends_to_machine_addresses(monkeypatch):
@@ -437,15 +493,233 @@ def test_has_written_to_domain_stops_at_the_first_person(monkeypatch):
     assert svc.reads == ["s0", "s1"]
 
 
-def test_has_written_to_domain_with_more_machine_mail_than_the_sample_counts(monkeypatch, caplog):
-    # Only the newest SENT_DOMAIN_SAMPLE are read: an older one might be to a person, so the
-    # answer errs on "known contact".
+GITHUB_REPLIES = {f"g{i}": {"To": f"reply+{i}@reply.github.com"} for i in range(60)}
+
+
+def _check(monkeypatch, svc, scans, domain="github.com"):
+    """One run's domain check: a new `Gmail` (its own cache) on the same stored scans."""
+    svc.queries, svc.reads = [], []
+    return sent_mail_gmail(monkeypatch, svc).has_written_to(domain, scans)
+
+
+def test_domain_scan_goes_on_across_runs_until_every_match_is_read(monkeypatch, caplog):
     caplog.set_level("INFO", logger="inbox_jev.gmail")
-    sent = {f"s{i}": {"To": f"reply+{i}@reply.github.com"} for i in range(SENT_DOMAIN_SAMPLE + 1)}
-    svc = SentMailService(sent)
-    assert sent_mail_gmail(monkeypatch, svc).has_written_to("github.com")
-    assert len(svc.reads) == SENT_DOMAIN_SAMPLE
-    assert "sent-mail sample inconclusive" in caplog.text
+    svc, scans = SentMailService(dict(GITHUB_REPLIES)), MemoryScans()
+    assert _check(monkeypatch, svc, scans)  # 25 of 60 read: counts as written for now
+    assert svc.reads == [f"g{i}" for i in range(SENT_DOMAIN_READS)]
+    assert "sent-mail domain scan not finished" in caplog.text
+    scan = scans.load("github.com")
+    assert scan is not None
+    assert (scan.verdict, scan.read, scan.reached_end) == (DomainVerdict.SCANNING, 25, False)
+    assert (scan.newest_s, scan.oldest_s) == (SENT_BASE_S, SENT_BASE_S - 24 * 60)
+
+    assert _check(monkeypatch, svc, scans)  # the next 25, older ones
+    assert svc.queries == [
+        f"in:sent to:github.com after:{SENT_BASE_S - 1}",  # nothing new since
+        f"in:sent to:github.com before:{SENT_BASE_S - 24 * 60 + 1}",
+    ]
+    assert svc.reads == [f"g{i}" for i in range(25, 50)]
+
+    assert not _check(monkeypatch, svc, scans)  # the last 10: never wrote to a person there
+    assert svc.reads == [f"g{i}" for i in range(50, 60)]
+    scan = scans.load("github.com")
+    assert scan is not None and scan.verdict is DomainVerdict.NEVER and scan.verdict_at
+    assert (scan.read, scan.reached_end) == (60, True)
+
+    assert not _check(monkeypatch, svc, scans)  # done: one search for newer mail, no read
+    assert (len(svc.queries), svc.reads) == (1, [])
+
+
+def test_domain_scan_reads_new_sent_mail_since_it_finished(monkeypatch):
+    svc, scans = SentMailService(dict(GITHUB_REPLIES)), MemoryScans()
+    while _check(monkeypatch, svc, scans):
+        pass
+    finished = scans.load("github.com")
+    assert finished is not None and finished.verdict is DomainVerdict.NEVER
+    # Another reply to a notification: read, still never.
+    svc.sent = {"n1": {"To": "reply+n1@reply.github.com"}, **svc.sent}
+    svc.dates["n1"] = SENT_BASE_S + 3600
+    assert not _check(monkeypatch, svc, scans)
+    assert svc.reads == ["n1"]
+    assert scans.load("github.com").verdict_at == finished.verdict_at  # type: ignore[union-attr]
+    # Then an email to a person there: known from now on, without asking Gmail again.
+    svc.sent = {"n2": {"To": "Octo <octo@github.com>"}, **svc.sent}
+    svc.dates["n2"] = SENT_BASE_S + 7200
+    assert _check(monkeypatch, svc, scans)
+    assert svc.reads == ["n2"]
+    assert scans.load("github.com").verdict is DomainVerdict.PERSON  # type: ignore[union-attr]
+    assert _check(monkeypatch, svc, scans)
+    assert (svc.queries, svc.reads) == ([], [])
+
+
+def test_domain_scan_reads_new_mail_oldest_first_within_the_budget(monkeypatch):
+    svc, scans = SentMailService({"g0": {"To": "reply+0@reply.github.com"}}), MemoryScans()
+    assert not _check(monkeypatch, svc, scans)
+    new = {f"n{i}": {"To": f"reply+n{i}@reply.github.com"} for i in range(30)}
+    svc.sent = new | svc.sent
+    svc.dates |= {f"n{i}": SENT_BASE_S + 60 * (30 - i) for i in range(30)}
+    assert _check(monkeypatch, svc, scans)  # 25 of 30 new ones read: not done
+    assert svc.reads == [f"n{i}" for i in range(29, 4, -1)]
+    assert scans.load("github.com").verdict is DomainVerdict.SCANNING  # type: ignore[union-attr]
+    assert not _check(monkeypatch, svc, scans)
+    assert svc.reads == [f"n{i}" for i in range(4, -1, -1)]
+
+
+def test_domain_scan_keeps_emails_sent_in_the_same_second_apart(monkeypatch):
+    # 30 replies sent in one second: the boundary second is listed again and its emails skipped.
+    svc = SentMailService(
+        dict(list(GITHUB_REPLIES.items())[:30]), dates=dict.fromkeys(GITHUB_REPLIES, SENT_BASE_S)
+    )
+    scans = MemoryScans()
+    assert _check(monkeypatch, svc, scans)
+    assert not _check(monkeypatch, svc, scans)
+    assert sorted(svc.reads) == [f"g{i}" for i in range(25, 30)]  # each of the rest, once
+    assert scans.load("github.com").read == 30  # type: ignore[union-attr]
+
+
+def test_domain_scan_with_too_much_new_mail_counts_as_written(monkeypatch):
+    svc, scans = SentMailService({"g0": {"To": "reply+0@reply.github.com"}}), MemoryScans()
+    assert not _check(monkeypatch, svc, scans)
+    svc.sent = {
+        f"n{i}": {"To": "reply+n@reply.github.com"} for i in range(SENT_NEWER_LIMIT + 1)
+    } | (svc.sent)
+    svc.dates |= dict.fromkeys((f"n{i}" for i in range(SENT_NEWER_LIMIT + 1)), SENT_BASE_S + 60)
+    assert _check(monkeypatch, svc, scans)
+    assert svc.reads == []
+
+
+def test_domain_scan_made_under_other_rules_starts_over(monkeypatch):
+    scans = MemoryScans()
+    scans.save(DomainScan("github.com", "0-old", DomainVerdict.PERSON))
+    svc = SentMailService({"g0": {"To": "reply+0@reply.github.com"}})
+    assert not _check(monkeypatch, svc, scans)
+    assert svc.queries == ["in:sent to:github.com"]
+    assert scans.load("github.com").rules == scan_rules()  # type: ignore[union-attr]
+
+
+def test_domain_scan_keeps_what_it_read_before_an_error(monkeypatch):
+    svc = SentMailService(dict(GITHUB_REPLIES), get_errors={"g3": HttpError(500)})
+    scans = MemoryScans()
+    with pytest.raises(HttpError):
+        _check(monkeypatch, svc, scans)
+    assert scans.load("github.com").read == 3  # type: ignore[union-attr]
+    svc.get_errors = {}
+    assert _check(monkeypatch, svc, scans)
+    assert svc.reads[0] == "g3"  # goes on from there
+
+
+def test_domain_scan_without_any_match_stores_nothing(monkeypatch):
+    scans = MemoryScans()
+    assert not _check(monkeypatch, SentMailService({}), scans)
+    assert scans.load("github.com") is None
+
+
+def _age_verdict(scans, by, domain="github.com"):
+    """Move the stored scan's verdict_at `by` into the past."""
+    scan = scans.load(domain)
+    scan.verdict_at -= by
+    scans.save(scan)
+    return scan
+
+
+def test_domain_scan_never_starts_over_once_its_ttl_is_over(monkeypatch):
+    svc = SentMailService(dict(list(GITHUB_REPLIES.items())[:10]))
+    scans = MemoryScans()
+    assert not _check(monkeypatch, svc, scans)
+    # An old email to a person enters the sent mail inside the span already read (restored
+    # from Trash, imported): the after: search can't list it.
+    svc.sent["old"] = {"To": "Octo <octo@github.com>"}
+    svc.dates["old"] = SENT_BASE_S - 5 * 60
+    _age_verdict(scans, NEVER_VERDICT_TTL - timedelta(days=1))
+    assert not _check(monkeypatch, svc, scans)  # still within the TTL: trusted
+    assert (svc.queries, svc.reads) == ([f"in:sent to:github.com after:{SENT_BASE_S - 1}"], [])
+
+    _age_verdict(scans, timedelta(days=1))  # now exactly NEVER_VERDICT_TTL old
+    assert _check(monkeypatch, svc, scans)  # read again from the newest match down
+    assert svc.queries == ["in:sent to:github.com"]
+    assert "old" in svc.reads
+    assert scans.load("github.com").verdict is DomainVerdict.PERSON  # type: ignore[union-attr]
+
+
+def test_domain_scan_redone_after_its_ttl_gets_a_new_verdict_time(monkeypatch):
+    svc = SentMailService(dict(list(GITHUB_REPLIES.items())[:10]))
+    scans = MemoryScans()
+    assert not _check(monkeypatch, svc, scans)
+    old = _age_verdict(scans, NEVER_VERDICT_TTL + timedelta(days=1))
+    assert not _check(monkeypatch, svc, scans)
+    assert len(svc.reads) == 10
+    redone = scans.load("github.com")
+    assert redone is not None and redone.verdict is DomainVerdict.NEVER and redone.read == 10
+    assert redone.verdict_at is not None and old.verdict_at is not None
+    assert datetime.now(UTC) - redone.verdict_at < timedelta(minutes=1)
+
+
+def test_domain_scan_stores_a_verdict_reached_without_a_read(monkeypatch):
+    # The last check read the oldest match but stopped at the budget before seeing that nothing
+    # was older; this one only lists, and must still store `never` and when it was reached.
+    scans = MemoryScans()
+    scans.save(
+        DomainScan(
+            "github.com",
+            scan_rules(),
+            newest_s=SENT_BASE_S,
+            newest_ids=["g0"],
+            oldest_s=SENT_BASE_S,
+            oldest_ids=["g0"],
+            reached_end=True,
+            read=1,
+        )
+    )
+    svc = SentMailService({"g0": GITHUB_REPLIES["g0"]})
+    assert not _check(monkeypatch, svc, scans)
+    assert svc.reads == []
+    scan = scans.load("github.com")
+    assert scan is not None and scan.verdict is DomainVerdict.NEVER and scan.verdict_at
+
+
+def test_domain_scan_read_out_of_date_order_starts_over(monkeypatch, caplog):
+    # Gmail lists C after B though C is newer: C lies inside the span B made, so a later
+    # before: search would never list an email like it. The scan must not end `never`.
+    caplog.set_level("WARNING", logger="inbox_jev.gmail")
+    sent = {
+        "a": {"To": "reply+a@reply.github.com"},
+        "b": {"To": "reply+b@reply.github.com"},
+        "c": {"To": "reply+c@reply.github.com"},
+    }
+    dates = {"a": SENT_BASE_S, "b": SENT_BASE_S - 600, "c": SENT_BASE_S - 300}
+    svc, scans = SentMailService(sent, dates=dates, ordered=False), MemoryScans()
+    assert _check(monkeypatch, svc, scans)  # counts as written
+    assert svc.reads == ["a", "b", "c"]  # stopped at the first one out of order
+    assert "out of date order: restarted" in caplog.text
+    assert "github.com" not in caplog.text and "reply+" not in caplog.text  # counts only
+    restarted = scans.load("github.com")
+    assert restarted == DomainScan("github.com", scan_rules())  # nothing kept
+
+    svc.ordered = True  # in order again: the next check starts from the newest match
+    assert not _check(monkeypatch, svc, scans)
+    assert svc.queries == ["in:sent to:github.com"]
+
+
+def test_domain_scan_newer_mail_out_of_date_order_starts_over(monkeypatch):
+    svc, scans = SentMailService({"g0": GITHUB_REPLIES["g0"]}), MemoryScans()
+    assert not _check(monkeypatch, svc, scans)
+    # Two new emails listed oldest first (reversed when read, so newest first: out of order).
+    svc.sent = {"n1": {"To": "reply+1@reply.github.com"}, "n2": {"To": "reply+2@reply.github.com"}}
+    svc.sent |= {"g0": GITHUB_REPLIES["g0"]}
+    svc.dates |= {"n1": SENT_BASE_S + 60, "n2": SENT_BASE_S + 120}
+    svc.ordered = False
+    assert _check(monkeypatch, svc, scans)
+    assert svc.reads == ["n2", "n1"]
+    assert scans.load("github.com") == DomainScan("github.com", scan_rules())
+
+
+def test_domain_scan_out_of_order_email_to_a_person_still_counts(monkeypatch):
+    sent = {"a": {"To": "reply+a@reply.github.com"}, "b": {"To": "reply+b@reply.github.com"}}
+    sent["c"] = {"To": "Octo <octo@github.com>"}
+    dates = {"a": SENT_BASE_S, "b": SENT_BASE_S - 600, "c": SENT_BASE_S - 300}
+    svc, scans = SentMailService(sent, dates=dates, ordered=False), MemoryScans()
+    assert _check(monkeypatch, svc, scans)
+    assert scans.load("github.com").verdict is DomainVerdict.PERSON  # type: ignore[union-attr]
 
 
 def test_has_written_to_domain_skips_emails_deleted_since_the_search(monkeypatch):
@@ -461,7 +735,8 @@ def test_has_written_to_domain_raises_other_read_errors_uncached(monkeypatch):
         gmail.has_written_to("linkedin.com")
     svc.get_errors = {}
     assert not gmail.has_written_to("linkedin.com")  # asked again: a failure isn't cached
-    assert svc.queries == ["in:sent to:linkedin.com"] * 2
+    assert svc.queries[0] == "in:sent to:linkedin.com"
+    assert svc.reads == ["s0", "s1", "s2", "s3", "s3", *list(LINKEDIN_REPLIES)[4:]]
 
 
 def test_has_written_to_domain_without_sent_mail(monkeypatch):

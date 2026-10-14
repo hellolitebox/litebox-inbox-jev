@@ -71,11 +71,13 @@ jobs:
             exit 0
           fi
           current=$(gh issue view "$open" --json title --jq .title)
+          reported=${current#"$prefix"}
           # VERSIONs are zero-padded UTC timestamps, so string order is time order. Never step
           # the issue back (a stale CDN copy can be older than the VERSION it already names); a
-          # title not in this format (renamed by hand) is rewritten.
-          if [[ "$current" == "$prefix"* && ! "$VERSION" > "${current#"$prefix"}" ]]; then
-            echo "Issue #$open already reports ${current#"$prefix"} (this run found $VERSION)."
+          # title not in this format (renamed by hand, even keeping the prefix) is rewritten.
+          version_shape='^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}_UTC$'
+          if [[ "$current" == "$prefix"* && "$reported" =~ $version_shape && ! "$VERSION" > "$reported" ]]; then
+            echo "Issue #$open already reports $reported (this run found $VERSION)."
           else
             gh issue edit "$open" --title "$title" --body-file "$body"
             gh issue comment "$open" --body-file "$body"

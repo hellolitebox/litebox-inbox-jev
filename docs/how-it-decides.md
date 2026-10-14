@@ -511,33 +511,105 @@ instead of restoring nothing.
    change the search).
 2. Unless the sender is a [machine address](#48-machine-and-no-reply-addresses) (writing to
    `noreply@` or a bounce address doesn't make anyone a contact, so it isn't searched): Gmail
-   search `in:sent to:<sender>` (`maxResults=1`). A hit → `wrote_to_sender`.
+   search `in:sent to:<sender>` (`maxResults=10`, `gmail.SENT_ADDRESS_READS`), then read the
+   `To`, `Cc` and `Bcc` headers (`format=metadata`, no body) of the matches, newest first, one at
+   a time. The first that went to the sender's own address → `wrote_to_sender`
+   (`signals.wrote_to_address`): Gmail's `to:` also matches similar addresses, so a match alone
+   isn't proof ([EX-34](#ex-34--an-email-to-a-similar-address-makes-no-known-contact)).
+   Addresses compare lowercased (`signals.mailbox_key`); a consumer Gmail address
+   (`gmail.com`, `googlemail.com`) also without dots and without a `+tag` in its local part, as
+   Gmail delivers it. No other provider's rules are applied: Google Workspace and other domains
+   don't promise that dots or `+tags` reach the same mailbox (`support+123@` can be a ticket),
+   and merging two addresses that aren't one would make a stranger a known contact. An email
+   with no recipient address in those headers at all counts (Gmail matched something they don't
+   show), and so do 10 matches none of which went to the sender when Gmail has more (an older
+   one might; logged as `sent-mail address check inconclusive`).
 3. Unless the sender's domain is a free-mail provider (`config.FREE_MAIL`: Gmail, Outlook /
    Hotmail / Live / MSN, Yahoo, iCloud, AOL, Proton, Tuta, Fastmail, GMX / Web.de, Mail.com,
    Yandex, Mail.ru and large regional ones, with the big providers' country domains such as
    `yahoo.com.ar`, `hotmail.co.uk`, `outlook.com.br`, `live.com.mx`;
    [EX-26](#ex-26--writing-to-a-friend-on-country-free-mail-makes-no-known-contact)) or the
-   account's own domain: search
-   `in:sent to:<domain>` (`maxResults=25`, `gmail.SENT_DOMAIN_SAMPLE`), then read the `To`, `Cc`
-   and `Bcc` headers (`format=metadata`, no body) of the matches, newest first, one at a time.
-   The first email with a recipient on the domain (or a subdomain) that isn't a machine address
-   → `wrote_to_their_domain` (`signals.wrote_to_person_at`). An email with no recipient on the
-   domain at all (Gmail's `to:` matched something the headers don't show) also counts, as
-   before. When all 25 went only to machine addresses and Gmail has more, it counts too (an
-   older one might be to a person; logged as `sent-mail sample inconclusive`). An email deleted
-   between the search and the read (404) is skipped. The `list` and each read retry a 429, 5xx or
-   rate-limit 403 with backoff (googleapiclient, `gmail.SINGLE_RETRIES` = 3) before failing.
+   account's own domain: the **domain scan** (below) reads the `To`, `Cc` and `Bcc` headers of
+   the sent emails matching `in:sent to:<domain>`. The first email with a recipient on the
+   domain (or a subdomain) that isn't a machine address → `wrote_to_their_domain`
+   (`signals.wrote_to_person_at`). An email with no recipient on the domain at all (Gmail's
+   `to:` matched something the headers don't show) also counts, as before. Until every match
+   has been read without finding a person, the domain counts as written too (logged as
+   `sent-mail domain scan not finished`).
 4. Otherwise `never`. So replies to LinkedIn notifications (`m-…@bounce.linkedin.com`) no
    longer make every LinkedIn email a known contact
    ([EX-24](#ex-24--replies-to-notifications-dont-make-a-contact)).
 
-Each query's answer is cached in the `Gmail` object, so per account per run. Any exception →
-`None` (logged as a warning, not cached).
+An email deleted between a search and its read (404) is skipped. The `list` and each read
+retry a 429, 5xx or rate-limit 403 with backoff (googleapiclient, `gmail.SINGLE_RETRIES` = 3)
+before failing. Each query's answer is cached in the `Gmail` object, so per account per run. Any
+exception → `None` (logged as a warning, not cached), except a database error saving the domain
+scan (below), which is raised: the email fails and is retried (`run`), or `unsubscribe-retry`
+stops, in both cases before any unsubscribe request.
+
+**Domain scan** (`gmail.DomainScan`, kept per account and domain in the `sent_domain_scans`
+table by `triage.DomainScanRows`; [EX-35](#ex-35--a-domain-written-to-only-at-machine-addresses-is-read-in-full),
+[ADR 0040](decisions/0040-domain-scan-kept-across-runs.md)). The scan reads the matches newest
+first, at most 25 per check (`gmail.SENT_DOMAIN_READS`, the read budget per domain and run), and
+remembers the dates of the newest and oldest emails it read (Unix seconds, as Gmail's
+`after:` / `before:` take them) and the ids read in those two seconds:
+
+- No scan yet: `in:sent to:<domain>` (`maxResults=25`) from the newest match down.
+- A scan, first: `in:sent to:<domain> after:<newest − 1 s>` (up to 500,
+  `gmail.SENT_NEWER_LIMIT`; with more, the check stops and the domain counts as written). The
+  new matches are read oldest first, so what was read stays one span without gaps.
+- Then, unless the scan reached the end: `in:sent to:<domain> before:<oldest + 1 s>` and the
+  next older matches, newest first, until the budget runs out.
+- `verdict`: `person` once a match went to a person: final, no Gmail call for that domain after
+  that. `never` (with `verdict_at`, when it was reached, also when a check reaches it without
+  reading anything) once nothing older is left and nothing newer is unread: the domain isn't a
+  known contact. Otherwise `scanning`: counts as written. `never` is checked again on every
+  check by the `after:` search, so new sent mail to the domain is read (and a new email to a
+  person there makes it `person`) the first time an email from it is decided.
+- A `never` reached 30 days ago or more (`gmail.NEVER_VERDICT_TTL`) starts over from the newest
+  match, as a new scan: the `after:` search only lists mail dated after the span, so sent mail
+  that appears later with an older date (restored from Trash, imported) would otherwise never be
+  read ([EX-36](#ex-36--a-never-verdict-is-redone-after-a-month)). While it re-reads, the domain
+  counts as written.
+- Each read is checked against the order the span relies on: walking down (`before:`, or the
+  first scan), each email no newer than the one read before it and than the span's oldest;
+  walking up (`after:`), no older than the one before it and than the span's newest. An email
+  out of order means Gmail's list order or its date filters don't match the dates read, so the
+  span may have gaps: the scan is dropped and starts over at the next check, the domain counts
+  as written, and a warning with counts only is logged. That check never yields `never`; an
+  email to a person still makes it `person`
+  ([EX-37](#ex-37--a-scan-read-out-of-date-order-is-not-trusted)).
+- The scan is saved with the email it was made for (same session and commit; an email whose
+  processing fails loses it, and the next check reads those emails again). The save is an
+  upsert run at once (SQLite and Postgres `ON CONFLICT`): when `run` and `unsubscribe-retry`
+  start the same domain's scan, the last one saved wins (each is gap-free on its own), except
+  that a `person` saved under the same rules stays; neither fails on the unique key, and a
+  locked database fails the save during the search, before any unsubscribe. On a database
+  without that upsert, `run` (in every mode) and `unsubscribe-retry` fail the account at their
+  start, before any Gmail call, and `previous_contact` raises rather than answer "unknown" (no
+  veto in `run`). A Gmail
+  error keeps what was read before it. A scan made under other rules (`gmail.scan_rules`: the
+  code's `SCAN_RULES_VERSION` and the bundled Public Suffix List's digest, which decide machine
+  addresses) starts over. A domain without any match stores nothing.
+- `unsubscribe-retry` uses the same table; `scripts/dry_classify.py` keeps scans in memory
+  only (it never writes the DB), so it shows what a first run would decide.
 
 **Cost** (Gmail quota units: `messages.list` and `messages.get` cost 5 each), per new sender and
-run: the address search is one `list`. The domain search is one `list` plus one metadata `get`
-per match read, stopping at the first person: usually one read for a real contact's domain, and
-at most 25 (130 units) for a domain written to only at machine addresses.
+run: the address search is one `list` plus one metadata `get` per match read, stopping at the
+first that went to the sender: one read for a real contact, at most 10. A domain with a `person`
+verdict costs nothing; otherwise one `list` (the first scan) or one or two (`after:`, then
+`before:` while unfinished) plus at most 25 reads (135 units) per run. A real contact's domain
+usually costs one read, once. A domain written to only at machine addresses N times is read in
+full over ⌈N / 25⌉ runs in which an email from it is decided; after that, one `list` per run,
+and the same full re-read once every 30 days.
+
+**Staleness**: `person` never expires (deleting the sent email doesn't undo it; the safe side).
+For `never`, sent mail dated after the span is listed on every check, but mail that enters the
+sent folder later with an older date (restored from Trash, imported or migrated, appended over
+IMAP by another client) falls inside the span already read and is only seen when the scan
+restarts, at most 30 days after the verdict (`NEVER_VERDICT_TTL`). A change to what counts as a
+machine address in code needs `SCAN_RULES_VERSION` bumped; a Public Suffix List update restarts
+the scans by itself.
 
 When it runs: on the Jev path for every email (in every mode, including `dry_run`), and on the
 rule path only when `triage.rule_needs_contact` says it can change an unsubscribe. Never for
@@ -1193,6 +1265,75 @@ the probabilities that matter are shown; the rest are ~0.
   group. The group never unsubscribes (0.87 < 0.90).
   ([ADR 0038](decisions/0038-surveys-are-not-a-personal-action.md))
 
+### EX-34 — An email to a similar address makes no known contact
+
+- **Test**: `test_ex34_an_email_to_a_similar_address_makes_no_known_contact`
+- **Input**: "Quick question about your pipeline" from `lee@outlook.com`, DMARC pass,
+  `List-Unsubscribe: <https://unsub.sequencer.example/u/lee>` with one-click. `in:sent
+  to:lee@outlook.com` returns one email, to `Ash <ashlee@outlook.com>` (Gmail's `to:` matches
+  more than the exact address). Jev: cold_outreach 0.96.
+- **Outcome**: the address search reads that email's `To` and finds only `ashlee@outlook.com`:
+  `previous_contact` = `never` (`outlook.com` is free mail: no domain search). Archived with
+  `Jev/Outreach` and unsubscribed (one-click `POST`), as EX-04. With one more sent email that
+  has `Lee@Outlook.com` in `Cc` it is `wrote_to_sender` (addresses compare lowercased).
+- **Why**: before, any match of `to:<sender>` made the sender a known contact, so an email to
+  someone with a similar address kept a stranger's pitch from being unsubscribed and vetoed the
+  archive group on it. Only the address itself counts; Gmail's own dot and `+tag` rules apply
+  only to consumer Gmail addresses
+  ([ADR 0039](decisions/0039-address-search-reads-recipients.md)).
+
+### EX-35 — A domain written to only at machine addresses is read in full
+
+- **Test**: `test_ex35_a_domain_written_to_only_at_machine_addresses_is_read_in_full`
+- **Input**: digests from `notifications@code.example`, Jev as EX-24 (notification 0.62,
+  newsletter 0.36, important 0.01; `needs_reply` 0.75). Your sent mail has 60 replies to its
+  notifications at `reply+…@reply.code.example`, none to a person at `code.example`. One such
+  digest is decided in each of three runs, then two more runs follow.
+- **Outcome**: run 1 reads the newest 25 (`previous_contact` = `wrote_to_their_domain`: the
+  scan isn't finished, so the digest stays in Review with `Jev/Needs Reply`, as EX-24 did
+  before its fix); run 2 reads the next 25 (same); run 3 reads the last 10: `never`, stored as
+  verdict `never` with its time, and the digest is archived as `notification` through the archive
+  group. Run 4: one `after:` search finds nothing new, no read, `never`. Then you write to
+  `ana@code.example`: the next run reads that one email (`wrote_to_their_domain`, verdict
+  `person`), and the runs after it make no Gmail call for the domain.
+- **Why**: before, only the newest 25 matches were ever read and more behind them counted as a
+  person, so a service you replied to more than 25 times stayed a known contact forever. Keeping
+  the scan's progress lets each run read a bounded slice until the answer is certain, and
+  checking for newer sent mail keeps a `never` honest
+  ([ADR 0040](decisions/0040-domain-scan-kept-across-runs.md)).
+
+### EX-36 — A `never` verdict is redone after a month
+
+- **Test**: `test_ex36_a_never_verdict_is_redone_after_a_month`
+- **Input**: a verified `cold_outreach` email from `sales@vendor.example` with one-click
+  List-Unsubscribe (Jev 0.96). Your sent mail to `vendor.example` is three emails to
+  `bounces+…@vendor.example`. Then you restore from Trash an email you sent `ana@vendor.example`
+  more than a year ago.
+- **Outcome**: the first check reads the three: `never`, and the pitch is archived and
+  unsubscribed. 29 days after that verdict, the check lists only newer sent mail and finds none:
+  still `never` (Ana's email is older than the span, so it isn't listed). At 30 days the scan
+  starts over from the newest match, reads Ana's email: `wrote_to_their_domain` (verdict
+  `person`), and the next pitch is archived but not unsubscribed (`known_contact_kept`).
+- **Why**: the span is only checked for mail dated after it, so mail that enters the sent folder
+  with an old date is invisible to it; a monthly re-read of these small, machine-only domains
+  bounds how long such a miss can let an irreversible unsubscribe through
+  ([ADR 0040](decisions/0040-domain-scan-kept-across-runs.md)).
+
+### EX-37 — A scan read out of date order is not trusted
+
+- **Test**: `test_ex37_a_scan_read_out_of_date_order_is_not_trusted`
+- **Input**: the pitch of EX-36. Your sent mail to `vendor.example` is three emails to
+  `bounces+…@vendor.example`, A, B and C: A is the newest, then C, then B, but Gmail lists them
+  A, B, C.
+- **Outcome**: the check reads A, then B, then C, which is newer than B: out of order. The scan
+  is dropped (stored as a new, empty `scanning` scan), a warning with counts only is logged, and
+  the answer is `wrote_to_their_domain`: the pitch is archived, not unsubscribed. The next check,
+  with Gmail listing in order again, starts from the newest match and reaches `never`.
+- **Why**: a span is gap-free only if Gmail lists matches in the date order its `before:` /
+  `after:` filter on; an email out of that order means one like it could sit inside the span
+  unread, so the check can't conclude that no person was written to
+  ([ADR 0040](decisions/0040-domain-scan-kept-across-runs.md)).
+
 ## 6. Glossary
 
 - **Action**: what a category does: `keep`, `archive`, `archive_unsubscribe`, `spam`.
@@ -1228,7 +1369,9 @@ the probabilities that matter are shown; the rest are ~0.
   is the **keep probability**; ≥ 0.02 (other than the decided one) is the auto-rule **keep
   signal**, ≥ 0.05 enables the needs-reply veto on the group.
 - **Known contact**: `previous_contact` is `wrote_to_sender` or `wrote_to_their_domain`, from
-  sent mail to a person (not a machine address).
+  sent mail to the sender's own address or to a person on their domain (not a machine address).
+- **Domain scan**: the domain search's progress through the sent mail to one domain, kept per
+  account between runs (`sent_domain_scans`): `scanning`, `person` or `never`.
   `known_contact_kept`: an unsubscribe was skipped because of one (verified, non-group sender).
 - **`list_key`**: identity of a list for "once per list": `List-Id`, else the sender domain.
 - **Low confidence / Review**: below the threshold and no archive group: `Jev/Review` + the
@@ -1260,11 +1403,21 @@ Behaviour found while writing this spec, documented as it is today:
   after the fix, `retry-errors` recovers those. Two bad emails in a row stop the passes where
   both are due again (fewer as their backoff grows), and those passes decide none of the
   emails behind them ([EX-30](#ex-30--two-emails-jev-refuses-dont-hold-up-the-rest)).
-- The address search (`to:<sender>`) trusts any hit, so Gmail's loose `to:` matching could
-  still count an email to a similar address; only the domain search reads recipients.
-- A domain you wrote to only at machine addresses more than 25 times (e.g. many replies to
-  GitHub notifications at `reply.github.com`) still counts as known: only the newest 25 matches
-  are read, and the rest is assumed to hold a person.
+- The address search reads at most the newest 10 matches: when Gmail's `to:` returns more than
+  10 emails to other addresses before one to the sender, the sender still counts as written.
+  Plus-addressing and dot-insensitivity are only applied to consumer Gmail, so writing to
+  `jane+news@outlook.com` doesn't make `jane@outlook.com` a known contact.
+- A domain written to only at machine addresses more than 25 times counts as known until the
+  scan has read every match, 25 per run in which an email from it is decided (e.g. 4 such runs
+  for 100 replies to GitHub notifications). The scan relies on Gmail listing matches in date
+  order and on its `after:` / `before:` filtering on the date it reads (whole seconds, as
+  documented); a read out of that order restarts the scan, but a mismatch the reads can't show
+  (an unread email misplaced by the list) is not detected. A domain with more than 500 sent
+  emails between two checks counts as written until fewer are new.
+- A `never` can be up to 30 days stale for sent mail that appears with an older date (restored
+  from Trash, imported, migrated or appended over IMAP): an email to a person there is only read
+  when the scan restarts, so until then a verified `cold_outreach` email from that domain can
+  still be unsubscribed ([EX-36](#ex-36--a-never-verdict-is-redone-after-a-month)).
 - The Public Suffix List is the version shipped with the code: a suffix added upstream since is
   unknown until the update from the weekly `psl-update` issue merges, and an update that makes
   an existing `group_domains` entry a suffix fails the accounts file at load (the PSL lane checks

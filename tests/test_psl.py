@@ -223,3 +223,9 @@ def test_upstream_vector(host, expected):
     """The registrable domain the upstream vectors expect, compared as lowercase ASCII (ours
     returns IDN labels as their A-labels, the vectors keep the input's form)."""
     assert registrable_domain(host) == (None if expected is None else to_ascii(expected))
+
+
+def test_fingerprint_names_the_bundled_list():
+    data = files("inbox_jev").joinpath(psl.DATA_FILE).read_bytes()
+    assert re.fullmatch(r"[0-9a-f]{12}", psl.fingerprint())
+    assert psl.fingerprint() == __import__("hashlib").sha256(data).hexdigest()[:12]

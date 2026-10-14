@@ -18,6 +18,7 @@ names are compared as lowercase ASCII: a Unicode label becomes its punycode A-la
 
 from __future__ import annotations
 
+import hashlib
 import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -121,3 +122,11 @@ def is_public_suffix(domain: str) -> bool:
     under no rule but a TLD is a domain (`acme.io`, `sap.de`).
     """
     return registrable_domain(domain) is None
+
+
+@cache
+def fingerprint() -> str:
+    """A short digest of the bundled list's text: changes whenever the list is updated, so a
+    result computed under an earlier list can be told apart (`gmail.scan_rules`)."""
+    data = files("inbox_jev").joinpath(DATA_FILE).read_bytes()
+    return hashlib.sha256(data).hexdigest()[:12]

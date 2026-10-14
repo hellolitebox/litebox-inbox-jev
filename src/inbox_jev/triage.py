@@ -12,8 +12,11 @@ from types import TracebackType
 from typing import Any, Literal, Protocol, Self, cast, get_args
 
 from sqlalchemy import Update, and_, or_, select, update
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.engine import CursorResult
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.sql.expression import Executable
 
 from . import corrections, rules
 from . import unsubscribe as unsub
@@ -28,8 +31,25 @@ from .classifier import (
     failure_kind,
 )
 from .config import FREE_MAIL, Account, CategoriesConfig, Mode, Settings
-from .db import MAX_ERROR_ATTEMPTS, Message, MessageStatus, Run, SenderRule, Unsubscribe, now
-from .gmail import Email, is_not_found, is_token_refresh_error, token_error_detail
+from .db import (
+    MAX_ERROR_ATTEMPTS,
+    Message,
+    MessageStatus,
+    Run,
+    SenderRule,
+    SentDomainScan,
+    Unsubscribe,
+    now,
+)
+from .gmail import (
+    DomainScan,
+    DomainScans,
+    DomainVerdict,
+    Email,
+    is_not_found,
+    is_token_refresh_error,
+    token_error_detail,
+)
 from .policy import (
     Decision,
     DecisionSource,
@@ -110,7 +130,7 @@ class GmailApi(Protocol):
     def ensure_labels(self, names: list[str]) -> dict[str, str]: ...
     def modify(self, message_id: str, add: list[str], remove: list[str]) -> None: ...
     def send(self, to: str, subject: str, body: str) -> None: ...
-    def has_written_to(self, query: str) -> bool: ...
+    def has_written_to(self, query: str, scans: DomainScans | None = None) -> bool: ...
 
 
 # An account's address -> a Gmail client for it (`gmail.connect` in the CLI, a fake in tests).
@@ -339,6 +359,7 @@ def _run_pass(
     if unknown:
         raise ValueError(f"{account.email}: unknown act_categories {sorted(unknown)}")
     jev = JevGuard(ctx.classifier, account.email)  # no API key: fails before touching Gmail
+    scans = DomainScanRows(session, account.email)  # a database without the upsert: likewise
     gmail = ctx.gmail(account.email)
     label_ids = gmail.ensure_labels(ctx.cfg.all_labels()) if mode != Mode.DRY_RUN else {}
     if mode != Mode.DRY_RUN:
@@ -349,7 +370,7 @@ def _run_pass(
     )
     skip = _not_due(session, account.email, mode, ids)
     budget = UnsubscribeBudget(ctx.settings.max_unsubscribes_per_run)
-    account_pass = AccountPass(ctx, session, gmail, account, mode, label_ids, budget, jev)
+    account_pass = AccountPass(ctx, session, gmail, account, mode, label_ids, budget, jev, scans)
     held: _HeldRejection | None = None  # an email Jev refused, until the next call says why
     for message_id in ids:
         if message_id in skip:
@@ -630,6 +651,7 @@ class AccountPass:
     label_ids: dict[str, str]  # Gmail label name -> id; empty in dry_run
     unsub_budget: UnsubscribeBudget
     jev: JevGuard
+    scans: DomainScanRows  # the account's sent-mail domain scans, saved with each email's commit
     # The email `process` is on, once read from Gmail: what its error row stores if it fails.
     fetched: Email | None = None
 
@@ -774,7 +796,7 @@ def _gather_inputs(
     if not is_allowed(account, sig) and rule is None:
         p.jev.check()
         with timer.stage("lookup"):
-            contact = previous_contact(p.gmail, account.email, sig.sender)
+            contact = previous_contact(p.gmail, account.email, sig.sender, p.scans)
         with timer.stage("jev"):
             classification = p.jev.classify(
                 build_state(email, account.email, body_chars, contact, sig)
@@ -787,7 +809,8 @@ def _gather_inputs(
     if rule is not None:
         with timer.stage("lookup"):
             if _rule_needs_contact(ctx.cfg, account, sig, rule.category, p.mode, list_row):
-                return _Inputs(rule, None, previous_contact(p.gmail, account.email, sig.sender))
+                contact = previous_contact(p.gmail, account.email, sig.sender, p.scans)
+                return _Inputs(rule, None, contact)
     return _Inputs(rule, None, None)
 
 
@@ -995,15 +1018,114 @@ def backfill_senders(session: Session, gmail: GmailApi, account: Account) -> tup
     return len(rows), updated, skipped
 
 
-def previous_contact(gmail: GmailApi, account: str, sender: str) -> str | None:
+class DomainScanRows:
+    """An account's sent-mail domain scans (`gmail.DomainScans`) in `sent_domain_scans`.
+
+    On the caller's session and never committed here: a scan is saved with the email it was
+    made for (a rolled-back email loses it, and the next check reads those emails again). Its
+    own session would wait on the pass's write lock in SQLite.
+
+    `save` is an upsert, so a row another process inserted since `load` (`run` and
+    `unsubscribe-retry` checking the same new domain) can't fail the commit with a unique
+    conflict: the last scan saved wins, except over a `person` made under the same rules, which
+    stays (it is final). Either scan is gap-free on its own, so the next check goes on from it.
+    """
+
+    def __init__(self, session: Session, account: str) -> None:
+        # Checked here, not at the first save: `previous_contact` must not reach a domain
+        # verdict it then can't store (its caller would see an unknown contact, no veto).
+        self._dialect = session.get_bind().dialect.name
+        _require_scan_upsert(self._dialect)
+        self._session, self._account = session, account
+
+    def load(self, domain: str) -> DomainScan | None:
+        # populate_existing: `save` writes with Core, so a row already in the session is stale.
+        row = self._session.scalar(
+            select(SentDomainScan)
+            .where(SentDomainScan.account == self._account, SentDomainScan.domain == domain)
+            .execution_options(populate_existing=True)
+        )
+        if row is None:
+            return None
+        return DomainScan(
+            domain=row.domain,
+            rules=row.rules,
+            verdict=DomainVerdict(row.verdict),
+            verdict_at=_utc(row.verdict_at),
+            newest_s=row.newest_s,
+            newest_ids=list(row.newest_ids or []),
+            oldest_s=row.oldest_s,
+            oldest_ids=list(row.oldest_ids or []),
+            reached_end=row.reached_end,
+            read=row.read,
+        )
+
+    def save(self, scan: DomainScan) -> None:
+        self._session.execute(scan_upsert(self._dialect, self._account, scan))
+
+
+# The databases with the ON CONFLICT upsert `scan_upsert` writes: the ones the app documents.
+_SCAN_UPSERT_DIALECTS = ("sqlite", "postgresql")
+
+
+def _require_scan_upsert(dialect: str) -> None:
+    """Raise NotImplementedError on a database `scan_upsert` has no statement for."""
+    if dialect not in _SCAN_UPSERT_DIALECTS:
+        raise NotImplementedError(f"no upsert for sent_domain_scans on {dialect}")
+
+
+def scan_upsert(dialect: str, account: str, scan: DomainScan) -> Executable:
+    """The statement `DomainScanRows.save` runs: insert the scan, or update the account's row
+    for its domain unless that row is a `person` made under the same rules. ON CONFLICT exists
+    in the databases the app documents, SQLite and Postgres."""
+    _require_scan_upsert(dialect)
+    insert: sqlite.Insert | postgresql.Insert
+    if dialect == "sqlite":
+        insert = sqlite.insert(SentDomainScan)
+    else:
+        insert = postgresql.insert(SentDomainScan)
+    values = {
+        "rules": scan.rules,
+        "verdict": scan.verdict.value,
+        "verdict_at": scan.verdict_at,
+        "newest_s": scan.newest_s,
+        "newest_ids": list(scan.newest_ids),
+        "oldest_s": scan.oldest_s,
+        "oldest_ids": list(scan.oldest_ids),
+        "reached_end": scan.reached_end,
+        "read": scan.read,
+        "updated_at": now(),
+    }
+    insert = insert.values(account=account, domain=scan.domain, **values)
+    stored = SentDomainScan
+    return insert.on_conflict_do_update(
+        index_elements=[stored.account, stored.domain],
+        set_=values,
+        where=or_(
+            stored.verdict != DomainVerdict.PERSON.value, stored.rules != insert.excluded.rules
+        ),
+    )
+
+
+def _utc(at: datetime | None) -> datetime | None:
+    """`at` as an aware UTC datetime: SQLite returns naive ones (stored as UTC)."""
+    return at.replace(tzinfo=UTC) if at is not None and at.tzinfo is None else at
+
+
+def previous_contact(
+    gmail: GmailApi, account: str, sender: str, scans: DomainScans | None = None
+) -> str | None:
     """wrote_to_sender | wrote_to_their_domain | never, or None if it can't be checked.
 
     Writing to a machine address isn't knowing someone: an automated sender
     (`signals.is_automated_address`, e.g. a no-reply or bounce address) is never searched for
-    itself, and the domain search (`Gmail.has_written_to`) ignores emails sent only to machine
-    addresses on the domain. The domain check is skipped for free mail providers (a gmail.com
-    sender says nothing about who else I wrote to) and for my own domain (colleagues are
-    allowlisted, if at all).
+    itself, the address search only counts emails that went to the sender's own address, and
+    the domain search (`Gmail.has_written_to`) ignores emails sent only to machine addresses on
+    the domain. The domain check is skipped for free mail providers (a gmail.com sender says
+    nothing about who else I wrote to) and for my own domain (colleagues are allowlisted, if at
+    all). `scans` keeps the domain search's progress between runs (`DomainScanRows`); without
+    it, it lasts as long as `gmail`. A database error saving it (or a database it can't be
+    saved in) is raised, not `None`.
     """
     sender = sender.lower()
     if not ADDRESS.match(sender):
@@ -1013,8 +1135,12 @@ def previous_contact(gmail: GmailApi, account: str, sender: str) -> str | None:
         if not is_automated_address(sender) and gmail.has_written_to(sender):
             return "wrote_to_sender"
         own = domain_of(account.lower())
-        if domain not in FREE_MAIL and domain != own and gmail.has_written_to(domain):
+        if domain not in FREE_MAIL and domain != own and gmail.has_written_to(domain, scans):
             return "wrote_to_their_domain"
+    except (SQLAlchemyError, NotImplementedError):
+        # Saving the domain scan failed (e.g. the database is locked, or has no upsert): not an
+        # unknown contact, which `run` may unsubscribe; the caller fails before any request.
+        raise
     except Exception:
         log.warning("previous contact check failed", extra={"account": account}, exc_info=True)
         return None
@@ -1143,7 +1269,11 @@ def retry_unsubscribes(
     contact) become `skipped`, so `run` won't retry them either. Rows held back by settings or
     transient state (mode, act_categories, a removed rule, confidence, the cap, a failed sent-mail
     search, a deleted email, no stored message) are left as they are.
+
+    Raises `NotImplementedError` before reading any row or calling Gmail on a database without
+    the sent-mail scan upsert (`DomainScanRows`), as `run` does at the start of its pass.
     """
+    scans = DomainScanRows(session, account.email)  # a database without the upsert: fails here
     mode = effective_mode(ctx.settings, account, None)
     rows = session.scalars(
         select(Unsubscribe).where(
@@ -1157,7 +1287,8 @@ def retry_unsubscribes(
     budget = UnsubscribeBudget(ctx.settings.max_unsubscribes_per_run)
     out: list[tuple[str, str]] = []
     for row in rows:
-        out.append(_retry_one(ctx, session, gmail, account, mode, row, budget))
+        out.append(_retry_one(ctx, session, gmail, account, mode, row, budget, scans))
+    session.commit()  # the sent-mail scans of rows held back (DomainScanRows)
     return out
 
 
@@ -1169,6 +1300,7 @@ def _retry_one(
     mode: Mode,
     row: Unsubscribe,
     budget: UnsubscribeBudget,
+    scans: DomainScanRows,
 ) -> tuple[str, str]:
     """One failed unsubscribe through `retry_unsubscribes`' checks, in order: (list, outcome)."""
     msg = _find_message(session, account.email, row.gmail_id)
@@ -1201,12 +1333,19 @@ def _retry_one(
         return row.list_key, f"held: {held}"
     gate = unsubscribe_gate(ctx.cfg, account, sig, category, previous_contact=None)
     if gate.allowed and gate.contact_unknown:
-        contact = previous_contact(gmail, account.email, sig.sender)
+        contact = previous_contact(gmail, account.email, sig.sender, scans)
         if contact is None:  # stricter than run: nothing in a manual retry is urgent
             return row.list_key, "held: sent-mail search failed"
         gate = unsubscribe_gate(ctx.cfg, account, sig, category, contact)
     if gate.veto is not None:
         return _skip(session, row, _RETRY_SKIP_REASONS[gate.veto])
+    # Take SQLite's write lock before the irreversible request, so a locked DB (e.g. `run`
+    # holding it) fails this row before it unsubscribes rather than rolling back the attempt's
+    # row after. The flush needs a write to take the lock: the row may have nothing pending
+    # (no sent-mail search, a cached verdict, or nothing new to save), so stamp the attempt's
+    # time now; `record_attempt` sets it again after the request.
+    row.attempted_at = now()
+    session.flush()
     result = unsub.unsubscribe(sig, send_mail=gmail.send)
     record_attempt(row, result)
     session.commit()
@@ -1312,6 +1451,7 @@ def _unsubscribe(
 
     # Write the email's row (taking SQLite's write lock) before the irreversible request, so a
     # locked DB fails the email before it unsubscribes rather than rolling back the attempt's row.
+    # There is always a write: `_store_outcome` has just set the row's `processed_at`.
     session.flush()
     result = unsub.unsubscribe(sig, send_mail=gmail.send)
     if row is None:

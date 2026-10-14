@@ -1,6 +1,6 @@
 # 0032. Machine addresses make no known contact; a no-reply email's reply signal is judged like a stranger's
 
-- Status: Accepted (registrable domain refined by [0037](0037-public-suffix-list-for-suffixes-and-registrable-domains.md))
+- Status: Accepted (registrable domain refined by [0037](0037-public-suffix-list-for-suffixes-and-registrable-domains.md); the 25-email sample by [0040](0040-domain-scan-kept-across-runs.md))
 - Date: 2026-10-13
 - PR: #33
 

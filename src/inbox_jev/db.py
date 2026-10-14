@@ -15,6 +15,7 @@ from pathlib import Path
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     ColumnDefault,
     DateTime,
@@ -135,6 +136,28 @@ class SenderRule(Base):
     source: Mapped[str] = mapped_column(String(16))  # rules.RuleSource
     hits: Mapped[int] = mapped_column(Integer, default=0)
     active: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+
+class SentDomainScan(Base):
+    """An account's sent-mail scan of one domain (`gmail.DomainScan`), kept between runs so a
+    domain written to only at machine addresses is read in full a few emails per run."""
+
+    __tablename__ = "sent_domain_scans"
+    __table_args__ = (UniqueConstraint("account", "domain"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account: Mapped[str] = mapped_column(String(320), index=True)
+    domain: Mapped[str] = mapped_column(String(255))
+    rules: Mapped[str] = mapped_column(String(64))  # gmail.scan_rules() when it started
+    verdict: Mapped[str] = mapped_column(String(16))  # gmail.DomainVerdict
+    verdict_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    newest_s: Mapped[int | None] = mapped_column(BigInteger)  # Unix seconds
+    newest_ids: Mapped[list] = mapped_column(JSON, default=list)
+    oldest_s: Mapped[int | None] = mapped_column(BigInteger)
+    oldest_ids: Mapped[list] = mapped_column(JSON, default=list)
+    reached_end: Mapped[bool] = mapped_column(Boolean, default=False)
+    read: Mapped[int] = mapped_column(Integer, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
 
 

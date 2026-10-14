@@ -82,6 +82,40 @@ def wrote_to_person_at(recipient_headers: list[str], domain: str) -> bool:
     return not on_it or not all(is_automated_address(a, domain) for a in on_it)
 
 
+def wrote_to_address(recipient_headers: list[str], address: str) -> bool:
+    """Whether a sent email with these To/Cc/Bcc values went to `address` (lowercase).
+
+    A recipient counts when it is the same mailbox (`mailbox_key`): Gmail's `to:` search also
+    matches similar addresses, so a hit alone isn't proof. With no recipient at all in these
+    headers (Gmail matched something they don't show), it counts, as `wrote_to_person_at` does.
+    """
+    addresses = [a for _, a in getaddresses(recipient_headers) if a.strip()]
+    if not addresses:
+        return True
+    key = mailbox_key(address)
+    return any(mailbox_key(a) == key for a in addresses)
+
+
+# Consumer Gmail ignores dots and anything after a "+" in the local part, and googlemail.com is
+# the same service. Google Workspace and other providers don't promise either (a `+` tag can be
+# routed elsewhere, e.g. a ticket address `support+123@`), so their addresses compare as written.
+_GMAIL_HOSTS = frozenset({"gmail.com", "googlemail.com"})
+
+
+def mailbox_key(address: str) -> str:
+    """`address` as a comparable mailbox: lowercased and trimmed; a consumer Gmail address
+    (gmail.com, googlemail.com) without dots or a `+` tag in its local part, on gmail.com.
+
+    Only Gmail's own rules are applied: other providers' plus-addressing and dot handling vary
+    by provider and by mailbox, and treating two addresses as one when they aren't would make a
+    stranger a known contact.
+    """
+    local, at, host = address.strip().lower().rpartition("@")
+    if not at or host not in _GMAIL_HOSTS:
+        return address.strip().lower()
+    return local.partition("+")[0].replace(".", "") + "@gmail.com"
+
+
 def domain_of(address: str) -> str:
     """The part after the last "@" (the whole string when there is none). Case is kept."""
     return address.rsplit("@", 1)[-1]

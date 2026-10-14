@@ -4,6 +4,7 @@ mypy checks this module (`[tool.mypy] files`): `gmail_factory` makes it check `F
 against `triage.GmailApi`, so the fake can't drift from what triage calls.
 """
 
+import re
 from collections.abc import Sequence
 from datetime import timedelta
 from typing import Any
@@ -11,7 +12,7 @@ from typing import Any
 from inbox_jev.classifier import JevError
 from inbox_jev.config import Mode
 from inbox_jev.db import Message, MessageStatus, Unsubscribe
-from inbox_jev.gmail import Email
+from inbox_jev.gmail import DomainScans, Email
 from inbox_jev.policy import DecisionSource
 from inbox_jev.triage import GmailFactory
 from inbox_jev.unsubscribe import UnsubscribeMethod, UnsubscribeStatus
@@ -70,7 +71,7 @@ class FakeGmail:
 
     written = frozenset({"c@client.com"})
 
-    def has_written_to(self, query: str) -> bool:
+    def has_written_to(self, query: str, scans: DomainScans | None = None) -> bool:
         self.written_queries.append(query)
         return query in self.written
 
@@ -203,21 +204,37 @@ def jev_http_error(error_type, status, body=None, request_id="req-1"):
     return error_type(status, body, headers, endpoint="POST https://api.typesafe.ai/v1/systemone")
 
 
+# Sent dates of SentMailService emails without one: a minute apart, newest first, from here.
+SENT_BASE_S = 1_800_000_000
+_SENT_QUERY = re.compile(r"^in:sent to:(\S+)(?: after:(\d+))?(?: before:(\d+))?$")
+
+
 class SentMailService:
     """googleapiclient's Gmail service for the sent-mail search: messages().list and metadata get.
 
     `sent` maps a message id (newest first) to its recipient headers ({"To": "...", ...}). A
-    `in:sent to:X` search matches an email whose recipient headers contain X, as Gmail's loose
-    `to:` does; `get_errors` maps an id to the exception its read raises. Every `execute` must
-    pass `num_retries` (recorded in `retries`), as this path relies on googleapiclient's backoff.
+    `in:sent to:X` search matches an email whose recipient headers contain X, ignoring case, as
+    Gmail's loose `to:` does, newest first; `after:S` / `before:S` keep the emails sent after /
+    before Unix second S. `dates` maps an id to its sent second (default: SENT_BASE_S, then a
+    minute earlier for each later id). `get_errors` maps an id to the exception its read
+    raises. Every `execute` must pass `num_retries` (recorded in `retries`), as this path relies
+    on googleapiclient's backoff. `ordered=False` lists matches in `sent`'s order instead of by
+    date (a Gmail breaking the date order the domain scan relies on).
     """
 
-    def __init__(self, sent, get_errors=None):
+    def __init__(self, sent, get_errors=None, dates=None, ordered=True):
         self.sent = sent
         self.get_errors = get_errors or {}
+        self.dates = dict(dates or {})
+        self.ordered = ordered
         self.queries = []
         self.reads = []
         self.retries = []
+
+    def date_of(self, message_id):
+        if message_id in self.dates:
+            return self.dates[message_id]
+        return SENT_BASE_S - 60 * list(self.sent).index(message_id)
 
     def users(self):
         return self
@@ -227,8 +244,16 @@ class SentMailService:
 
     def list(self, userId, q, maxResults, **kw):
         self.queries.append(q)
-        target = q.removeprefix("in:sent to:")
-        ids = [i for i, h in self.sent.items() if any(target in v for v in h.values())]
+        match = _SENT_QUERY.match(q)
+        assert match, q
+        target, after, before = match.groups()
+        ids = [i for i, h in self.sent.items() if any(target in v.lower() for v in h.values())]
+        if after is not None:
+            ids = [i for i in ids if self.date_of(i) > int(after)]
+        if before is not None:
+            ids = [i for i in ids if self.date_of(i) < int(before)]
+        if self.ordered:
+            ids.sort(key=self.date_of, reverse=True)  # stable: same second keeps the given order
         page: dict[str, Any] = {"messages": [{"id": i} for i in ids[:maxResults]]}
         if len(ids) > maxResults:
             page["nextPageToken"] = "next"
@@ -252,7 +277,12 @@ class SentMailService:
                 if id in svc.get_errors:
                     raise svc.get_errors[id]
                 headers = [{"name": k, "value": v} for k, v in svc.sent[id].items()]
-                return {"id": id, "threadId": "t" + id, "payload": {"headers": headers}}
+                return {
+                    "id": id,
+                    "threadId": "t" + id,
+                    "internalDate": str(svc.date_of(id) * 1000 + 123),
+                    "payload": {"headers": headers},
+                }
 
         return Req()
 

@@ -332,6 +332,7 @@ deployed (see [Rolling out a category change](#rolling-out-a-category-change)).
 | `messages` | Every processed email: category, confidence, probabilities, labels, archived/spammed, corrections |
 | `unsubscribes` | One row per (account, list): method, target, status, HTTP status, error |
 | `sender_rules` | manual / correction / auto rules |
+| `sent_domain_scans` | The sent-mail domain search's progress per (account, domain): span read, verdict (`scanning` / `person` / `never`) and when |
 | `runs` | Each triage pass: processed, errors, and why the run failed (`error`) |
 
 SQLite databases are opened in WAL mode with a 30 s busy timeout, so the digest, the viewer
@@ -346,17 +347,22 @@ their default for existing rows); there is no other migration tool.
 
 To use a hosted DB, install its driver and change the URL. For example, Postgres on Neon:
 `uv add 'psycopg[binary]'` (commit `pyproject.toml` and `uv.lock`, then rebuild the image with
-`docker compose build`) and `DATABASE_URL=postgresql+psycopg://…`.
+`docker compose build`) and `DATABASE_URL=postgresql+psycopg://…`. SQLite and Postgres are the
+databases supported: the sent-mail domain scan is saved with `INSERT … ON CONFLICT`, so on any
+other database every `run` (`dry_run` included) and `unsubscribe-retry` fail each account at
+their start, before reading its mail or sending anything.
 
 ## Privacy
 
 Email headers and the first `BODY_CHARS` characters of each body are sent to the TypeSafe API.
 Email bodies are not stored in the database or logged, only sender, subject and the
-classification. `previous_contact` runs Gmail searches over your sent mail and, for a domain, reads
-the To/Cc/Bcc headers (never the body) of up to 25 matching sent emails; its result is logged on
-each "message processed" line but not stored in the DB. That line also carries `timings_ms`, the
-milliseconds each stage took (Gmail fetch, sender rule and sent-mail search, Jev, applying the
-decision): numbers only, no email content.
+classification. `previous_contact` runs Gmail searches over your sent mail and reads the To/Cc/Bcc
+headers (never the body) of matching sent emails: up to 10 for an address, up to 25 per run for a
+domain. Its result is logged on each "message processed" line but not stored in the DB. That line
+also carries `timings_ms`, the milliseconds each stage took (Gmail fetch, sender rule and
+sent-mail search, Jev, applying the decision): numbers only, no email content. For a domain, the
+search's progress is stored (`sent_domain_scans`): the domain, the dates and Gmail ids of the sent
+emails read at either end of the span, and the verdict; never addresses or content.
 
 ## License
 

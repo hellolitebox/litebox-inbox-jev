@@ -1,15 +1,22 @@
 """`previous_contact` (the sent-mail search): when it runs and what it changes."""
 
+from types import SimpleNamespace
+
 import pytest
 from conftest import make_classification, selects_from
 from fakes import (
+    SentMailService,
     email,
     pitch_email,
+    sent_mail_gmail,
 )
+from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.exc import OperationalError
 
 from inbox_jev import rules, triage
 from inbox_jev.config import Mode
-from inbox_jev.db import SenderRule, Unsubscribe
+from inbox_jev.db import SenderRule, SentDomainScan, Unsubscribe, now
+from inbox_jev.gmail import DomainScan, DomainVerdict, MemoryScans, scan_rules
 from inbox_jev.rules import RuleSource
 from inbox_jev.unsubscribe import UnsubscribeMethod, UnsubscribeStatus
 
@@ -47,10 +54,11 @@ def test_known_contact_reply_blocks_group_archive_end_to_end(setup):
 
 class ContactGmail:
     def __init__(self, written=(), fail=False):
-        self.written, self.fail, self.queries = set(written), fail, []
+        self.written, self.fail, self.queries, self.scans = set(written), fail, [], []
 
-    def has_written_to(self, query):
+    def has_written_to(self, query, scans=None):
         self.queries.append(query)
+        self.scans.append(scans)
         if self.fail:
             raise RuntimeError("boom")
         return query in self.written
@@ -92,6 +100,174 @@ def test_previous_contact(written, sender, expected, queries):
     gmail = ContactGmail(written)
     assert triage.previous_contact(gmail, "me@acme.com", sender) == expected
     assert gmail.queries == queries
+
+
+def test_previous_contact_keeps_only_the_domain_search_in_the_scans():
+    gmail, scans = ContactGmail(), MemoryScans()
+    assert triage.previous_contact(gmail, "me@acme.com", "b@corp.com", scans) == "never"
+    assert list(zip(gmail.queries, gmail.scans, strict=True)) == [
+        ("b@corp.com", None),
+        ("corp.com", scans),
+    ]
+
+
+def test_domain_scan_rows_round_trip(make_sessions):
+    sessions = make_sessions("sqlite:///:memory:")
+    scan = DomainScan("code.example", scan_rules(), newest_s=20, newest_ids=["a"])
+    scan.include("b", 10)
+    with sessions() as s:
+        rows = triage.DomainScanRows(s, "me@acme.com")
+        assert rows.load("code.example") is None
+        rows.save(scan)
+        s.commit()
+    with sessions() as s:
+        assert triage.DomainScanRows(s, "other@acme.com").load("code.example") is None
+        rows = triage.DomainScanRows(s, "me@acme.com")
+        assert rows.load("code.example") == scan
+        scan.verdict, scan.verdict_at, scan.read = DomainVerdict.NEVER, now(), 2
+        scan.reached_end = True
+        rows.save(scan)
+        s.commit()
+    with sessions() as s:
+        assert triage.DomainScanRows(s, "me@acme.com").load("code.example") == scan
+        assert s.query(SentDomainScan).count() == 1
+
+
+def test_domain_scan_rows_save_over_a_row_another_session_stored(make_sessions, tmp_path):
+    # `run` and `unsubscribe-retry` start a scan of the same domain: both load no row, the other
+    # one saves and commits first. Saving updates that row; loading again sees the update.
+    sessions = make_sessions(f"sqlite:///{tmp_path / 'race.db'}")
+    mine = DomainScan("code.example", scan_rules(), DomainVerdict.NEVER, now(), 20, ["a"], 10)
+    mine.read, mine.reached_end = 2, True
+    with sessions() as s, sessions() as other:
+        rows = triage.DomainScanRows(s, "me@acme.com")
+        assert rows.load("code.example") is None
+        theirs = DomainScan("code.example", scan_rules(), newest_s=30, newest_ids=["z"], read=1)
+        triage.DomainScanRows(other, "me@acme.com").save(theirs)
+        other.commit()
+        assert rows.load("code.example") == theirs  # not a stale copy from the identity map
+        rows.save(mine)
+        s.commit()
+        assert rows.load("code.example") == mine  # the last scan saved wins
+    with sessions() as s:
+        assert s.query(SentDomainScan).count() == 1
+
+
+@pytest.mark.parametrize(("rules_then", "kept"), [(scan_rules(), True), ("0-old", False)])
+def test_domain_scan_rows_save_keeps_a_concurrent_person(make_sessions, tmp_path, rules_then, kept):
+    # The other process found a person; a scan that started before it can't undo that, unless
+    # the person was found under other rules.
+    sessions = make_sessions(f"sqlite:///{tmp_path / 'race.db'}")
+    person = DomainScan("code.example", rules_then, DomainVerdict.PERSON, now(), 30, ["p"], 30)
+    mine = DomainScan("code.example", scan_rules(), DomainVerdict.NEVER, now(), 20, ["a"], 20)
+    with sessions() as s, sessions() as other:
+        rows = triage.DomainScanRows(s, "me@acme.com")
+        assert rows.load("code.example") is None
+        triage.DomainScanRows(other, "me@acme.com").save(person)
+        other.commit()
+        rows.save(mine)
+        s.commit()
+    with sessions() as s:
+        stored = triage.DomainScanRows(s, "me@acme.com").load("code.example")
+        assert stored == (person if kept else mine)
+
+
+@pytest.mark.parametrize("dialect", [sqlite.dialect(), postgresql.dialect()])
+def test_scan_upsert_on_each_documented_database(dialect):
+    scan = DomainScan("code.example", scan_rules())
+    sql = str(triage.scan_upsert(dialect.name, "me@acme.com", scan).compile(dialect=dialect))
+    assert "ON CONFLICT (account, domain) DO UPDATE" in sql
+    assert "WHERE sent_domain_scans.verdict !=" in sql
+
+
+def test_scan_upsert_refuses_a_database_without_one():
+    with pytest.raises(NotImplementedError, match="mysql"):
+        triage.scan_upsert("mysql", "me@acme.com", DomainScan("code.example", scan_rules()))
+
+
+def test_domain_scan_rows_refuse_a_database_without_the_upsert():
+    # Before any search: a domain verdict it then couldn't store would reach `run` as unknown.
+    mysql = SimpleNamespace(get_bind=lambda: SimpleNamespace(dialect=SimpleNamespace(name="mysql")))
+    with pytest.raises(NotImplementedError, match="mysql"):
+        triage.DomainScanRows(mysql, "me@acme.com")
+
+
+class NoUpsertScans(MemoryScans):
+    """Domain scans saved in a database without the upsert (e.g. MySQL)."""
+
+    def save(self, scan):
+        triage.scan_upsert("mysql", "me@acme.com", scan)
+
+
+def test_previous_contact_raises_when_the_database_has_no_upsert(monkeypatch):
+    # Not `None` (unknown, no veto in run): the scan found a person and couldn't store it.
+    svc = SentMailService({"g0": {"To": "ana@code.example"}})
+    with pytest.raises(NotImplementedError, match="mysql"):
+        triage.previous_contact(
+            sent_mail_gmail(monkeypatch, svc), "me@acme.com", "sales@code.example", NoUpsertScans()
+        )
+
+
+def test_run_fails_the_account_before_gmail_on_a_database_without_the_upsert(setup, monkeypatch):
+    ctx, gmail, account = setup
+    monkeypatch.setattr(triage, "_SCAN_UPSERT_DIALECTS", ("postgresql",))
+    with pytest.raises(NotImplementedError, match="sqlite"):
+        triage.run_account(ctx, account, Mode.ACT)
+    assert gmail.sent == [] and gmail.modified == [] and ctx.classifier.states == []
+
+
+class LockedScans(MemoryScans):
+    """Domain scans whose save fails as SQLite does when another process holds the lock."""
+
+    def save(self, scan):
+        raise OperationalError("INSERT INTO sent_domain_scans", {}, Exception("database is locked"))
+
+
+def test_previous_contact_raises_when_the_scan_cant_be_saved(monkeypatch):
+    # Not `None`: run would treat an unknown contact as no veto on the unsubscribe.
+    svc = SentMailService({"g0": {"To": "reply+0@reply.code.example"}})
+    with pytest.raises(OperationalError):
+        triage.previous_contact(
+            sent_mail_gmail(monkeypatch, svc), "me@acme.com", "ci@code.example", LockedScans()
+        )
+
+
+def test_run_fails_the_email_when_the_scan_cant_be_saved(setup, monkeypatch):
+    ctx, gmail, account = setup
+    svc = SentMailService({"g0": {"To": "bounces+0@agency.io"}})
+    gmail.has_written_to = sent_mail_gmail(monkeypatch, svc).has_written_to
+    monkeypatch.setattr(triage.DomainScanRows, "save", LockedScans.save)
+    gmail.emails = {"9": pitch_email("9")}
+    ctx.classifier.answers["Pitch 9"] = make_classification("cold_outreach", 0.97)
+    triage.run_account(ctx, account, Mode.ACT)
+    assert gmail.sent == [] and gmail.modified == []
+    with ctx.sessions() as s:
+        assert s.query(Unsubscribe).count() == 0
+        assert triage._find_message(s, account.email, "9").status == "error"  # retried later
+
+
+def test_run_keeps_the_domain_scan_between_runs(setup, monkeypatch):
+    # A sender at a domain I replied to 30 times at machine addresses: the first run reads 25
+    # (known for now), the next one the other 5 (never), each saved with the email's commit.
+    ctx, gmail, account = setup
+    replies = {f"g{i}": {"To": f"reply+{i}@reply.code.example"} for i in range(30)}
+    svc = SentMailService(replies)
+    contacts = []
+    for i in range(2):
+        gmail.has_written_to = sent_mail_gmail(monkeypatch, svc).has_written_to
+        gmail.emails = {f"n{i}": email(f"n{i}", "Code <ci@code.example>", f"Build {i}")}
+        ctx.classifier.answers[f"Build {i}"] = make_classification("notification", 0.97)
+        triage.run_account(ctx, account, Mode.LABEL)
+        contacts.append(ctx.classifier.states[-1]["previous_contact"])
+    assert contacts == ["wrote_to_their_domain", "never"]
+    with ctx.sessions() as s:
+        row = s.query(SentDomainScan).one()
+        assert (row.account, row.domain, row.verdict, row.read) == (
+            account.email,
+            "code.example",
+            "never",
+            30,
+        )
 
 
 def test_previous_contact_error_is_unknown():

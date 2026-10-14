@@ -7,9 +7,11 @@ from inbox_jev.signals import (
     extract,
     is_automated_address,
     is_no_reply_address,
+    mailbox_key,
     on_domain,
     parse_list_unsubscribe,
     resolve_relay,
+    wrote_to_address,
     wrote_to_person_at,
 )
 
@@ -403,3 +405,33 @@ def test_no_reply_follows_the_trusted_group_author():
     sig = extract(headers)
     assert not sig.no_reply  # the group address
     assert resolve_relay(sig, ["example.com"]).no_reply  # the author it relays
+
+
+@pytest.mark.parametrize(
+    ("address", "key"),
+    [
+        (" Ana@Corp.COM ", "ana@corp.com"),
+        ("Jane.Doe+news@gmail.com", "janedoe@gmail.com"),  # Gmail ignores dots and + tags
+        ("jane.doe@googlemail.com", "janedoe@gmail.com"),  # the same service
+        ("jane.doe+x@corp.com", "jane.doe+x@corp.com"),  # elsewhere: as written
+        ("jane.doe+x@outlook.com", "jane.doe+x@outlook.com"),
+        ("not-an-address", "not-an-address"),
+    ],
+)
+def test_mailbox_key(address, key):
+    assert mailbox_key(address) == key
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        (["Ana <ANA@corp.com>"], True),
+        (["Diana <diana@corp.com>", "Bo <bo@corp.com>"], False),  # a loose to: match
+        (["x@y.com, ana@corp.com"], True),
+        (["ana+sales@corp.com"], False),
+        ([], True),  # nothing to compare: Gmail matched what the headers don't show
+        (["undisclosed-recipients:;"], True),
+    ],
+)
+def test_wrote_to_address(headers, expected):
+    assert wrote_to_address(headers, "ana@corp.com") is expected

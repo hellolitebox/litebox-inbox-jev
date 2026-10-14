@@ -15,6 +15,7 @@ import pytest
 from conftest import make_signals
 from fakes import (
     GMAIL_PASS,
+    SENT_BASE_S,
     FakeClassifier,
     FakeGmail,
     HttpError,
@@ -44,9 +45,10 @@ from inbox_jev.db import (
     Message,
     Run,
     SenderRule,
+    SentDomainScan,
     Unsubscribe,
 )
-from inbox_jev.gmail import Email, extract_body
+from inbox_jev.gmail import NEVER_VERDICT_TTL, Email, extract_body
 from inbox_jev.policy import decide, plan
 from inbox_jev.rules import RuleSource
 from inbox_jev.signals import extract, resolve_relay
@@ -1231,3 +1233,188 @@ def test_ex33_satisfaction_survey_is_not_vetoed_by_needs_reply(cfg, account):
     assert (d.category, d.archive, d.archive_group) == ("marketing", True, True)
     assert not (d.unsubscribe or d.low_confidence or d.spam)
     assert d.add_labels == ["Jev/Marketing"]
+
+
+# --- EX-34 -----------------------------------------------------------------------------------
+
+
+def test_ex34_an_email_to_a_similar_address_makes_no_known_contact(spec, monkeypatch):
+    """EX-34 (docs/how-it-decides.md §5, §4.1 previous_contact, ADR 0039)."""
+    ctx, gmail, account = spec
+    # Gmail's to:lee@outlook.com also returned an email to someone else whose address has "lee".
+    svc = SentMailService({"s0": {"To": "Ash <ashlee@outlook.com>"}})
+    gmail.has_written_to = sent_mail_gmail(monkeypatch, svc).has_written_to
+    gmail.emails = {
+        "1": email(
+            "1",
+            "Lee <lee@outlook.com>",
+            "Quick question about your pipeline",
+            list_unsubscribe="<https://unsub.sequencer.example/u/lee>",
+            list_unsubscribe_post="List-Unsubscribe=One-Click",
+        )
+    }
+    ctx.classifier.answers["Quick question about your pipeline"] = answer(
+        "cold_outreach", cold_outreach=0.96
+    )
+    posts = _one_click_posts(monkeypatch)
+    triage.run_account(ctx, account, Mode.ACT)
+
+    assert svc.queries == ["in:sent to:lee@outlook.com"]  # free mail: no domain search
+    assert svc.reads == ["s0"]  # its To says who it went to
+    assert ctx.classifier.states[0]["previous_contact"] == "never"
+    assert gmail.modified[-1][2] == ["INBOX"]
+    assert [url for url, _ in posts] == ["https://unsub.sequencer.example/u/lee"]
+
+    # An email to her own address, however it is capitalised, makes her a known contact.
+    svc = SentMailService(
+        {"s0": {"To": "Ash <ashlee@outlook.com>"}, "s1": {"Cc": "Lee@Outlook.com"}}
+    )
+    known = triage.previous_contact(
+        sent_mail_gmail(monkeypatch, svc), account.email, "lee@outlook.com"
+    )
+    assert known == "wrote_to_sender"
+
+
+# --- EX-35 -----------------------------------------------------------------------------------
+
+
+def test_ex35_a_domain_written_to_only_at_machine_addresses_is_read_in_full(
+    cfg, account, make_sessions, monkeypatch
+):
+    """EX-35 (docs/how-it-decides.md §5, §4.1 previous_contact, ADR 0040)."""
+    replies = {f"r{i}": {"To": f"reply+{i}abc@reply.code.example"} for i in range(60)}
+    svc = SentMailService(replies)
+    sender = "notifications@code.example"
+    sessions = make_sessions("sqlite:///:memory:")
+
+    def one_run():
+        svc.queries, svc.reads = [], []
+        with sessions() as s:
+            scans = triage.DomainScanRows(s, account.email)
+            contact = triage.previous_contact(
+                sent_mail_gmail(monkeypatch, svc), account.email, sender, scans
+            )
+            s.commit()
+        return contact, len(svc.reads)
+
+    sig = _sig(f"Code <{sender}>")
+    runs = [one_run() for _ in range(3)]
+    assert runs == [("wrote_to_their_domain", 25), ("wrote_to_their_domain", 25), ("never", 10)]
+    first = decide(cfg, account, sig, _lead_suggestions(), previous_contact=runs[0][0])
+    assert (first.archive, first.low_confidence) == (False, True)  # Review, as before
+    assert "Jev/Needs Reply" in first.add_labels
+    last = decide(cfg, account, sig, _lead_suggestions(), previous_contact=runs[2][0])
+    assert (last.category, last.archive, last.archive_group) == ("notification", True, True)
+    assert last.add_labels == ["Jev/Notifications"]
+    with sessions() as s:
+        row = s.query(SentDomainScan).one()
+        assert (row.domain, row.verdict, row.read, row.reached_end) == (
+            "code.example",
+            "never",
+            60,
+            True,
+        )
+        assert row.verdict_at is not None
+
+    assert one_run() == ("never", 0)  # one search for newer sent mail, nothing to read
+    # A new email to a person there: read once, then known without asking Gmail again.
+    svc.sent = {"p": {"To": "Ana <ana@code.example>"}, **svc.sent}
+    svc.dates["p"] = SENT_BASE_S + 3600
+    assert one_run() == ("wrote_to_their_domain", 1)
+    assert one_run() == ("wrote_to_their_domain", 0)
+    assert svc.queries == ["in:sent to:notifications@code.example"]
+
+
+# --- EX-36 / EX-37 ---------------------------------------------------------------------------
+
+
+def _vendor_pitch():
+    """A verified one-click pitch from sales@vendor.example (EX-36, EX-37)."""
+    return _sig(
+        "Sales <sales@vendor.example>",
+        list_unsubscribe="<https://unsub.vendor.example/u/1>",
+        list_unsubscribe_post="List-Unsubscribe=One-Click",
+    )
+
+
+def _domain_runs(account, monkeypatch, svc, sessions):
+    """One run's `previous_contact` for sales@vendor.example, its scan kept in `sessions`."""
+
+    def one_run():
+        svc.queries, svc.reads = [], []
+        with sessions() as s:
+            scans = triage.DomainScanRows(s, account.email)
+            contact = triage.previous_contact(
+                sent_mail_gmail(monkeypatch, svc), account.email, "sales@vendor.example", scans
+            )
+            s.commit()
+        return contact
+
+    return one_run
+
+
+def test_ex36_a_never_verdict_is_redone_after_a_month(cfg, account, make_sessions, monkeypatch):
+    """EX-36 (docs/how-it-decides.md §5, §4.1 previous_contact, ADR 0040)."""
+    svc = SentMailService({f"b{i}": {"To": f"bounces+{i}@vendor.example"} for i in range(3)})
+    sessions = make_sessions("sqlite:///:memory:")
+    one_run = _domain_runs(account, monkeypatch, svc, sessions)
+    jev = answer("cold_outreach", cold_outreach=0.96)
+
+    assert one_run() == "never"
+    d = decide(cfg, account, _vendor_pitch(), jev, previous_contact="never")
+    assert d.archive and d.unsubscribe
+
+    # You restore from Trash an email you sent Ana there long ago: older than the span read.
+    svc.sent["ana"] = {"To": "Ana <ana@vendor.example>"}
+    svc.dates["ana"] = SENT_BASE_S - 400 * 24 * 3600
+
+    def age(by):
+        with sessions() as s:
+            s.query(SentDomainScan).one().verdict_at -= by
+            s.commit()
+
+    age(NEVER_VERDICT_TTL - timedelta(days=1))
+    assert one_run() == "never"  # within the month: only newer mail is listed
+    assert svc.reads == []
+    age(timedelta(days=1))
+    assert one_run() == "wrote_to_their_domain"  # a month old: read again from the newest
+    assert svc.queries == ["in:sent to:sales@vendor.example", "in:sent to:vendor.example"]
+    assert svc.reads[-1] == "ana"
+    d = decide(cfg, account, _vendor_pitch(), jev, previous_contact="wrote_to_their_domain")
+    assert d.archive and d.known_contact_kept and not d.unsubscribe
+    with sessions() as s:
+        assert s.query(SentDomainScan).one().verdict == "person"
+
+
+def test_ex37_a_scan_read_out_of_date_order_is_not_trusted(
+    cfg, account, make_sessions, monkeypatch, caplog
+):
+    """EX-37 (docs/how-it-decides.md §5, §4.1 previous_contact, ADR 0040)."""
+    caplog.set_level("WARNING", logger="inbox_jev.gmail")
+    sent = {
+        "a": {"To": "bounces+a@vendor.example"},
+        "b": {"To": "bounces+b@vendor.example"},
+        "c": {"To": "bounces+c@vendor.example"},
+    }
+    dates = {"a": SENT_BASE_S, "b": SENT_BASE_S - 600, "c": SENT_BASE_S - 300}
+    svc = SentMailService(sent, dates=dates, ordered=False)
+    sessions = make_sessions("sqlite:///:memory:")
+    one_run = _domain_runs(account, monkeypatch, svc, sessions)
+
+    assert one_run() == "wrote_to_their_domain"  # c came after b though newer: not trusted
+    assert "out of date order" in caplog.text
+    d = decide(
+        cfg,
+        account,
+        _vendor_pitch(),
+        answer("cold_outreach", cold_outreach=0.96),
+        previous_contact="wrote_to_their_domain",
+    )
+    assert d.known_contact_kept and not d.unsubscribe
+    with sessions() as s:
+        row = s.query(SentDomainScan).one()
+        assert (row.verdict, row.read, row.newest_s) == ("scanning", 0, None)  # starts over
+
+    svc.ordered = True
+    assert one_run() == "never"
+    assert svc.queries[-1] == "in:sent to:vendor.example"  # from the newest match again

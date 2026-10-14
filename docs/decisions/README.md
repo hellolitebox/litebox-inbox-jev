@@ -49,3 +49,5 @@ record when the decision changes: add a new one and mark the old one `Superseded
 | [0036](0036-auto-rule-hits-count-emails.md) | Auto-rule hits count emails, not answers | Accepted | #36 |
 | [0037](0037-public-suffix-list-for-suffixes-and-registrable-domains.md) | The Public Suffix List decides public suffixes and registrable domains | Accepted | #37 |
 | [0038](0038-surveys-are-not-a-personal-action.md) | Surveys, reviews and promotional calls to action are not a personal action | Accepted | #38 |
+| [0039](0039-address-search-reads-recipients.md) | The address search reads the recipients of its matches | Accepted | #39 |
+| [0040](0040-domain-scan-kept-across-runs.md) | The domain search's scan is kept across runs until every match is read | Accepted | #39 |
