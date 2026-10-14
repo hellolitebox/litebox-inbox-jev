@@ -19,7 +19,8 @@ categories:
     label: Jev/Important
     criteria: >-
       Written by a real person specifically to me: clients, teammates, partners, investors,
-      candidates, decisions, questions or requests addressed to me.
+      candidates, decisions, questions or requests addressed to me. Not mass mail that only
+      greets me by name.
     action: keep
     min_confidence: 0.0
 
@@ -30,7 +31,8 @@ categories:
       a request or a message held for moderation that is pending my approval, update a payment
       method or expiring card, verify my account or domain, act on a security alert, or fix or
       renew something before a deadline. Not receipts, reminders of things already done, FYI
-      alerts, or held-spam reports.
+      alerts, held-spam reports, surveys, feedback or review requests, or promotional calls to
+      action.
     action: keep
     min_confidence: 0.0
 
@@ -116,7 +118,11 @@ tags:
 # allowlisted emails and rules to keep categories (Jev is asked for the flags only).
 needs_reply:
   label: Jev/Needs Reply
-  question: Does the sender expect a reply or an action from me personally?
+  question: >-
+    Does the sender expect a reply or an action from me personally? Yes: a person writing to
+    me, or something only I can do (pay, sign, approve, authorize, confirm an appointment, renew
+    an expiring document, secure my account). No: company or bulk mail (surveys, feedback,
+    ratings or reviews, promotions, webinars or events), even if it asks me to reply or click.
   threshold: 0.7
 
 review_label: Jev/Review

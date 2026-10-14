@@ -1196,3 +1196,38 @@ def test_ex32_the_public_suffix_list_decides_what_a_domain_is(cfg, account, monk
         with pytest.raises(ValidationError, match=f"'{suffix}' is a public suffix"):
             Account(email="me@example.com", group_domains=[suffix])
     assert Account(email="me@sch.gg", group_domains=["sch.gg"]).group_domains == ["sch.gg"]
+
+
+# --- EX-33 -----------------------------------------------------------------------------------
+
+
+def test_ex33_satisfaction_survey_is_not_vetoed_by_needs_reply(cfg, account):
+    """EX-33 (docs/how-it-decides.md §5, §3.2 needs-reply veto, §4.7 questions, ADR 0038)."""
+    # The question and the action criteria tell Jev that surveys aren't a personal action.
+    assert "surveys" in cfg.needs_reply.question
+    assert "surveys" in cfg.by_key["action_required"].criteria
+
+    sig = _sig("Experiencia <noreply@health.example>")
+    assert sig.no_reply
+
+    def survey(needs_reply):
+        return answer(
+            "marketing",
+            needs_reply=needs_reply,
+            marketing=0.87,
+            newsletter=0.05,
+            transactional=0.03,
+            action_required=0.04,
+            important=0.01,
+        )
+
+    # Before: "give us your opinion" read as a request (0.88) with keep 0.05 -> Review.
+    d = decide(cfg, account, sig, survey(0.88), previous_contact="wrote_to_their_domain")
+    assert not d.archive and d.low_confidence
+    assert d.add_labels == ["Jev/Review", "Jev/Marketing", "Jev/Needs Reply"]
+
+    # Now: Jev answers no, so the archive group (0.95) archives it, never unsubscribing.
+    d = decide(cfg, account, sig, survey(0.15), previous_contact="wrote_to_their_domain")
+    assert (d.category, d.archive, d.archive_group) == ("marketing", True, True)
+    assert not (d.unsubscribe or d.low_confidence or d.spam)
+    assert d.add_labels == ["Jev/Marketing"]

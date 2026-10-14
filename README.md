@@ -31,9 +31,10 @@ Defaults from [`categories.yaml`](categories.yaml) (editable, see
 | `cold_outreach` | `Jev/Outreach` | archive + unsubscribe (never from known contacts) | 0.90 |
 | `spam` (scams, phishing) | `Jev/Spam` | move to Spam | 0.90 |
 
-Extra labels: `Jev/Needs Reply` (Jev thinks the sender expects a reply; only on emails that stay
-in the inbox), `Jev/Invoices` (tag: an invoice to pay), `Jev/Review` (low confidence) and
-`Jev/Processed` (technical marker).
+Extra labels: `Jev/Needs Reply` (Jev thinks the sender expects a reply or a personal action, not
+a company survey, review request or promotion; only on emails that stay in the inbox),
+`Jev/Invoices` (tag: an invoice to pay), `Jev/Review` (low confidence) and `Jev/Processed`
+(technical marker).
 
 ## How it decides
 

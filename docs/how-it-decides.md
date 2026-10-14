@@ -216,8 +216,8 @@ From `categories.yaml`. An account can raise or lower any threshold with `min_co
 
 | Category | Label | `action` | `min_confidence` | Notes |
 |---|---|---|---|---|
-| `important` | `Jev/Important` | keep | 0.0 | Allowlist target. Also the fallback for an answer naming an unknown category. |
-| `action_required` | `Jev/Action` | keep | 0.0 | Own digest section. Includes a held message pending your approval. |
+| `important` | `Jev/Important` | keep | 0.0 | Allowlist target. Also the fallback for an answer naming an unknown category. Not mass mail that only greets you by name. |
+| `action_required` | `Jev/Action` | keep | 0.0 | Own digest section. Includes a held message pending your approval. Excludes surveys, feedback or review requests and promotional calls to action ([ADR 0038](decisions/0038-surveys-are-not-a-personal-action.md)). |
 | `transactional` | `Jev/Transactional` | archive | 0.80 | |
 | `notification` | `Jev/Notifications` | archive | 0.80 | Includes groups' held-spam reports. |
 | `newsletter` | `Jev/Newsletters` | archive | 0.80 | |
@@ -272,6 +272,17 @@ asks for "a reply or an action", so the keep-signal half of the veto still appli
 no-reply email still gets `Jev/Needs Reply` (the action may be real)
 ([EX-25](#ex-25--a-no-reply-sender-from-a-domain-you-write-to),
 [ADR 0032](decisions/0032-machine-addresses-make-no-known-contact.md)).
+
+What counts as "a reply or an action" is spelled out in the question itself
+(`needs_reply.question`, [4.7](#47-what-jev-receives)): yes for a person writing to you or
+something only you can do (pay, sign, approve, authorize, confirm an appointment, renew an
+expiring document, secure your account); no for company or bulk mail (surveys, feedback,
+ratings or reviews, promotions, webinars or events), even if it asks you to reply or click. A
+person's own "can you give feedback on this?" or invitation is a person writing to you.
+`action_required` excludes the same calls to action, and `important` excludes mass mail that only
+greets you by name, so a survey's keep probability stays low too
+([EX-33](#ex-33--a-satisfaction-survey-from-a-no-reply-sender),
+[ADR 0038](decisions/0038-surveys-are-not-a-personal-action.md)).
 
 ### 3.3 Unsubscribe conditions
 
@@ -638,8 +649,9 @@ If the body is empty after all that, Jev gets Gmail's `snippet` (HTML-unescaped)
 Questions (`build_questions`): one `Choice` over the categories, with each category's `criteria`
 and the instruction to judge by who wrote it and why, explaining `previous_contact` ("a
 personal-looking pitch from a sender I never wrote to is usually cold outreach"); one `Noul` for
-`needs_reply`; one `Noul` per tag. The answer gives the category, its confidence, every
-category's probability, `needs_reply` and the tag probabilities.
+`needs_reply`, whose instructions are `needs_reply.question` with its yes / no examples
+([3.2](#32-confidence-outcomes-jev-path)); one `Noul` per tag. The answer gives the category,
+its confidence, every category's probability, `needs_reply` and the tag probabilities.
 
 ### 4.8 Machine and no-reply addresses
 
@@ -1165,6 +1177,21 @@ the probabilities that matter are shown; the rest are ~0.
   suffixes known by name, so `wa.gov.au` and `blogspot.com` loaded while `sch.gg` didn't. The
   vendored list answers each from what registries and platforms publish
   ([ADR 0037](decisions/0037-public-suffix-list-for-suffixes-and-registrable-domains.md)).
+
+### EX-33 — A satisfaction survey from a no-reply sender
+
+- **Test**: `test_ex33_satisfaction_survey_is_not_vetoed_by_needs_reply`
+- **Input**: "GUILLERMO, we picked you to give us your opinion" from
+  `noreply@health.example` (a no-reply sender, `previous_contact` = `wrote_to_their_domain`). Jev:
+  marketing 0.87, newsletter 0.05, transactional 0.03, action_required 0.04, important 0.01.
+- **Outcome**: archived as `marketing` through the archive group, with `Jev/Marketing` only; no
+  Review, no `Jev/Needs Reply`, no unsubscribe. With the old question Jev answered `needs_reply`
+  0.88 and the email stayed in Review with `Jev/Marketing` and `Jev/Needs Reply`.
+- **Why**: marketing alone is below 0.90, but the archive categories add up to 0.95. A survey is
+  not a personal action, so `needs_reply` is low and the veto doesn't apply; before, 0.88 plus
+  keep categories at 0.05 (judged like a stranger's, as a no-reply email, EX-25) vetoed the
+  group. The group never unsubscribes (0.87 < 0.90).
+  ([ADR 0038](decisions/0038-surveys-are-not-a-personal-action.md))
 
 ## 6. Glossary
 
