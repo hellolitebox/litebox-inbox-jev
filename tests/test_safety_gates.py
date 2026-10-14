@@ -15,7 +15,7 @@ from inbox_jev import rules, triage, unsubscribe_retry
 from inbox_jev.classification import PreviousContact
 from inbox_jev.config import Mode
 from inbox_jev.db import Message
-from inbox_jev.policy import GateResult, Veto, acts_on, unsubscribe_gate
+from inbox_jev.policy import DecisionSource, GateResult, Veto, acts_on, unsubscribe_gate
 from inbox_jev.rules import RuleSource
 
 
@@ -71,7 +71,38 @@ def test_acts_on(mode, act_categories, acts):
     ],
 )
 def test_unsubscribe_gate(cfg, account, category, signals, contact, expected):
-    assert unsubscribe_gate(cfg, account, make_signals(**signals), category, contact) == expected
+    gate = unsubscribe_gate(
+        cfg, account, make_signals(**signals), category, contact, manual_rule=False
+    )
+    assert gate == expected
+
+
+@pytest.mark.parametrize(
+    ("signals", "manual_rule", "expected"),
+    [
+        ({}, False, GateResult(Veto.DECIDED_EACH_EMAIL)),
+        ({}, True, GateResult(None)),
+        ({"sender": "news@vendor.example"}, False, GateResult(None)),  # not listed
+        ({"sender": "web@sub.forms.example"}, False, GateResult(Veto.DECIDED_EACH_EMAIL)),
+        # The checks after it still apply to a manual rule.
+        ({"dmarc_pass": False}, True, GateResult(Veto.UNVERIFIED)),
+        ({"is_discussion_list": True}, True, GateResult(Veto.GROUP)),
+        # Order: the allowlist first, then the list, then the sender's own checks.
+        ({"sender": "vip@partner.com"}, False, GateResult(Veto.ALLOWLISTED)),
+        ({"dmarc_pass": False}, False, GateResult(Veto.DECIDED_EACH_EMAIL)),
+    ],
+)
+def test_unsubscribe_gate_spares_a_listed_sender_without_a_manual_rule(
+    cfg, account, signals, manual_rule, expected
+):
+    """A sender in decide_each_email is unsubscribed only on a manual rule (ADR 0045)."""
+    listed = account.model_copy(
+        update={"decide_each_email": ["bob@agency.io", "@forms.example", "vip@partner.com"]}
+    )
+    sig = make_signals(**{"sender": "bob@agency.io", **signals})
+    assert (
+        unsubscribe_gate(cfg, listed, sig, "marketing", None, manual_rule=manual_rule) == expected
+    )
 
 
 @pytest.mark.parametrize(
@@ -88,7 +119,9 @@ def test_unsubscribe_gate(cfg, account, category, signals, contact, expected):
     ],
 )
 def test_unsubscribe_gate_reports_the_first_check_that_fails(cfg, account, signals, contact, veto):
-    gate = unsubscribe_gate(cfg, account, make_signals(**signals), "cold_outreach", contact)
+    gate = unsubscribe_gate(
+        cfg, account, make_signals(**signals), "cold_outreach", contact, manual_rule=False
+    )
     assert gate.veto == veto and not gate.allowed and not gate.contact_unknown
 
 
@@ -203,7 +236,7 @@ def test_scenarios_match_the_gate(cfg, account, name):
         if sig.sender_domain in sc.written
         else PreviousContact.NEVER
     )
-    gate = unsubscribe_gate(cfg, account, sig, sc.category, contact)
+    gate = unsubscribe_gate(cfg, account, sig, sc.category, contact, manual_rule=False)
     assert gate.veto == sc.veto
     assert sc.unsubscribed is (gate.allowed and acts_on(sc.mode, sc.act_categories, sc.category))
 
@@ -223,3 +256,110 @@ def test_jev_and_rule_paths_store_the_same_unverified_flag(setup, name):
             s.delete(row)
             s.commit()
     assert flags == [sc.veto == Veto.UNVERIFIED] * 2
+
+
+# --- a sender in decide_each_email (ADR 0045) -----------------------------------------------
+
+LISTED_VETO = "skipped: sender decided email by email, no manual rule"
+
+
+def _set_rule(ctx, account, category, source):
+    with ctx.sessions() as s:
+        rules.set_rule(s, account.email, "bob@agency.io", category, source)
+        s.commit()
+
+
+def _ignored_rule_path(source):
+    """`run` on a listed sender with a rule of `source` to the scenario's category: ignored,
+    so Jev decides (and says the same category)."""
+
+    def path(ctx, gmail, account, sc):
+        _set_rule(ctx, account, sc.category, source)
+        _jev_path(ctx, gmail, account, sc)
+
+    return path
+
+
+def _retry_with_manual_rule(ctx, gmail, account, sc):
+    _set_rule(ctx, account, sc.category, RuleSource.MANUAL)
+    _retry_path(ctx, gmail, account, sc)
+
+
+def _own_correction_path(ctx, gmail, account, sc):
+    """In label, the user relabels Jev's answer to the scenario's category; then act: the
+    email's own correction decides it (`triage._own_correction`)."""
+    gmail.emails = {"9": _email(sc)}
+    ctx.classifier.answers["Offer"] = make_classification("newsletter", 0.97)
+    triage.run_account(ctx, account, Mode.LABEL)
+    labels = gmail.emails["9"].label_ids
+    labels[labels.index("Label_Jev/Newsletters")] = "Label_Jev/Marketing"
+    triage.run_account(ctx, account, Mode.ACT)
+
+
+LISTED_PATHS = {
+    "jev": (_jev_path, False),
+    "ignored auto rule": (_ignored_rule_path(RuleSource.AUTO), False),
+    "ignored correction rule": (_ignored_rule_path(RuleSource.CORRECTION), False),
+    "own correction": (_own_correction_path, False),
+    "retry of a jev decision": (_retry_path, False),
+    "manual rule": (_rule_path, True),
+    "retry with a manual rule": (_retry_with_manual_rule, True),
+}
+
+
+@pytest.mark.parametrize("name", LISTED_PATHS)
+def test_listed_sender_is_unsubscribed_only_on_a_manual_rule(setup, name):
+    """A sender in decide_each_email, verified and with a usable List-Unsubscribe, that Jev (or
+    a correction, or a stored decision) calls marketing: no path unsubscribes it except a
+    manual rule (`policy.unsubscribe_gate`, Veto.DECIDED_EACH_EMAIL)."""
+    ctx, gmail, account = setup
+    account.decide_each_email = ["bob@agency.io"]
+    gmail.written = frozenset()
+    path, unsubscribed = LISTED_PATHS[name]
+
+    path(ctx, gmail, account, Scenario("marketing"))
+
+    assert gmail.sent == (["u@agency.io"] if unsubscribed else [])
+    with ctx.sessions() as s:
+        row = s.query(Message).filter_by(gmail_id="9").one()
+        assert row.category == "marketing" and row.archived  # still archived, just kept on
+        assert not row.downgraded_to_spam  # not the unverified flag
+
+
+@pytest.mark.parametrize(
+    ("rule", "stored_source", "outcome"),
+    [
+        (None, DecisionSource.JEV, LISTED_VETO),
+        # Rules the list ignores: as if absent.
+        ((RuleSource.AUTO, "marketing"), DecisionSource.RULE, "held: rule since removed"),
+        ((RuleSource.CORRECTION, "marketing"), DecisionSource.RULE, "held: rule since removed"),
+        ((RuleSource.AUTO, "important"), DecisionSource.JEV, LISTED_VETO),
+        ((RuleSource.CORRECTION, "newsletter"), DecisionSource.JEV, LISTED_VETO),
+        # A manual rule still decides: a keep one skips, an unsubscribing one retries.
+        (
+            (RuleSource.MANUAL, "important"),
+            DecisionSource.JEV,
+            "skipped: sender rule says important",
+        ),
+        ((RuleSource.MANUAL, "marketing"), DecisionSource.RULE, "ok"),
+    ],
+)
+def test_unsubscribe_retry_of_a_listed_sender(setup, rule, stored_source, outcome):
+    """`unsubscribe-retry` reads a listed sender's rules as `run` does (only a manual one) and
+    shares its veto: a failed unsubscribe of a stored `marketing` row."""
+    ctx, gmail, account = setup
+    account.mode = Mode.ACT
+    account.decide_each_email = ["bob@agency.io"]
+    gmail.written = frozenset()
+    if rule is not None:
+        _set_rule(ctx, account, rule[1], rule[0])
+    gmail.emails = as_archived(_email(Scenario("marketing")))
+    with ctx.sessions() as s:
+        failed_unsub(
+            s, account, "9", "the-list", "marketing", confidence=0.97, source=stored_source
+        )
+    with ctx.sessions() as s:
+        assert unsubscribe_retry.retry_unsubscribes(ctx, s, gmail, account) == [
+            ("the-list", outcome)
+        ]
+    assert gmail.sent == (["u@agency.io"] if outcome == "ok" else [])

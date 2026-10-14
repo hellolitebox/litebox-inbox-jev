@@ -29,10 +29,10 @@ from .config import (
     find_account,
     load_accounts,
     load_categories,
+    normalize_sender_key,
     validate_accounts,
 )
 from .db import Message, MessageStatus, SenderRule, now, open_sessions
-from .signals import ADDRESS, DOMAIN
 
 app = typer.Typer(no_args_is_help=True, help="Triage Gmail with TypeSafe Jev.")
 auth_app = typer.Typer(no_args_is_help=True, help="Manage Gmail OAuth tokens.")
@@ -166,9 +166,8 @@ def _sender_key(value: str) -> str:
     Anything else (a bare domain, a display name, a typo) would be stored as a rule no sender
     ever matches (`policy.rule_keys` looks up the exact address, then `@domain`).
     """
-    key = value.strip().lower()
-    domain = key.removeprefix("@")
-    if ADDRESS.match(key) or (key.startswith("@") and DOMAIN.match(domain)):
+    key = normalize_sender_key(value)
+    if key is not None:
         return key
     raise typer.BadParameter(
         f"{value!r} is neither an address (ana@example.com) nor @domain (@example.com)",

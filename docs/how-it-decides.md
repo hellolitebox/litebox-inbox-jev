@@ -1,7 +1,9 @@
 # How inbox-jev decides
 
-> **New here?** Read the [plain-language guide](guide.md) first. This document is the technical spec
-> it simplifies.
+> **New here?** Read the [plain-language guide](guide.md) first (what gets unsubscribed, in plain
+> words:
+> [What it unsubscribes you from](guide.md#what-it-unsubscribes-you-from-and-what-it-never-does)).
+> This document is the technical spec it simplifies.
 
 This is the functional spec of the triage logic: what happens to one email, which signals are
 checked, and why. Everything here describes the code on `main` (`src/inbox_jev/`) and the shipped
@@ -144,12 +146,12 @@ flowchart TD
     A["Fetch the full message (gmail.get)<br/>headers, body (extract_body), snippet"] --> B["Signals from headers (signals.extract)<br/>then resolve_relay with group_domains"]
     B --> C{"Row seen in an earlier label/act pass<br/>and mode is not dry_run?"}
     C -- yes --> D{"Changed Jev category label<br/>or pulled back to INBOX?"}
-    D -- yes --> D2["Record correction<br/>(sender rule, source correction)"]
+    D -- yes --> D2["Record correction<br/>(sender rule, source correction;<br/>on the email only for a sender in decide_each_email)"]
     D -- no --> E
     D2 --> E{"User edit?<br/>starred, our label removed,<br/>another Jev label added"}
     E -- yes --> STOP["Hands off: mark done, change nothing in Gmail"]
     E -- no --> F
-    C -- no --> F["Look up sender rule: the first active one decides (exact address, then @domain);<br/>if its category was removed from categories.yaml, no rule (never the @domain one behind it)"]
+    C -- no --> F["Look up sender rule: the first active one decides (exact address, then @domain);<br/>if its category was removed from categories.yaml, no rule (never the @domain one behind it);<br/>a sender in decide_each_email: manual rules only, and its own correction decides the email"]
     F --> G{"Allowlisted?<br/>author in allow_senders/allow_domains,<br/>or group address in allow_senders"}
     G -- yes --> FL["Ask Jev for the flags only<br/>(Needs Reply, tags; no previous_contact);<br/>if the call fails, decide without them (warning)"]
     G -- no --> H{"Active sender rule?"}
@@ -165,7 +167,7 @@ flowchart TD
     DEC["policy.decide<br/>allowlist / rule / threshold / archive group / Review<br/>+ Needs Reply and tag labels"] --> PL["policy.plan<br/>mode + act_categories"]
     PL --> AP["Gmail modify: add labels, remove INBOX (archive/spam),<br/>add SPAM, drop stale labels from an earlier pass"]
     AP --> DB["Store the row (category, confidence, probabilities, labels...)"]
-    DB --> AR{"Jev decided (not allowlist or rule)<br/>and mode is not dry_run?"}
+    DB --> AR{"Jev decided (not allowlist or rule),<br/>mode is not dry_run and sender<br/>not in decide_each_email?"}
     AR -- yes --> AR2["rules.record_auto<br/>(count toward / reset an auto rule;<br/>each email counts once)"]
     AR -- no --> U
     AR2 --> U{"plan.unsubscribe and run budget left?"}
@@ -183,7 +185,9 @@ flowchart TD
     A -- no --> N["No unsubscribe"]
     A -- yes --> B{"Decided by a rule, or Jev confidence<br/>at or above the category threshold?<br/>(not archive group, not Review)"}
     B -- no --> N
-    B -- yes --> C{"Verified: DMARC pass<br/>and a List-Unsubscribe header?"}
+    B -- yes --> L{"Sender in decide_each_email<br/>and not decided by a manual rule?"}
+    L -- yes --> N
+    L -- no --> C{"Verified: DMARC pass<br/>and a List-Unsubscribe header?"}
     C -- no --> N1["Archive only<br/>(unsubscribe_skipped_unverified)"]
     C -- yes --> D{"Group or discussion list?<br/>List-Post, Google Groups target,<br/>relayed by a group, own-domain sender or list"}
     D -- yes --> N
@@ -205,9 +209,9 @@ flowchart TD
     M -- "no, or none has an @" --> MP["manual_pending (listed in the digest)"]
 ```
 
-C, D and E are one pure function, `policy.unsubscribe_gate`, which every path that can unsubscribe
-calls: the Jev path and the rule path of `run` (through `policy._check_unsubscribe`, only on a
-decision that would otherwise unsubscribe), the rule path's sent-mail search
+L, C, D and E are one pure function, `policy.unsubscribe_gate`, which every path that can
+unsubscribe calls: the Jev path and the rule path of `run` (through `policy._check_unsubscribe`,
+only on a decision that would otherwise unsubscribe), the rule path's sent-mail search
 (`triage._rule_needs_contact`) and `unsubscribe-retry`. It also refuses a category that doesn't
 unsubscribe and an allowlisted sender (on `run` the allowlist has already decided `important`). F is
 `policy.acts_on`, the one mode / `act_categories` check, used by `policy.plan`,
@@ -233,9 +237,9 @@ load).
 | Category | Label | `action` | `min_confidence` | Notes |
 | -- | -- | -- | -- | -- |
 | `important` | `Jev/Important` | keep | 0.0 | Allowlist target. Also the fallback for an answer naming an unknown category. Not mass mail that only greets you by name, nor a conversation between other people pasted into a message from an unrelated sender. |
-| `action_required` | `Jev/Action` | keep | 0.0 | Own digest section. Includes a held message pending your approval, and a document, tax return or agreement to review or sign through a document, e-signature or client-portal service ([EX-39](#ex-39--a-tax-portal-notice-that-passes-dmarc)). Excludes surveys, feedback or review requests and promotional calls to action ([ADR 0038](decisions/0038-surveys-are-not-a-personal-action.md)). |
+| `action_required` | `Jev/Action` | keep | 0.0 | Own digest section. Includes a held message pending your approval, and a document, tax return or agreement to review or sign through a document, e-signature or client-portal service ([EX-39](#ex-39--a-tax-portal-notice-that-passes-dmarc)), and a new submission from a form on my own website or landing page (a lead, contact, quote or demo request relayed by a form or CRM tool such as HubSpot, Typeform, Webflow, Jotform or Google Forms: someone waits for a reply; [EX-44](#ex-44--a-sender-decided-per-email-keeps-its-leads-and-archives-its-fyis), [ADR 0045](decisions/0045-senders-decided-per-email.md)). Excludes surveys, feedback or review requests and promotional calls to action ([ADR 0038](decisions/0038-surveys-are-not-a-personal-action.md)). |
 | `transactional` | `Jev/Transactional` | archive | 0.80 | Includes copies of documents you already signed or filed. |
-| `notification` | `Jev/Notifications` | archive | 0.80 | Includes groups' held-spam reports. |
+| `notification` | `Jev/Notifications` | archive | 0.80 | Includes groups' held-spam reports, and form and CRM tools' dashboards, reports, deal or pipeline updates and account notices; not a new submission from a form on my own website (that is `action_required`). |
 | `newsletter` | `Jev/Newsletters` | archive | 0.80 |  |
 | `marketing` | `Jev/Marketing` | archive_unsubscribe | 0.90 | `unsubscribe_known_contacts: true` (default). |
 | `cold_outreach` | `Jev/Outreach` | archive_unsubscribe | 0.90 | `unsubscribe_known_contacts: false`. |
@@ -308,13 +312,14 @@ An unsubscribe is irreversible. During `run` it happens only when **all** of the
 | -- | -- | -- |
 | 1 | The final category's action is `archive_unsubscribe` | `policy._apply` |
 | 2 | Decided by a sender rule, or by Jev at or above the category threshold. An archive-group or Review decision never unsubscribes | `policy.decide` |
-| 3 | **Verified**: `dmarc=pass` in Gmail's own `Authentication-Results` ([4.2](#42-dmarc)) and a `List-Unsubscribe` header with an `https:` or `mailto:` URI (an `http:`-only header counts as none, [4.3](#43-list-unsubscribe-one-click-and-mailto)). If not, the email keeps its category, is archived, and `unsubscribe_skipped_unverified` is set. It is never moved to Spam for this | `policy.unsubscribe_gate` |
-| 4 | **Not a group or discussion list** (`_group_list`): no `List-Post` header; no unsubscribe target on `googlegroups.com` / `groups.google.com` (host or subdomain); not relayed by a Google Group (`group_author` found, trusted or not); sender domain and `List-Id` not on the account's own domain (or a subdomain) | `policy.unsubscribe_gate` |
-| 5 | For a category with `unsubscribe_known_contacts: false` (`cold_outreach`): `previous_contact` is not `wrote_to_sender` / `wrote_to_their_domain` (`known_contact_kept` otherwise). Unknown (`None`, the search failed or wasn't run) does **not** block it | `policy.unsubscribe_gate` |
-| 6 | Mode is `act`, and the account has no `act_categories` or lists the category | `policy.acts_on`, from `policy.plan` |
-| 7 | The run's budget (`MAX_UNSUBSCRIBES_PER_RUN`, 20) has attempts left | `triage.process` |
-| 8 | The list isn't **settled**: no `unsubscribes` row for `(account, list_key)`, or its row is `failed` with fewer than 3 attempts | `triage._unsubscribe` |
-| 9 | `dmarc_pass` again, inside the unsubscriber (defence in depth) | `unsubscribe.unsubscribe` |
+| 3 | **Not a sender decided per email** ([3.5](#35-sender-rules)) unless a **manual** rule decided the email: Jev's answer, the email's own correction or a stored decision never unsubscribe a sender in `decide_each_email` (`Veto.DECIDED_EACH_EMAIL`; [EX-45](#ex-45--a-sender-decided-per-email-is-unsubscribed-only-on-a-manual-rule)). The email keeps its category and is archived | `policy.unsubscribe_gate` |
+| 4 | **Verified**: `dmarc=pass` in Gmail's own `Authentication-Results` ([4.2](#42-dmarc)) and a `List-Unsubscribe` header with an `https:` or `mailto:` URI (an `http:`-only header counts as none, [4.3](#43-list-unsubscribe-one-click-and-mailto)). If not, the email keeps its category, is archived, and `unsubscribe_skipped_unverified` is set. It is never moved to Spam for this | `policy.unsubscribe_gate` |
+| 5 | **Not a group or discussion list** (`_group_list`): no `List-Post` header; no unsubscribe target on `googlegroups.com` / `groups.google.com` (host or subdomain); not relayed by a Google Group (`group_author` found, trusted or not); sender domain and `List-Id` not on the account's own domain (or a subdomain) | `policy.unsubscribe_gate` |
+| 6 | For a category with `unsubscribe_known_contacts: false` (`cold_outreach`): `previous_contact` is not `wrote_to_sender` / `wrote_to_their_domain` (`known_contact_kept` otherwise). Unknown (`None`, the search failed or wasn't run) does **not** block it | `policy.unsubscribe_gate` |
+| 7 | Mode is `act`, and the account has no `act_categories` or lists the category | `policy.acts_on`, from `policy.plan` |
+| 8 | The run's budget (`MAX_UNSUBSCRIBES_PER_RUN`, 20) has attempts left | `triage.process` |
+| 9 | The list isn't **settled**: no `unsubscribes` row for `(account, list_key)`, or its row is `failed` with fewer than 3 attempts | `triage._unsubscribe` |
+| 10 | `dmarc_pass` again, inside the unsubscriber (defence in depth) | `unsubscribe.unsubscribe` |
 
 The same checks run on the **rule path**, in the same order: a sender rule skips Jev, not the sender
 checks. For a rule to a category that spares known contacts, `triage` runs the sent-mail search only
@@ -338,12 +343,13 @@ fewer than 3 attempts against the email's current state, with the same `acts_on`
 | Email deleted (404) | n/a | held; any other Gmail error is raised |
 | `SPAM` or `TRASH` label in Gmail | n/a | `skipped` |
 | Correction visible in live labels, or a user edit (starred, our label removed, another Jev label added) | Correction learned / hands off | `skipped` |
-| Category | Current rule, else Jev | Current rule (if its category exists), else the stored category |
+| Category | Current rule, else Jev | Current rule (if its category exists), else the stored category. For a sender in `decide_each_email` only a manual rule counts ([3.5](#35-sender-rules)): an `auto` or `correction` rule is ignored, so a row it decided is held (`rule since removed`) and one to a keep category doesn't skip the row |
 | Current rule points to a non-unsubscribing category | Rule decides | `skipped` |
 | Stored category from a rule that was since deleted | Jev is asked again | held: `rule since removed` |
 | Stored Jev category | Jev's fresh answer vs threshold | Stored confidence must still be ≥ the current threshold (account override included) and not `low_confidence`; else held |
 | Category not unsubscribing or not in `act_categories` | No unsubscribe | held |
 | Allowlisted sender | No Jev, `important` | `skipped` |
+| Sender in `decide_each_email`, no manual rule | No unsubscribe | `skipped` (`sender decided email by email, no manual rule`) |
 | Unverified, group or own list | No unsubscribe | `skipped` |
 | Known contact (`cold_outreach`) | No unsubscribe | `skipped` |
 | Sent-mail search fails (`None`) | **Unsubscribe goes ahead** | **held**: nothing in a manual retry is urgent |
@@ -391,10 +397,39 @@ Held rows stay `failed`.
 | `correction` | A detected correction ([3.7](#37-corrections-user-edits-and-restore)) | exact resolved sender address | Replaces any rule on the same key |
 | `auto` | `rules.record_auto` after consistent Jev answers | exact resolved sender address | Never changes manual/correction rules |
 
-- Lookup (`rules.match`): the first active rule decides, on the exact address, else on `@domain`
-  (`policy.rule_keys`). Allowlist wins over rules.
+- Lookup (`rules.SenderRules.match`, through `triage.rule_for`): the first active rule decides, on
+  the exact address, else on `@domain` (`policy.rule_keys`). Allowlist wins over rules.
+
+- **Senders decided per email** (`decide_each_email` in `accounts.yaml`, per account; addresses or
+  `@domain`, subdomains included, normalised and checked like `rules set`'s keys:
+  `config.normalize_sender_key`; anything else fails the file at load): for platforms that send both
+  mail you can archive and mail that needs you (a CRM's notifications address sends dashboards and
+  website leads). For such a sender (the resolved sender, as rules key on):
+
+  - only **manual** rules decide (`rules.SenderRules.deciding`): `auto` and `correction` rules are
+    ignored, as if absent, so lookup goes on to the next rule (an ignored exact `auto` rule doesn't
+    hide a manual `@domain` rule). A manual rule is your explicit choice for every email of the
+    sender, so it still wins. `run`, `unsubscribe-retry` and `dry_classify.py` use the same lookup.
+  - no `auto` rule is learned or counted (`triage._learn_auto_rule`), and a pending one is left as
+    it is;
+  - a correction sets `corrected_category` on the email but creates no rule
+    ([3.7](#37-corrections-user-edits-and-restore)); it still counts in the digest's "Corrections
+    learned", which counts the fixes picked up.
+  - it is **never unsubscribed unless a manual rule** to an unsubscribing category decides the email
+    ([3.3](#33-unsubscribe-conditions), condition 3; `run` and `unsubscribe-retry` through
+    `policy.unsubscribe_gate`): its address also carries the mail that needs you, and one
+    unsubscribe (once per `List-Id`, else per sender domain) may turn that stream off for good.
+    Jev's `marketing` answer archives the email, nothing more;
+  - The ignored rules stay in the DB (`rules list` still shows them): removing the sender from the
+    list makes them decide again. `rules delete` them to forget them.
+
+  See [EX-44](#ex-44--a-sender-decided-per-email-keeps-its-leads-and-archives-its-fyis),
+  [EX-45](#ex-45--a-sender-decided-per-email-is-unsubscribed-only-on-a-manual-rule) and
+  [ADR 0045](decisions/0045-senders-decided-per-email.md).
+
 - A rule decision has source `rule` and confidence 1.0, and no `previous_contact` unless the
   unsubscribe needs it.
+
 - **Rules to a keep category** (`important`, `action_required`), like the allowlist, still ask Jev,
   for the flags only: `Jev/Needs Reply` and the tag labels follow Jev's answer, the category stays
   the rule's (or `important`), Jev's own category is stored as `jev_category` and ignored, and the
@@ -408,6 +443,7 @@ Held rows stay `failed`.
   archive or spam category** skip Jev: their email leaves the inbox, where Needs Reply is never
   added. See [EX-15](#ex-15--a-client-with-a-keep-rule-asks-a-question) and
   [ADR 0020](decisions/0020-flags-for-allowlist-and-keep-rules.md).
+
 - A rule whose category no longer exists in `categories.yaml` counts as no rule: when it is the
   first match, Jev decides. Lookup **never falls through** to the `@domain` rule behind a stale
   exact rule: the exact rule is your exception to the domain rule, so applying the domain rule would
@@ -482,7 +518,10 @@ categories can earn a rule too.
 | Two or more category labels, or none, and not pulled back | none |
 
 A correction sets `corrected_category` on the row and a `correction` sender rule (active) on the
-row's stored sender. It is checked in two places:
+row's stored sender. For a sender in the account's `decide_each_email` ([3.5](#35-sender-rules))
+there is no rule: the correction decides that email alone when it is processed again (a stronger
+mode, or `reprocess`; `triage._own_correction`), and the sender's next emails go to Jev. It is
+checked in two places:
 
 - `corrections.check`, at the start of every `label`/`act` run: rows that are `done`, not `dry_run`,
   not restored, not yet corrected, processed in the last **7 days**, and not checked in the last
@@ -496,7 +535,7 @@ and never in `dry_run`):
 | Edit | Result |
 | -- | -- |
 | Email is starred | Hands off, **even after a correction** |
-| Row has a correction | Processed again: the new correction rule decides |
+| Row has a correction | Processed again: the new correction rule decides (for a sender in `decide_each_email`, the email's own correction) |
 | A label we added (other than `Jev/Processed`) was removed | Hands off |
 | A Jev label we didn't add (category, `Jev/Needs Reply`, `Jev/Review`, tag) is present | Hands off |
 
@@ -1519,6 +1558,42 @@ probabilities that matter are shown; the rest are ~0.
   Now a literal is one opaque piece and the header must match RFC 8601's grammar ([4.2](#42-dmarc),
   [ADR 0043](decisions/0043-authentication-results-parsed-per-rfc-8601.md)).
 
+### EX-44 — A sender decided per email keeps its leads and archives its FYIs
+
+- **Test**: `test_ex44_a_sender_decided_per_email_keeps_its_leads_and_archives_its_fyis`
+- **Input**: `noreply@notifications.crm.example`, a CRM's notifications address, sends both FYIs
+  (dashboards, "deal closed", app notices) and the submissions of the contact form on your website.
+  It earned an active `auto` rule to `notification` from three FYIs, then the account listed it in
+  `decide_each_email`. In `act`, two emails arrive from it:
+  `You've got a new submission on the form "Contact Form - Acme Website"` (Jev: action_required
+  0.88, notification 0.10, `needs_reply` 0.85) and `Your weekly dashboard is ready` (notification
+  0.99).
+- **Outcome**: both go to Jev, the auto rule doesn't decide. The submission stays in the inbox with
+  `Jev/Action` and `Jev/Needs Reply`; the dashboard is archived with `Jev/Notifications`. The auto
+  rule is unchanged (no hit counted, nothing new learned); moving an email back to the inbox or
+  relabeling it would fix that email only.
+- **Why**: a rule keyed on a sender assumes its emails are alike, and this one's aren't: the auto
+  rule archived a website lead without asking Jev (production, 2026-10-14). Asked, Jev called the
+  lead a notification (0.96) until the criteria said that a website form's submission is someone
+  waiting for a reply ([3.5](#35-sender-rules), [3.1](#31-categories),
+  [ADR 0045](decisions/0045-senders-decided-per-email.md)).
+
+### EX-45 — A sender decided per email is unsubscribed only on a manual rule
+
+- **Test**: `test_ex45_a_sender_decided_per_email_is_unsubscribed_only_on_a_manual_rule`
+- **Input**: the account lists `noreply@notifications.crm.example` (a CRM's notifications address,
+  which also relays the website's leads) and `news@vendor.example` in `decide_each_email`, and has a
+  manual rule `news@vendor.example → marketing`. In `act`, each sends a verified email with a
+  `mailto:` `List-Unsubscribe`: the CRM `Join our live product webinar` (Jev: marketing 0.93), the
+  vendor `Spring sale`.
+- **Outcome**: the webinar is archived with `Jev/Marketing` and **not** unsubscribed (no
+  `unsubscribes` row). The vendor's email is decided by the manual rule, archived and unsubscribed
+  (`mailto:` sent).
+- **Why**: a listed sender's address also carries mail that needs you; its `List-Unsubscribe` may
+  turn the whole stream off, leads included, irreversibly and unseen. Only your own manual rule can
+  ask for that ([3.3](#33-unsubscribe-conditions) condition 3, [3.5](#35-sender-rules),
+  [ADR 0045](decisions/0045-senders-decided-per-email.md)).
+
 ## 6. Glossary
 
 - **Action**: what a category does: `keep`, `archive`, `archive_unsubscribe`, `spam`.
@@ -1528,7 +1603,10 @@ probabilities that matter are shown; the rest are ~0.
   unsubscribes or spams. `Decision.archive_group`, logged, not stored.
 - **Auto rule**: a sender rule created by `record_auto` after `auto_rule.hits` consistent answers.
 - **Correction**: a change you made in Gmail (another category label, back to the inbox) that
-  becomes a `correction` sender rule.
+  becomes a `correction` sender rule (for a sender in `decide_each_email`, decides that email only).
+- **Decided per email**: a sender in the account's `decide_each_email`: Jev decides each of its
+  emails; no rule is learned for it, only a manual rule applies, and only a manual rule can
+  unsubscribe it.
 - **`downgraded_to_spam`**: historical name of the `messages` column that stores
   `unsubscribe_skipped_unverified` (kept to avoid a migration).
 - **Flags-only call**: the Jev call for an allowlisted email or one decided by a rule to a keep
@@ -1642,6 +1720,10 @@ Behaviour found while writing this spec, documented as it is today:
   SPF, DKIM or DMARC result word, a trailing `;`), those emails lose their verdicts, unverified and
   never unsubscribed, until the grammar is widened. Every shape Gmail wrote on 400 recent production
   emails parses (`test_real_gmail_header_shapes_parse`).
+- The rules `decide_each_email` ignores ([3.5](#35-sender-rules)) still show in `rules list`, and
+  decide again if the sender leaves the list. `dry_classify.py` asks Jev for an email of such a
+  sender that you corrected, where a `run` in a stronger mode would apply the correction (with
+  `--reference`, which ignores every rule, that is the point).
 - An email processed again in a stronger mode (`label`, then `act`, or after `reprocess`) is still
   sent to Jev again (its stored answer isn't reused). Its new answer adds no auto-rule hit even when
   the first answer didn't count (e.g. 0.93 then 0.97): the sender just needs another email. And an

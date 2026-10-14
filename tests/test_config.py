@@ -203,6 +203,25 @@ def test_allowlist_is_normalised_once_and_matched_ignoring_case():
     assert not acc.matches_allowlist("other@partner.com")
 
 
+def test_decide_each_email_is_normalised_and_matches_addresses_and_domains():
+    acc = account("decide_each_email: [' NoReply@Notifications.CRM.example ', '@Forms.example']\n")
+    assert acc.decide_each_email == ["noreply@notifications.crm.example", "@forms.example"]
+    assert acc.decides_each_email("noreply@notifications.CRM.example")
+    assert acc.decides_each_email("leads@forms.example")
+    assert acc.decides_each_email("x@eu.forms.example")  # subdomains included
+    assert not acc.decides_each_email("x@notforms.example")
+    assert not acc.decides_each_email("other@notifications.crm.example")  # address entry: exact
+    assert not account("").decides_each_email("noreply@notifications.crm.example")
+
+
+@pytest.mark.parametrize(
+    "entry", ["forms.example", "HubSpot <noreply@crm.example>", "@", "@forms", "noreply@"]
+)
+def test_decide_each_email_rejects_what_isnt_an_address_or_domain(entry):
+    with pytest.raises(ValidationError, match="neither an address"):
+        account(f"decide_each_email: ['{entry}']\n")
+
+
 def test_find_account_ignores_case():
     a, b = account(""), Account(email="Ops@Acme.com")
     assert find_account([a, b], "ops@ACME.com") is b

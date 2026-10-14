@@ -10,8 +10,9 @@ rounds is called a "pass". For each email it asks Jev, an AI classifier from Typ
 email it is and how sure it is. It then puts a label on the email (they all start with `Jev/`) and,
 depending on the kind, leaves it in your inbox, archives it, moves it to Spam, or archives it and
 unsubscribes you from that mailing list. Unsubscribing sometimes means sending a short "unsubscribe"
-email from your account (see [Safety nets](#safety-nets)). Once a day it sends you a short Slack
-message with what still needs you.
+email from your account (see
+[What it unsubscribes you from](#what-it-unsubscribes-you-from-and-what-it-never-does)). Once a day
+it sends you a short Slack message with what still needs you.
 
 Nothing is ever deleted. Archiving only takes an email out of the inbox (it stays in "All Mail"),
 and anything moved to Spam can be moved back.
@@ -25,7 +26,7 @@ and anything moved to Spam can be moved back.
 | `Jev/Transactional` | Records of something you did or bought: receipts, paid invoices, order and booking confirmations, shipping updates, password resets, codes, copies of documents you already signed. | Archived |
 | `Jev/Notifications` | Automatic "for your information" alerts and summaries from tools you use (GitHub, Slack, Google Drive, Jira, monitoring…). | Archived |
 | `Jev/Newsletters` | Newsletters, blog updates and industry news you subscribed to. | Archived |
-| `Jev/Marketing` | Promotions from real companies: sales, discounts, launches, webinars. | Archived, and unsubscribed when it is safe (see [Safety nets](#safety-nets)) |
+| `Jev/Marketing` | Promotions from real companies: sales, discounts, launches, webinars. | Archived, and unsubscribed when it is safe (see [What it unsubscribes you from](#what-it-unsubscribes-you-from-and-what-it-never-does)) |
 | `Jev/Outreach` | Unsolicited sales pitches written to look personal: agencies, freelancers, "quick question" follow-up sequences. | Archived, and unsubscribed when it is safe |
 | `Jev/Spam` | Fraud: scams, phishing, fake invoices or account alerts, fake voicemail or document notices. | Moved to Spam |
 
@@ -92,24 +93,27 @@ sender are the same kind, without a confident different answer in between, and n
 they could be personal, Inbox Jev remembers that and stops asking Jev what kind that sender's emails
 are. This never happens for outreach from someone you have written to.
 
+**Senders that send both kinds.** Some senders send both important and unimportant mail from the
+same address. A sales tool's notifications address, for example, sends you weekly dashboards
+(archive them) but also the message someone left in the contact form on your website (answer it!).
+Whoever runs Inbox Jev can list such senders for your account. For a listed sender, Jev decides each
+email on its own: Inbox Jev never learns a habit for that sender, neither by itself nor from your
+fixes, and only a rule set by hand still applies. For senders on this list, Inbox Jev never
+unsubscribes you unless there is a rule set by hand from the command line (`rules set`, usually by
+whoever runs Inbox Jev); changing a label doesn't count for these senders. Their promotions are
+archived, nothing more, because unsubscribing could also stop the emails that need you. A new
+message from a contact form on your own website is treated as something that needs you: it stays in
+your inbox as `Jev/Action`.
+
 ## Safety nets
 
 - **Nothing is deleted.** Archived emails are in "All Mail", spam is in the Spam folder. Note that
   Gmail itself empties the Spam folder after 30 days.
-- **Unsubscribing is the only thing that can't be undone**, so it has the most checks:
-  - only for `Jev/Marketing` and `Jev/Outreach`, and only when Jev is about 90% sure (or you taught
-    it that sender);
-  - only when the sender proves who it is: Gmail confirms the email really comes from the domain it
-    claims, and it carries the standard unsubscribe instruction in the email's hidden technical
-    details. Links inside the email are never clicked;
-  - it either uses the one-click unsubscribe the sender provides, or sends a short "unsubscribe"
-    email from your account to the address the sender gives, which you'll see in your Sent folder;
-  - never for an outreach email from someone you have written to, or someone at their company: it is
-    archived, nothing more. (Marketing from a company you've written to can still be unsubscribed,
-    since that only stops their promotions; this can be changed per category.)
-  - never through a group or discussion list, since that would take you off the group;
-  - never for anyone on your allowlist;
-  - once per mailing list, and at most 20 per pass (every 10 minutes).
+- **Unsubscribing is the only thing that can't be undone**, so it has the most checks: only for
+  marketing and outreach, only when the sender proves who it is, never for a pitch from someone you
+  know, a group, your allowlist or a sender that sends both kinds, and links inside the email are
+  never clicked. The full list, and how to control it, is in
+  [What it unsubscribes you from](#what-it-unsubscribes-you-from-and-what-it-never-does).
 - **It respects what you did.** Inbox Jev handles each email once. If you star an email it has
   labeled, it won't touch that email again, even if the account later moves to full mode. Changing
   its `Jev/` labels in a way that isn't one of the fixes in
@@ -128,6 +132,78 @@ are. This never happens for outreach from someone you have written to.
   30 days) can't come back. Unsubscribes can't be undone this way: you would subscribe again on the
   sender's website.
 
+## What it unsubscribes you from (and what it never does)
+
+**Only two labels can lead to an unsubscribe: `Jev/Marketing` and `Jev/Outreach`.** Newsletters,
+notifications, receipts and everything else are never unsubscribed: they are archived, kept in the
+inbox or moved to Spam as usual. An email Jev wasn't sure about (`Jev/Review`) is never unsubscribed
+either.
+
+**All of these must be true**, or the email is only archived:
+
+01. Jev is at least about 90% sure it is marketing or outreach (whoever runs Inbox Jev can change
+    that bar), or Inbox Jev already knows that sender as marketing or outreach (from a fix of yours,
+    a rule set by hand, or by learning it itself; see
+    [How it learns from you](#how-it-learns-from-you)).
+02. The sender proves who it is: Gmail confirms the email really comes from the company it claims.
+03. The email carries the standard unsubscribe instruction in its hidden technical details (the one
+    Gmail uses for its own "Unsubscribe" button). Links inside the email are never clicked.
+04. It doesn't come through a group or discussion list, or a mailing list of your own company:
+    unsubscribing there would take you off the group.
+05. The sender isn't on your allowlist.
+06. For outreach only: you have never written to that person (or, for a company address, to anyone
+    at that company), as far as your Sent mail shows; writing to an automated "no-reply" address
+    doesn't count. If Gmail's search of your Sent mail fails at that moment, it goes ahead. A pitch
+    from someone you know is just archived. Marketing has no such exception: unsubscribing only
+    stops a company's promotions, not your conversations with its people.
+07. The sender isn't on your list of senders that send both kinds (see
+    [How it decides](#how-it-decides)), unless there is a rule for it set by hand from the command
+    line (`rules set`, usually by whoever runs Inbox Jev); changing a label doesn't count for these
+    senders.
+08. It is the first time for that mailing list: Inbox Jev unsubscribes from each list once (when the
+    sender doesn't say which list, all of that company's email counts as one). If an attempt fails,
+    it tries again when the next email from that list arrives (or when whoever runs Inbox Jev asks
+    it to retry), up to 3 attempts in all.
+09. It hasn't already tried 20 unsubscribes in this pass (a safety limit; whoever runs Inbox Jev can
+    change it). Past that, the email is just archived, and the list is unsubscribed only when a
+    later email from it arrives.
+10. The account is in full mode for that kind of email (not trial or labels-only mode).
+
+**How it unsubscribes:**
+
+- If the sender offers a one-click unsubscribe, it uses that.
+- If that doesn't work, or there is none, and the sender gives an address for it, it sends a short
+  "unsubscribe" email from your account to that address. You'll see it in your Sent folder.
+- If the sender only offers a link to a web page, Inbox Jev does **not** open it. The link appears
+  in the daily digest under "Manual unsubscribe", so you can do it yourself in one click if you
+  want.
+
+**Where to see what it did:** the [daily digest](#the-daily-slack-digest) lists the lists you were
+taken off ("Unsubscribed"), the ones waiting for you, with their link ("Manual unsubscribe"), and
+the attempts that didn't work ("Unsubscribe failed"), or their Spanish names if your digest is in
+Spanish. Inbox Jev can't undo an unsubscribe: to get those emails again, subscribe again on the
+sender's website.
+
+**How do I stop it from ever unsubscribing me from someone?** Ask whoever runs Inbox Jev to add them
+to your allowlist (by address or whole company): their emails then always stay in your inbox as
+`Jev/Important`. Or change the label of one of their emails to `Jev/Newsletters` or `Jev/Important`:
+from then on, every email from that exact address gets that label, so it is never unsubscribed
+(newsletters are archived, important email stays in the inbox).
+
+**How do I make it unsubscribe me from a newsletter?** Change the label of one of its emails to
+`Jev/Marketing`. From the next email on, every email from that address is treated as marketing:
+archived without asking Jev and, if all the checks above pass, unsubscribed. This doesn't work for
+senders that send both kinds: there, ask whoever runs Inbox Jev for a rule set by hand. Or simply
+unsubscribe yourself, with Gmail's "Unsubscribe" button or the link in the email.
+
+**Why didn't it unsubscribe me from this marketing email?** One of the checks above failed. Most
+often Jev was less than 90% sure (look for `Jev/Review`), the email doesn't carry the standard
+unsubscribe instruction, or the sender only offers a web page: then it is in the digest under
+"Manual unsubscribe". It also never unsubscribes twice from the same list.
+
+**Where do I see what it unsubscribed me from?** In the daily digest's "Unsubscribed" section, and
+the unsubscribe emails it sent are in your Sent folder.
+
 ## How it learns from you
 
 You teach Inbox Jev by fixing its work in Gmail, within a week of the email arriving:
@@ -139,9 +215,11 @@ You teach Inbox Jev by fixing its work in Gmail, within a week of the email arri
 - **Remove `Jev/Review`** from an email it wasn't sure about. That means "your guess was right".
 
 Inbox Jev picks that up within about an hour, and from then on emails from that exact address get
-the kind you chose. The email you fixed stays where you put it, unless the account later moves to
-full mode. Be careful with one thing: teaching it that a sender is `Jev/Marketing` or `Jev/Outreach`
-means their future emails can be unsubscribed, and `Jev/Spam` means they go straight to Spam.
+the kind you chose (except for the senders that send both kinds, described in
+[How it decides](#how-it-decides): there, your fix applies to that one email only). The email you
+fixed stays where you put it, unless the account later moves to full mode. Be careful with one
+thing: teaching it that a sender is `Jev/Marketing` or `Jev/Outreach` means their future emails can
+be unsubscribed, and `Jev/Spam` means they go straight to Spam.
 
 Rules can also be set by hand from the command line, by sender or by whole domain (see the
 [README](../README.md#commands)).
@@ -164,10 +242,11 @@ sender is important, and their future emails will stay. If a whole company or pe
 touched, ask whoever runs Inbox Jev to add them to your allowlist.
 
 **Why did it unsubscribe me from X?** Jev was at least about 90% sure it was marketing or outreach,
-and the sender passed all the checks in [Safety nets](#safety-nets). The daily digest lists every
-unsubscribe. To get those emails again, subscribe on the sender's website, then move their next
-email back to the inbox (or label it what it is) so the following ones aren't archived again. It
-never unsubscribes from the same list twice.
+or Inbox Jev already knew that sender as marketing or outreach, and the sender passed all the checks
+in [What it unsubscribes you from](#what-it-unsubscribes-you-from-and-what-it-never-does). The daily
+digest lists every unsubscribe. To get those emails again, subscribe on the sender's website, then
+move their next email back to the inbox (or label it what it is) so the following ones aren't
+archived again. It never unsubscribes from the same list twice.
 
 **Why does the digest show only a few emails?** On purpose: it only lists what still needs you.
 Emails it archived itself are only counted in the totals. An email that would be listed but that you
@@ -211,7 +290,8 @@ the last 24 hours, in English or Spanish:
   it learned; and, for each company domain, how far the sent-mail search got (dates and Gmail's
   internal message ids, never addresses or content). The text of your emails is never stored.
 - **Emails sent from your account**: only the short "unsubscribe" emails described in
-  [Safety nets](#safety-nets). Inbox Jev never replies to anyone.
+  [What it unsubscribes you from](#what-it-unsubscribes-you-from-and-what-it-never-does). Inbox Jev
+  never replies to anyone.
 - **What is never written to the logs**: the text of your emails, or anything Jev says back when it
   refuses an email (it could quote it).
 - **Your sent mail** is only searched to see who you wrote to; Inbox Jev reads the recipients of

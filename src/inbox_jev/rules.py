@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .classification import Classification, PreviousContact
-from .config import Action, CategoriesConfig
+from .config import Account, Action, CategoriesConfig
 from .db import SenderRule
 from .policy import KNOWN_CONTACT, Decision, rule_keys, spares_known_contacts
 
@@ -44,8 +44,25 @@ class SenderRules:
         """The rule keyed on the exact address, active or not (auto rules are keyed so)."""
         return next((r for r in self.rows if r.sender_key == self.sender), None)
 
+    def deciding(self, account: Account) -> SenderRules:
+        """The rules that may decide for the sender in `account`: all of them, or only the
+        manual ones when the account decides the sender's emails one by one
+        (`Account.decides_each_email`). A rule learned from some of such a sender's emails (auto
+        or correction) says nothing about the next one; a manual rule is the user's own choice.
+        """
+        if not account.decides_each_email(self.sender):
+            return self
+        return SenderRules(self.sender, tuple(r for r in self.rows if is_manual(r)))
+
     def match(self, categories: Collection[str]) -> tuple[SenderRule | None, SenderRule | None]:
-        """The rule that decides for the sender, as `(rule, stale)` (see the module's `match`)."""
+        """The rule that decides for the sender, as `(rule, stale)`.
+
+        The first active rule decides (exact address, then @domain). If its category isn't one
+        of `categories` (removed from categories.yaml), it comes back as `stale` and `rule` is
+        None: the sender has no rule and Jev decides. It never falls through to the @domain
+        rule: an exact rule is the user's exception to it, so applying the domain rule would undo
+        that exception. Deciding code calls it on `deciding(account)`, never on all the rules.
+        """
         found = self.active
         first = found[0] if found else None
         if first is None or first.category in categories:
@@ -62,31 +79,11 @@ def load(session: Session, account: str, sender: str) -> SenderRules:
     return SenderRules(sender, tuple(sorted(found, key=lambda r: keys.index(r.sender_key))))
 
 
-def lookup(session: Session, account: str, sender: str) -> SenderRule | None:
-    """The first active rule for `sender` (exact address, then @domain), whatever its category.
-
-    Deciding code uses `match`, which also checks the category still exists.
-    """
-    found = active(session, account, sender)
-    return found[0] if found else None
-
-
-def match(
-    session: Session, account: str, sender: str, categories: Collection[str]
-) -> tuple[SenderRule | None, SenderRule | None]:
-    """The rule that decides for `sender`, as `(rule, stale)`.
-
-    The first active rule decides (exact address, then @domain). If its category isn't one of
-    `categories` (removed from categories.yaml), it comes back as `stale` and `rule` is None: the
-    sender has no rule and Jev decides. It never falls through to the @domain rule: an exact rule
-    is the user's exception to it, so applying the domain rule would undo that exception.
-    """
-    return load(session, account, sender).match(categories)
-
-
-def active(session: Session, account: str, sender: str) -> list[SenderRule]:
-    """Active rules matching `sender`, in lookup order (exact address, then @domain)."""
-    return load(session, account, sender).active
+def is_manual(rule: SenderRule | None) -> bool:
+    """`rule` is a manual one (`rules set`): for a sender in decide_each_email, the only kind
+    that may decide its emails (`SenderRules.deciding`) and unsubscribe it
+    (`policy.unsubscribe_gate`)."""
+    return rule is not None and rule.source == RuleSource.MANUAL
 
 
 def set_rule(
@@ -122,8 +119,8 @@ def record_auto(
     (Jev disagreeing with itself about one email: the sender isn't consistent).
     Only touches automatic rules: manual and correction rules are never changed here. An active
     auto rule whose category was removed from categories.yaml is replaced like a pending one
-    (`match` sends its sender to Jev: auto rules are keyed on the exact address, so they come
-    first).
+    (`SenderRules.match` sends its sender to Jev: auto rules are keyed on the exact address, so
+    they come first).
     `known` is the sender's rules already read for this email (`load`); without it they are
     read here.
     """

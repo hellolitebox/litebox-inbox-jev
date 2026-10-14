@@ -32,7 +32,10 @@ categories:
       a request or a message held for moderation that is pending my approval, update a payment
       method or expiring card, verify my account or domain, act on a security alert, review
       or sign a document, tax return or agreement sent through a document, e-signature or
-      client-portal service, or fix or renew something before a deadline. Not receipts,
+      client-portal service, or fix or renew something before a deadline. Also a new
+      submission from a form on my or my company's own website or landing page (a lead, a
+      contact, quote or demo request) relayed by a form or CRM tool such as HubSpot, Typeform,
+      Webflow, Jotform or Google Forms: someone is waiting for my reply. Not receipts,
       reminders of things already done, FYI alerts, held-spam reports, surveys, feedback or
       review requests, or promotional calls to action.
     action: keep
@@ -53,7 +56,10 @@ categories:
       Automated FYI alerts and digests from software tools I use: GitHub, Slack, Google
       Calendar/Drive/Docs, Jira, Linear, Notion, analytics, monitoring, CI, policy or product
       updates, and automated held-spam reports from mailing lists and groups (e.g. Google
-      Groups "Moderator's spam report"). Nothing for me to do.
+      Groups "Moderator's spam report"). Nothing for me to do. This includes form and CRM
+      tools' dashboards, reports, deal or pipeline updates and account notices, but not a new
+      submission from a form on my own website or landing page (a lead or contact request),
+      which is action_required.
     action: archive
     min_confidence: 0.80
 
@@ -134,7 +140,8 @@ needs_reply:
   question: >-
     Does the sender expect a reply or an action from me personally? Yes: a person writing to
     me, or something only I can do (pay, sign, approve, authorize, confirm an appointment, renew
-    an expiring document, secure my account). No: company or bulk mail (surveys, feedback,
+    an expiring document, secure my account), or a lead or contact request submitted through a
+    form on my own website. No: company or bulk mail (surveys, feedback,
     ratings or reviews, promotions, webinars or events), even if it asks me to reply or click,
     a conversation between other people that isn't addressed to me, and phishing.
   threshold: 0.7

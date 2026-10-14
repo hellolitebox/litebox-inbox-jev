@@ -54,15 +54,17 @@ def retry_unsubscribes(
     category in `act_categories`. A stored category that a rule decided needs that rule to still
     exist (`run` would ask Jev again otherwise); a stored Jev category needs its current
     confidence threshold (account override included) and must not be low-confidence. The sender
-    (resolved, group author) must pass `policy.unsubscribe_gate` (not allowlisted, DMARC +
-    List-Unsubscribe, not a group or own list) and, for categories that spare known contacts,
-    the sent-mail search must say I never wrote to them.
+    (resolved, group author) must pass `policy.unsubscribe_gate` (not allowlisted, not in
+    decide_each_email unless a manual rule decides, DMARC + List-Unsubscribe, not a group or own
+    list) and, for categories that spare known contacts, the sent-mail search must say I never
+    wrote to them.
 
     Rows that the user or the sender ruled out (restored, corrected, reported as spam, trashed,
-    starred or relabeled, a rule to a keep category, allowlisted, group, unverified, known
-    contact) become `skipped`, so `run` won't retry them either. Rows held back by settings or
-    transient state (mode, act_categories, a removed rule, confidence, the cap, a failed sent-mail
-    search, a deleted email, no stored message) are left as they are.
+    starred or relabeled, a rule to a keep category, allowlisted, in decide_each_email without a
+    manual rule, group, unverified, known contact) become `skipped`, so `run` won't retry them
+    either. Rows held back by settings or transient state (mode, act_categories, a removed rule,
+    confidence, the cap, a failed sent-mail search, a deleted email, no stored message) are left
+    as they are.
 
     Raises `NotImplementedError` before reading any row or calling Gmail on a database without
     the sent-mail scan upsert (`DomainScanRows`), as `run` does at the start of its pass.
@@ -116,6 +118,7 @@ def _retry_one(p: _RetryPass, row: Unsubscribe) -> tuple[str, str]:
     sig = signals_for(email, account)
     rule = rule_for(p.ctx, account, rules.load(session, account.email, sig.sender))
     rule_category = rule.category if rule else None
+    manual_rule = rules.is_manual(rule)
     if reason := _live_user_decision(cfg, msg, current, rule_category):
         return _skip(session, row, reason)
     category = rule_category or msg.category
@@ -127,7 +130,7 @@ def _retry_one(p: _RetryPass, row: Unsubscribe) -> tuple[str, str]:
         return row.list_key, f"held: category {category} doesn't unsubscribe here"
     if rule_category is None and (held := _stale_decision(cfg, account, msg, category)):
         return row.list_key, f"held: {held}"
-    gate = _sender_gate(p, sig, category)
+    gate = _sender_gate(p, sig, category, manual_rule=manual_rule)
     if gate is None:  # stricter than run: nothing in a manual retry is urgent
         return row.list_key, "held: sent-mail search failed"
     if gate.veto is not None:
@@ -145,16 +148,19 @@ def _fetch(gmail: GmailApi, message_id: str) -> Email | None:
         raise
 
 
-def _sender_gate(p: _RetryPass, sig: Signals, category: str) -> GateResult | None:
+def _sender_gate(
+    p: _RetryPass, sig: Signals, category: str, *, manual_rule: bool
+) -> GateResult | None:
     """`policy.unsubscribe_gate` for the sender, with the sent-mail search when only it is left
-    to decide; None when that search failed."""
-    gate = unsubscribe_gate(p.ctx.cfg, p.account, sig, category, previous_contact=None)
+    to decide; None when that search failed. `manual_rule`: `category` is a manual rule's."""
+    cfg, account = p.ctx.cfg, p.account
+    gate = unsubscribe_gate(cfg, account, sig, category, None, manual_rule=manual_rule)
     if not (gate.allowed and gate.contact_unknown):
         return gate
-    contact = previous_contact(p.gmail, p.account.email, sig.sender, p.scans)
+    contact = previous_contact(p.gmail, account.email, sig.sender, p.scans)
     if contact is None:
         return None
-    return unsubscribe_gate(p.ctx.cfg, p.account, sig, category, contact)
+    return unsubscribe_gate(cfg, account, sig, category, contact, manual_rule=manual_rule)
 
 
 def _unsubscribe_again(p: _RetryPass, row: Unsubscribe, sig: Signals) -> str:

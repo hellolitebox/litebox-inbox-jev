@@ -406,13 +406,18 @@ class Checker:
         rule, stale = (
             (None, None)
             if self.ignore_rules
-            else rules.match(self.session, account.email, sig.sender, cfg.by_key)
+            else rules.load(self.session, account.email, sig.sender)
+            .deciding(account)
+            .match(cfg.by_key)
         )
         calls_before = self._jev.calls
         # The same calls as `run`: Jev with the sent-mail search when no rule or allowlist
         # decides, Jev for the flags only on keep rules and the allowlist, and the sent-mail
         # search on a rule only when it could unsubscribe.
-        inputs = triage.gather_inputs(self._sources, email, sig, rule)
+        manual_rule = rules.is_manual(rule)
+        inputs = triage.gather_inputs(
+            self._sources, email, sig, rule.category if rule else None, manual_rule=manual_rule
+        )
         classification, contact = inputs.classification, inputs.contact
         decision = decide(
             cfg,
@@ -421,6 +426,7 @@ class Checker:
             classification,
             inputs.rule_category,
             previous_contact=contact,
+            manual_rule=manual_rule,
         )
         return _Checked(
             decision,

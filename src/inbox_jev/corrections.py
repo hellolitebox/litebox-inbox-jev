@@ -11,7 +11,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from . import rules
-from .config import CategoriesConfig, Mode
+from .config import Account, CategoriesConfig, Mode
 from .db import Message, MessageStatus, now
 from .system_labels import INBOX
 
@@ -42,12 +42,14 @@ def detect(msg: Message, current_labels: set[str], cfg: CategoriesConfig) -> str
     return None
 
 
-def check(session: Session, gmail: LabelReader, account: str, cfg: CategoriesConfig) -> int:
+def check(session: Session, gmail: LabelReader, account: Account, cfg: CategoriesConfig) -> int:
+    """Record the corrections the user made in Gmail to recently processed emails (`record`).
+    Returns how many were found."""
     cutoff = now()
     candidates = session.scalars(
         select(Message)
         .where(
-            Message.account == account,
+            Message.account == account.email,
             Message.status == MessageStatus.DONE,
             Message.mode != Mode.DRY_RUN,
             Message.restored.is_(False),
@@ -85,11 +87,25 @@ def check(session: Session, gmail: LabelReader, account: str, cfg: CategoriesCon
     return corrected
 
 
-def record(session: Session, account: str, msg: Message, category: str) -> None:
-    """Store a detected correction and turn it into a sender rule."""
+def record(session: Session, account: Account, msg: Message, category: str) -> None:
+    """Store a detected correction and turn it into a sender rule.
+
+    For a sender the account decides email by email (`Account.decides_each_email`) the
+    correction is stored on the email only: it decides that email if it is processed again
+    (`triage.process`), not the sender's next ones.
+    """
     msg.corrected_category = category
-    rules.set_rule(session, account, msg.sender, category, source=rules.RuleSource.CORRECTION)
+    learned = not account.decides_each_email(msg.sender)
+    if learned:
+        rules.set_rule(
+            session, account.email, msg.sender, category, source=rules.RuleSource.CORRECTION
+        )
     log.info(
-        "correction learned",
-        extra={"account": account, "sender": msg.sender, "from": msg.category, "to": category},
+        "correction learned" if learned else "correction recorded: sender decided per email",
+        extra={
+            "account": account.email,
+            "sender": msg.sender,
+            "from": msg.category,
+            "to": category,
+        },
     )

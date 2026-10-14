@@ -301,3 +301,29 @@ def test_main_rejects_mixed_or_bad_reference_options(script_env, monkeypatch, ca
     assert exc.value.code == 2
     assert error in capsys.readouterr().err
     assert script_env.opened == []
+
+
+def test_checker_ignores_the_learned_rules_of_a_sender_decided_per_email(
+    cfg, account, make_sessions
+):
+    """As `run`: an auto rule of a sender in decide_each_email doesn't decide, Jev does; a manual
+    rule still does."""
+    account = account.model_copy(update={"decide_each_email": ["noreply@crm.example"]})
+    gmail = FakeGmail(
+        [
+            email("1", "CRM <noreply@crm.example>", "New submission"),
+            email("2", "Shop <promo@shop.com>", "Sale"),
+        ]
+    )
+    jev = FakeClassifier({"New submission": make_classification("action_required", 0.96)})
+    sessions = make_sessions("sqlite:///:memory:")
+    with sessions() as session:
+        rules.set_rule(
+            session, account.email, "noreply@crm.example", "notification", RuleSource.AUTO
+        )
+        rules.set_rule(session, account.email, "promo@shop.com", "newsletter", RuleSource.MANUAL)
+        session.commit()
+        checker = Checker(session, gmail, jev, cfg, account, Mode.ACT, body_chars=3000)
+        lead, sale = (checker.decide(gmail.get(i)) for i in ("1", "2"))
+    assert (lead.decision.source, lead.decision.category) == ("jev", "action_required")
+    assert (sale.decision.source, sale.decision.category) == ("rule", "newsletter")

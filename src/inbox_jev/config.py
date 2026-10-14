@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .psl import is_public_suffix
-from .signals import DOMAIN, domain_of, on_domain
+from .signals import ADDRESS, DOMAIN, domain_of, on_domain
 
 # A probability or confidence threshold: Jev's probabilities are between 0 and 1.
 Probability = Annotated[float, Field(ge=0.0, le=1.0)]
@@ -141,6 +141,15 @@ def normalize_group_domain(value: str) -> str:
     if public:
         raise ValueError(f"group_domains can't include public domains: {value!r} ({public})")
     return domain
+
+
+def normalize_sender_key(value: str) -> str | None:
+    """`value` as a sender key, stripped and lowercased: an address (ana@example.com) or
+    `@domain` (@example.com). None when it is neither (a bare domain, a display name, a typo)."""
+    key = value.strip().lower()
+    if ADDRESS.match(key) or (key.startswith("@") and DOMAIN.match(key[1:])):
+        return key
+    return None
 
 
 def check_lookback(value: str) -> str:
@@ -318,6 +327,11 @@ class Account(BaseModel):
     # Opt-in: empty means no group is trusted, not even the account's own domain. Only list
     # domains whose Google Workspace you control.
     group_domains: list[str] = Field(default_factory=list)
+    # Senders Jev decides email by email, for platforms that send both mail I can archive and
+    # mail that needs me (a CRM's notifications address sends dashboards and website leads):
+    # no automatic or correction rule is learned for them, and only a manual rule (`rules set`)
+    # applies. Addresses or @domain (subdomains included), as `rules set` takes them.
+    decide_each_email: list[str] = Field(default_factory=list)
     # Keys must be categories in categories.yaml (`validate_accounts`).
     min_confidence: dict[str, Probability] = Field(default_factory=dict)
     # In act mode, only these category keys get their action; the rest are labeled only.
@@ -345,6 +359,30 @@ class Account(BaseModel):
     def _normalize_allowlist(cls, value: list[str]) -> list[str]:
         """Matched case-insensitively: stored lowercased (and stripped) once, not per email."""
         return [entry.strip().lower() for entry in value]
+
+    @field_validator("decide_each_email")
+    @classmethod
+    def _check_decide_each_email(cls, value: list[str]) -> list[str]:
+        keys = []
+        for entry in value:
+            key = normalize_sender_key(entry)
+            if key is None:
+                raise ValueError(
+                    f"decide_each_email entry {entry!r} is neither an address "
+                    "(ana@example.com) nor @domain (@example.com)"
+                )
+            keys.append(key)
+        return keys
+
+    def decides_each_email(self, sender: str) -> bool:
+        """`sender` is in decide_each_email: by address, or on a listed @domain (subdomains
+        included). Its sender rules don't decide, except a manual one (`rules.SenderRules`)."""
+        sender = sender.lower()
+        domain = domain_of(sender)
+        return any(
+            on_domain(domain, key[1:]) if key.startswith("@") else sender == key
+            for key in self.decide_each_email
+        )
 
     def matches_allowlist(self, sender: str) -> bool:
         """`sender` is in allow_senders or on a domain in allow_domains (subdomains included).

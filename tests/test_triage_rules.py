@@ -151,3 +151,133 @@ def test_dry_run_learns_no_auto_rules(setup):
     with ctx.sessions() as s:
         rule = s.query(SenderRule).one()
         assert (rule.sender_key, rule.hits, rule.active) == ("promo@shop.com", 1, False)
+
+
+# --- decide_each_email ---------------------------------------------------------------------
+
+CRM = "noreply@notifications.crm.example"
+
+
+def _per_email(account):
+    """`account` deciding every email from the CRM's notifications address one by one."""
+    return account.model_copy(update={"decide_each_email": [CRM, "@forms.example"]})
+
+
+def _crm_fyis(gmail, ctx, *ids):
+    for i in ids:
+        gmail.emails[i] = email(i, f"CRM <{CRM}>", f"Dashboard {i}")
+        ctx.classifier.answers[f"Dashboard {i}"] = make_classification("notification", 0.99)
+
+
+def test_listed_sender_earns_no_auto_rule_but_others_still_do(setup):
+    ctx, gmail, account = setup
+    account = _per_email(account)
+    gmail.emails = {}
+    _crm_fyis(gmail, ctx, "1", "2", "3", "4")
+    for i in ("5", "6", "7"):
+        gmail.emails[i] = email(i, "Tool <alerts@tool.example>", f"Alert {i}")
+        ctx.classifier.answers[f"Alert {i}"] = make_classification("notification", 0.99)
+    triage.run_account(ctx, account, Mode.ACT)
+
+    with ctx.sessions() as s:
+        assert [r.sender_key for r in s.query(SenderRule)] == ["alerts@tool.example"]
+        rows = {m.gmail_id: m for m in s.query(Message)}
+    # Every CRM email went to Jev, the fourth too (no rule after three): archived on its answer.
+    assert all(rows[i].source == "jev" and rows[i].archived for i in ("1", "2", "3", "4"))
+
+
+def test_listed_sender_ignores_its_auto_and_correction_rules(setup):
+    ctx, gmail, account = setup
+    account = _per_email(account)
+    gmail.emails = {}
+    _crm_fyis(gmail, ctx, "1")
+    gmail.emails["2"] = email("2", "Leads <web@forms.example>", "New submission")
+    ctx.classifier.answers["New submission"] = make_classification("action_required", 0.96)
+    with ctx.sessions() as s:
+        rules.set_rule(s, account.email, CRM, "important", RuleSource.AUTO)
+        rules.set_rule(s, account.email, "web@forms.example", "notification", RuleSource.CORRECTION)
+        s.commit()
+    triage.run_account(ctx, account, Mode.ACT)
+
+    with ctx.sessions() as s:
+        rows = {m.gmail_id: m for m in s.query(Message)}
+        stored = {(r.sender_key, r.source, r.active) for r in s.query(SenderRule)}
+    assert (rows["1"].source, rows["1"].category, rows["1"].archived) == (
+        "jev",
+        "notification",
+        True,
+    )
+    assert (rows["2"].source, rows["2"].category, rows["2"].archived) == (
+        "jev",
+        "action_required",
+        False,
+    )
+    # Ignored while listed, not deleted: they apply again if the sender leaves the list.
+    assert stored == {(CRM, "auto", True), ("web@forms.example", "correction", True)}
+
+
+def test_listed_sender_still_follows_a_manual_rule(setup):
+    ctx, gmail, account = setup
+    account = _per_email(account)
+    gmail.emails = {}
+    _crm_fyis(gmail, ctx, "1")
+    gmail.emails["2"] = email("2", "Leads <web@forms.example>", "New submission")
+    with ctx.sessions() as s:
+        rules.set_rule(s, account.email, CRM, "newsletter", RuleSource.MANUAL)
+        # An ignored exact auto rule doesn't hide the manual @domain rule behind it.
+        rules.set_rule(s, account.email, "web@forms.example", "notification", RuleSource.AUTO)
+        rules.set_rule(s, account.email, "@forms.example", "action_required", RuleSource.MANUAL)
+        s.commit()
+    ctx.classifier.answers["New submission"] = make_classification("notification", 0.99)
+    triage.run_account(ctx, account, Mode.ACT)
+
+    with ctx.sessions() as s:
+        rows = {m.gmail_id: m for m in s.query(Message)}
+    assert (rows["1"].source, rows["1"].category) == ("rule", "newsletter")
+    assert (rows["2"].source, rows["2"].category, rows["2"].archived) == (
+        "rule",
+        "action_required",
+        False,
+    )
+    # Dashboard 1's rule archives it without Jev; the keep rule asks Jev for the flags only.
+    assert [st["subject"] for st in ctx.classifier.states] == ["New submission"]
+
+
+def test_correction_on_listed_sender_decides_that_email_only(setup):
+    ctx, gmail, account = setup
+    account = _per_email(account)
+    gmail.emails = {}
+    _crm_fyis(gmail, ctx, "1")
+    triage.run_account(ctx, account, Mode.ACT)
+    gmail.emails["1"].label_ids.append("INBOX")  # the user moves it back
+    _crm_fyis(gmail, ctx, "2")
+    triage.run_account(ctx, account, Mode.ACT)
+
+    with ctx.sessions() as s:
+        assert s.query(SenderRule).count() == 0
+        rows = {m.gmail_id: m for m in s.query(Message)}
+    assert rows["1"].corrected_category == "important"
+    assert (rows["2"].source, rows["2"].archived) == ("jev", True)  # the next one: Jev decides
+
+
+def test_correction_on_listed_sender_decides_that_email_in_a_stronger_mode(setup):
+    """In label, the user swaps Jev/Notifications for Jev/Action; when the account moves to act,
+    that email is decided by the correction, not by Jev's notification answer again."""
+    ctx, gmail, account = setup
+    account = _per_email(account)
+    gmail.emails = {}
+    _crm_fyis(gmail, ctx, "1")
+    triage.run_account(ctx, account, Mode.LABEL)
+    labels = gmail.emails["1"].label_ids
+    labels[labels.index("Label_Jev/Notifications")] = "Label_Jev/Action"
+    triage.run_account(ctx, account, Mode.ACT)
+
+    with ctx.sessions() as s:
+        assert s.query(SenderRule).count() == 0
+        row = s.query(Message).one()
+    assert (row.corrected_category, row.category, row.source) == (
+        "action_required",
+        "action_required",
+        "rule",
+    )
+    assert not row.archived and "INBOX" in gmail.emails["1"].label_ids

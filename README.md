@@ -56,7 +56,11 @@ for each new inbox email:
    ask it for "needs a reply" and the tags, like the allowlist (if that call fails, the email is
    still labeled, just without those flags). A rule whose category was removed from
    `categories.yaml` is ignored (with a warning in the log): Jev decides, even when a `@domain` rule
-   also matches.
+   also matches. Senders in the account's `decide_each_email` (platforms that send both FYIs and
+   mail that needs you, e.g. a CRM's notifications address that also relays your website's
+   contact-form leads) never get a learned rule: Jev decides each of their emails, a correction
+   fixes only that email, and only a manual `rules set` rule applies
+   ([ADR 0045](docs/decisions/0045-senders-decided-per-email.md)).
 3. **Jev** gets the headers that matter, the start of the body (`BODY_CHARS`; the HTML when the
    `text/plain` part is just a "view this in your browser" stub) and `previous_contact`: whether you
    ever wrote to the sender or a person at their domain, from a search over your sent mail (emails
@@ -74,14 +78,17 @@ for each new inbox email:
 An unsubscribe is irreversible, so it only happens in `act` mode (and `act_categories`), for
 *marketing* and *cold_outreach* at their own 0.90 confidence, when the sender passes DMARC and sends
 a `List-Unsubscribe` header (links in the body are never followed), never through a group or
-discussion list, never for cold outreach from someone you have written to, once per list and at most
+discussion list, never for cold outreach from someone you have written to, never for a sender in
+`decide_each_email` unless a manual rule decides, once per list and at most
 `MAX_UNSUBSCRIBES_PER_RUN` per run. It uses RFC 8058 one-click, else `mailto:`, else leaves a manual
 link in the digest. Sender rules and `inbox-jev unsubscribe-retry` go through the same checks
-([§3.3](docs/how-it-decides.md#33-unsubscribe-conditions)). Google Groups on a domain you list in
-the account's `group_domains` (opt-in: only domains whose Google Workspace you control) are keyed on
-the author, so rules, corrections, the allowlist and `previous_contact` apply to the person
-(allowlist a group itself by its exact address in `allow_senders`); other groups stay keyed on the
-group address, and an entry that is a public suffix (`co.uk`, `github.io`) fails the accounts file
+([§3.3](docs/how-it-decides.md#33-unsubscribe-conditions); in plain language:
+[What it unsubscribes you from](docs/guide.md#what-it-unsubscribes-you-from-and-what-it-never-does)).
+Google Groups on a domain you list in the account's `group_domains` (opt-in: only domains whose
+Google Workspace you control) are keyed on the author, so rules, corrections, the allowlist and
+`previous_contact` apply to the person (allowlist a group itself by its exact address in
+`allow_senders`); other groups stay keyed on the group address, and an entry that is a public suffix
+(`co.uk`, `github.io`) fails the accounts file
 ([§3.4](docs/how-it-decides.md#34-groups-and-mailing-lists)).
 
 ### Modes

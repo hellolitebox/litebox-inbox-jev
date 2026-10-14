@@ -1688,3 +1688,86 @@ def test_ex43_an_address_literal_cant_forge_a_dmarc_pass(spec):
     assert (row.category, row.archived, row.downgraded_to_spam) == ("marketing", True, True)
     with ctx.sessions() as s:
         assert s.query(Unsubscribe).count() == 0
+
+
+# --- EX-44 -----------------------------------------------------------------------------------
+
+
+def test_ex44_a_sender_decided_per_email_keeps_its_leads_and_archives_its_fyis(spec):
+    """EX-44 (docs/how-it-decides.md §5, §3.5 sender rules, §3.1 categories, ADR 0045)."""
+    ctx, gmail, account = spec
+    crm = "noreply@notifications.crm.example"
+    account = account.model_copy(update={"decide_each_email": [crm]})
+    with ctx.sessions() as s:  # learned from three FYIs before the address was listed
+        rules.set_rule(s, account.email, crm, "notification", RuleSource.AUTO)
+        s.commit()
+    lead = 'You\'ve got a new submission on the form "Contact Form - Acme Website"'
+    gmail.emails = {
+        "1": email("1", f"CRM <{crm}>", lead),
+        "2": email("2", f"CRM <{crm}>", "Your weekly dashboard is ready"),
+    }
+    ctx.classifier.answers[lead] = answer(
+        "action_required", needs_reply=0.85, action_required=0.88, notification=0.10
+    )
+    ctx.classifier.answers["Your weekly dashboard is ready"] = answer(
+        "notification", notification=0.99
+    )
+    triage.run_account(ctx, account, Mode.ACT)
+
+    assert [st["subject"] for st in ctx.classifier.states] == [
+        lead,
+        "Your weekly dashboard is ready",
+    ]
+    row = _row(ctx, "1")
+    assert (row.source, row.category, row.archived) == ("jev", "action_required", False)
+    assert {"Label_Jev/Action", "Label_Jev/Needs Reply"} <= set(gmail.emails["1"].label_ids)
+    assert "INBOX" in gmail.emails["1"].label_ids
+    row = _row(ctx, "2")
+    assert (row.source, row.category, row.archived) == ("jev", "notification", True)
+    with ctx.sessions() as s:  # nothing learned: the old auto rule is untouched, and inert
+        rule = s.query(SenderRule).one()
+        assert (rule.source, rule.category, rule.hits, rule.active) == (
+            "auto",
+            "notification",
+            0,
+            True,
+        )
+
+    # The criteria tell Jev that a website form's lead needs me, and its tools' FYIs don't.
+    action = ctx.cfg.by_key["action_required"].criteria
+    assert "form on my or my company's own website or landing page" in action
+    assert "a lead or contact request), which is action_required" in (
+        ctx.cfg.by_key["notification"].criteria
+    )
+    assert "form on my own website" in ctx.cfg.needs_reply.question
+
+
+# --- EX-45 -----------------------------------------------------------------------------------
+
+
+def test_ex45_a_sender_decided_per_email_is_unsubscribed_only_on_a_manual_rule(spec):
+    """EX-45 (docs/how-it-decides.md §5, §3.3 unsubscribe conditions, §3.5, ADR 0045)."""
+    ctx, gmail, account = spec
+    crm, vendor = "noreply@notifications.crm.example", "news@vendor.example"
+    account = account.model_copy(update={"decide_each_email": [crm, vendor]})
+    with ctx.sessions() as s:  # your own choice for every email of the vendor
+        rules.set_rule(s, account.email, vendor, "marketing", RuleSource.MANUAL)
+        s.commit()
+    webinar = "Join our live product webinar"
+    gmail.emails = {
+        "1": email("1", f"CRM <{crm}>", webinar, list_unsubscribe="<mailto:u@crm.example>"),
+        "2": email(
+            "2", f"Vendor <{vendor}>", "Spring sale", list_unsubscribe="<mailto:u@vendor.example>"
+        ),
+    }
+    ctx.classifier.answers[webinar] = answer("marketing", marketing=0.93, notification=0.05)
+    triage.run_account(ctx, account, Mode.ACT)
+
+    row = _row(ctx, "1")  # Jev's word: archived as marketing, never unsubscribed
+    assert (row.source, row.category, row.archived) == ("jev", "marketing", True)
+    assert "Label_Jev/Marketing" in gmail.emails["1"].label_ids
+    row = _row(ctx, "2")  # the manual rule: archived and unsubscribed
+    assert (row.source, row.category, row.archived) == ("rule", "marketing", True)
+    assert gmail.sent == ["u@vendor.example"]
+    with ctx.sessions() as s:
+        assert [u.list_key for u in s.query(Unsubscribe)] == ["vendor.example"]

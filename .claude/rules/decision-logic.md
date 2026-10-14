@@ -36,11 +36,11 @@ criteria, archive group, needs_reply, tags, auto_rule), `policy.py`, `triage.py`
 `signals.py`, `psl.py` and the vendored `public_suffix_list.dat`, `unsubscribe.py`, the classifier
 state and questions (`classifier.py`), body extraction (`body.py`), the sent-mail search and its
 cache (`Gmail.has_written_to`, `sent_scan.py`, `scan_rows.py`), `config.py` (`FREE_MAIL`,
-`PUBLIC_GROUP_HOSTS`, `group_domains` normalisation and rejection, the `act_categories` and
-`archive_group_reply_keep_probability` validators, the `Settings` defaults `MODE`, `LOOKBACK`,
-`MAX_MESSAGES_PER_RUN`, `MAX_UNSUBSCRIBES_PER_RUN`, `BODY_CHARS`) and the `cli.py` commands that
-change decisions or stored state (`restore`, `reprocess`, `rules set` / `rules delete`,
-`unsubscribe-retry`).
+`PUBLIC_GROUP_HOSTS`, `group_domains` normalisation and rejection, `decide_each_email` and
+`Account.decides_each_email`, the `act_categories` and `archive_group_reply_keep_probability`
+validators, the `Settings` defaults `MODE`, `LOOKBACK`, `MAX_MESSAGES_PER_RUN`,
+`MAX_UNSUBSCRIBES_PER_RUN`, `BODY_CHARS`) and the `cli.py` commands that change decisions or stored
+state (`restore`, `reprocess`, `rules set` / `rules delete`, `unsubscribe-retry`).
 
 ## Every change to it, in the same PR
 

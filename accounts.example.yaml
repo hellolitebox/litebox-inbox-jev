@@ -28,6 +28,16 @@ accounts:
     # Optional (default: none).
     group_domains:
       - example.com
+    # Senders that send both mail you can archive and mail that needs you, e.g. a CRM's
+    # notifications address (dashboards, but also your website's contact-form leads) or a form
+    # builder. Jev decides each of their emails: no sender rule is learned for them, neither
+    # automatically nor from your corrections (a correction fixes that one email only), and only
+    # a rule set by hand (`inbox-jev rules set`) still applies. Addresses or @domain (subdomains
+    # included). Optional (default: none). Examples, adjust to the tools you use:
+    decide_each_email:
+      - noreply@notifications.hubspot.com
+      - "@typeform.com"
+      - "@webflow.com"
     # In act mode, only these categories are archived/spammed/unsubscribed; the others just get
     # their labels. Useful to roll out act gradually. Optional (default: all categories).
     act_categories: [transactional, notification, newsletter]

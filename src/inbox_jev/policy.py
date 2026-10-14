@@ -51,6 +51,7 @@ class Veto(StrEnum):
 
     NOT_UNSUBSCRIBING = "category doesn't unsubscribe"
     ALLOWLISTED = "allowlisted sender"
+    DECIDED_EACH_EMAIL = "sender decided email by email, no manual rule"
     UNVERIFIED = "unverified sender"
     GROUP = "group or own list"
     KNOWN_CONTACT = "known contact"
@@ -98,10 +99,13 @@ def decide(
     rule_category: str | None = None,
     *,
     previous_contact: PreviousContact | None = None,
+    manual_rule: bool = False,
 ) -> Decision:
     """Decide what happens to one email.
 
     `previous_contact` is triage.previous_contact's answer (None = unknown / not checked).
+    `manual_rule`: `rule_category` comes from a manual sender rule (`rules set`), the only kind
+    that may unsubscribe a sender in decide_each_email (`unsubscribe_gate`).
     A `rule_category` that isn't in `cfg` (removed from categories.yaml) is ignored, as if there
     were no rule. On the allowlist and rule paths a `classification` only adds the Needs Reply
     and tag labels: the category stays the allowlist's or the rule's.
@@ -117,7 +121,7 @@ def decide(
         )
         # A rule skips Jev, not the sender checks: manual and correction rules can point at
         # senders that never proved who they are.
-        _check_unsubscribe(cfg, account, sig, decision, previous_contact)
+        _check_unsubscribe(cfg, account, sig, decision, previous_contact, manual_rule=manual_rule)
         return _add_flags(cfg, classification, decision) if classification else decision
     if classification is None:
         raise ValueError("classification is required when no allowlist entry or rule matches")
@@ -137,7 +141,7 @@ def decide(
     threshold = category_threshold(cfg, account, category)
     if decision.confidence >= threshold:
         _apply(cfg, decision)
-        _check_unsubscribe(cfg, account, sig, decision, previous_contact)
+        _check_unsubscribe(cfg, account, sig, decision, previous_contact, manual_rule=False)
     elif _archive_group_confident(cfg, account, sig, classification, threshold, previous_contact):
         # Jev is sure the email gets archived, just not which archive category fits best
         # (e.g. notification 0.55 / newsletter 0.45). Archive it under the top category, but
@@ -158,6 +162,8 @@ def _check_unsubscribe(
     sig: Signals,
     decision: Decision,
     previous_contact: PreviousContact | None,
+    *,
+    manual_rule: bool,
 ) -> None:
     """Apply `unsubscribe_gate` to a decision that would unsubscribe (Jev and rule paths).
 
@@ -168,7 +174,9 @@ def _check_unsubscribe(
     """
     if not decision.unsubscribe:
         return
-    veto = unsubscribe_gate(cfg, account, sig, decision.category, previous_contact).veto
+    veto = unsubscribe_gate(
+        cfg, account, sig, decision.category, previous_contact, manual_rule=manual_rule
+    ).veto
     if veto is not None:
         decision.unsubscribe = False
         decision.unsubscribe_skipped_unverified = veto == Veto.UNVERIFIED
@@ -181,15 +189,20 @@ def unsubscribe_gate(
     sig: Signals,
     category: str,
     previous_contact: PreviousContact | None,
+    *,
+    manual_rule: bool,
 ) -> GateResult:
     """The sender checks every unsubscribe passes, in one order, on every path. Pure.
 
     1. The category's action is `archive_unsubscribe`.
     2. The sender isn't allowlisted (on `run` the allowlist decides `important` before this).
-    3. Verified: DMARC pass and a usable List-Unsubscribe. Unsubscribing from a sender that
+    3. A sender in decide_each_email is unsubscribed only on a manual rule (`manual_rule`: the
+       category comes from `rules set`), never on Jev's word or a stored decision: its address
+       also carries mail that needs me, and one unsubscribe may turn that stream off for good.
+    4. Verified: DMARC pass and a usable List-Unsubscribe. Unsubscribing from a sender that
        can't prove who it is only confirms the address.
-    4. Not a group, discussion list or own-domain list, whose List-Unsubscribe removes *me*.
-    5. Not a known contact (`previous_contact` in KNOWN_CONTACT) for a category that spares
+    5. Not a group, discussion list or own-domain list, whose List-Unsubscribe removes *me*.
+    6. Not a known contact (`previous_contact` in KNOWN_CONTACT) for a category that spares
        them. Unknown (None) passes, with `contact_unknown` set: `run` goes ahead,
        `unsubscribe-retry` holds the row, and the rule path runs the sent-mail search first.
 
@@ -200,6 +213,8 @@ def unsubscribe_gate(
         return GateResult(Veto.NOT_UNSUBSCRIBING)
     if is_allowed(account, sig):
         return GateResult(Veto.ALLOWLISTED)
+    if account.decides_each_email(sig.sender) and not manual_rule:
+        return GateResult(Veto.DECIDED_EACH_EMAIL)
     if not _verified(sig):
         return GateResult(Veto.UNVERIFIED)
     if _group_list(sig, account):

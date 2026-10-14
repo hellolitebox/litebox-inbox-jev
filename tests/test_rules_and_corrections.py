@@ -12,11 +12,19 @@ from inbox_jev.db import Message, MessageStatus, SenderRule, now, open_sessions
 from inbox_jev.policy import Decision, DecisionSource, decide
 from inbox_jev.rules import RuleSource
 
+ME = Account(email="me@acme.com")
+
 
 @pytest.fixture
 def session():
     with open_sessions("sqlite:///:memory:") as sessions, sessions() as s:
         yield s
+
+
+def _first_active(session, sender):
+    """The sender's first active rule (exact address, then @domain), whatever its category."""
+    found = rules.load(session, "me@acme.com", sender).active
+    return found[0] if found else None
 
 
 def msg(**kw) -> Message:
@@ -50,10 +58,10 @@ def test_auto_rule_activates_after_consistent_hits(cfg, session):
     c = make_classification("newsletter", 0.99)
     d = Decision(category="newsletter", confidence=0.99, source=DecisionSource.JEV)
     for _ in range(cfg.auto_rule.hits):
-        assert rules.lookup(session, "me@acme.com", "n@sub.com") is None
+        assert _first_active(session, "n@sub.com") is None
         rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", c, d)
         session.commit()
-    assert rules.lookup(session, "me@acme.com", "n@sub.com").category == "newsletter"
+    assert _first_active(session, "n@sub.com").category == "newsletter"
 
 
 def test_auto_rule_resets_on_disagreement(cfg, session):
@@ -64,7 +72,7 @@ def test_auto_rule_resets_on_disagreement(cfg, session):
     rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", c, news)
     rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", c, mkt)
     session.commit()
-    assert rules.lookup(session, "me@acme.com", "n@sub.com") is None
+    assert _first_active(session, "n@sub.com") is None
 
 
 def test_low_confidence_does_not_count(cfg, session):
@@ -73,16 +81,16 @@ def test_low_confidence_does_not_count(cfg, session):
     for _ in range(5):
         rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", c, d)
     session.commit()
-    assert rules.lookup(session, "me@acme.com", "n@sub.com") is None
+    assert _first_active(session, "n@sub.com") is None
 
 
 def test_domain_rule_and_correction_override(cfg, session):
     rules.set_rule(session, "me@acme.com", "@sub.com", "notification", source=RuleSource.MANUAL)
     session.commit()
-    assert rules.lookup(session, "me@acme.com", "x@sub.com").category == "notification"
+    assert _first_active(session, "x@sub.com").category == "notification"
     rules.set_rule(session, "me@acme.com", "x@sub.com", "important", source=RuleSource.CORRECTION)
     session.commit()
-    assert rules.lookup(session, "me@acme.com", "x@sub.com").category == "important"
+    assert _first_active(session, "x@sub.com").category == "important"
 
 
 def auto_rule(session):
@@ -128,7 +136,7 @@ def test_keep_answer_restarts_pending_archive_rule(cfg, session):
     session.commit()
     rule = auto_rule(session)
     assert not rule.active and rule.hits == 1
-    assert rules.lookup(session, "me@acme.com", "n@sub.com") is None
+    assert _first_active(session, "n@sub.com") is None
 
 
 def test_keep_signal_restarts_pending_rule_even_when_low_confidence(cfg, session):
@@ -168,7 +176,7 @@ def test_unverified_cold_outreach_earns_rule_that_never_unsubscribes(cfg, sessio
         assert d.unsubscribe_skipped_unverified and d.archive and not d.unsubscribe
         rules.record_auto(session, cfg, "me@acme.com", "s@pitch.io", c, d)
         session.commit()
-    rule = rules.lookup(session, "me@acme.com", "s@pitch.io")
+    rule = _first_active(session, "s@pitch.io")
     assert rule.category == "cold_outreach"
     d = decide(cfg, account, unverified, rule_category=rule.category)
     assert d.archive and not d.unsubscribe and d.unsubscribe_skipped_unverified
@@ -184,7 +192,7 @@ def test_unverified_marketing_rule_never_unsubscribes(cfg, session, account):
             session, cfg, "me@acme.com", "p@shop.com", c, decide(cfg, account, unverified, c)
         )
         session.commit()
-    rule = rules.lookup(session, "me@acme.com", "p@shop.com")
+    rule = _first_active(session, "p@shop.com")
     assert rule.category == "marketing"
     d = decide(cfg, account, unverified, rule_category=rule.category)
     assert d.archive and not d.unsubscribe
@@ -206,7 +214,7 @@ def test_known_contact_cold_outreach_does_not_earn_rule(cfg, session, account):
             PreviousContact.WROTE_TO_THEIR_DOMAIN,
         )
         session.commit()
-    assert rules.lookup(session, "me@acme.com", "rep@vendor.com") is None
+    assert _first_active(session, "rep@vendor.com") is None
 
 
 class _LabelGmail:
@@ -255,9 +263,9 @@ def test_check_puts_never_and_longest_unchecked_rows_first(cfg, session, monkeyp
     session.commit()
     monkeypatch.setattr(corrections, "MAX_PER_RUN", 3)
     gmail = _LabelGmail()
-    corrections.check(session, gmail, "me@acme.com", cfg)
+    corrections.check(session, gmail, ME, cfg)
     assert gmail.checked == ["new_unchecked", "old_unchecked", "old_checked_long_ago"]
-    corrections.check(session, gmail, "me@acme.com", cfg)  # the others are within the hour now
+    corrections.check(session, gmail, ME, cfg)  # the others are within the hour now
     assert gmail.checked[3:] == ["new_checked"]
 
 
@@ -265,19 +273,19 @@ def test_match_never_falls_through_a_stale_exact_rule_to_the_domain_rule(cfg, se
     rules.set_rule(session, "me@acme.com", "news@shop.com", "promotions", RuleSource.MANUAL)
     rules.set_rule(session, "me@acme.com", "@shop.com", "newsletter", RuleSource.MANUAL)
     session.commit()
-    assert rules.lookup(session, "me@acme.com", "news@shop.com").category == "promotions"
-    rule, stale = rules.match(session, "me@acme.com", "news@shop.com", cfg.by_key)
+    assert _first_active(session, "news@shop.com").category == "promotions"
+    rule, stale = rules.load(session, "me@acme.com", "news@shop.com").match(cfg.by_key)
     assert rule is None and stale.sender_key == "news@shop.com"  # Jev decides, not @shop.com
-    rule, stale = rules.match(session, "me@acme.com", "other@shop.com", cfg.by_key)
+    rule, stale = rules.load(session, "me@acme.com", "other@shop.com").match(cfg.by_key)
     assert (rule.sender_key, stale) == ("@shop.com", None)
 
 
 def test_match_with_stale_domain_rule_and_no_exact_rule(cfg, session):
     rules.set_rule(session, "me@acme.com", "@shop.com", "promotions", RuleSource.MANUAL)
     session.commit()
-    rule, stale = rules.match(session, "me@acme.com", "news@shop.com", cfg.by_key)
+    rule, stale = rules.load(session, "me@acme.com", "news@shop.com").match(cfg.by_key)
     assert rule is None and stale.sender_key == "@shop.com"
-    assert rules.match(session, "me@acme.com", "x@other.com", cfg.by_key) == (None, None)
+    assert rules.load(session, "me@acme.com", "x@other.com").match(cfg.by_key) == (None, None)
 
 
 def test_active_auto_rule_to_removed_category_is_relearned(cfg, session):
@@ -298,7 +306,7 @@ def test_known_contact_never_earns_cold_outreach_rule_even_unverified(cfg, sessi
             rules.record_auto(
                 session, cfg, "me@acme.com", "rep@vendor.com", c, d, PreviousContact.WROTE_TO_SENDER
             )
-        assert rules.lookup(session, "me@acme.com", "rep@vendor.com") is None
+        assert _first_active(session, "rep@vendor.com") is None
     # marketing unsubscribes known contacts too, so they can earn a marketing rule.
     m = make_classification("marketing", 0.99)
     for _ in range(cfg.auto_rule.hits):
@@ -308,7 +316,7 @@ def test_known_contact_never_earns_cold_outreach_rule_even_unverified(cfg, sessi
         rules.record_auto(
             session, cfg, "me@acme.com", "rep@vendor.com", m, d, PreviousContact.WROTE_TO_SENDER
         )
-    assert rules.lookup(session, "me@acme.com", "rep@vendor.com").category == "marketing"
+    assert _first_active(session, "rep@vendor.com").category == "marketing"
 
 
 def _checkable(session, *gmail_ids):
@@ -330,7 +338,7 @@ def _checkable(session, *gmail_ids):
 def test_check_reads_every_candidate_in_one_gmail_call(cfg, session):
     _checkable(session, "pulled_back", "deleted", "untouched")
     gmail = _LabelGmail(current={"pulled_back": ["INBOX", "Jev/Marketing"], "deleted": None})
-    assert corrections.check(session, gmail, "me@acme.com", cfg) == 1
+    assert corrections.check(session, gmail, ME, cfg) == 1
     assert gmail.calls == 1
     assert sorted(gmail.checked) == ["deleted", "pulled_back", "untouched"]
     rows = {m.gmail_id: m for m in session.query(Message)}
@@ -343,7 +351,7 @@ def test_check_reads_every_candidate_in_one_gmail_call(cfg, session):
 
 def test_check_without_candidates_learns_nothing(cfg, session):
     gmail = _LabelGmail()
-    assert corrections.check(session, gmail, "me@acme.com", cfg) == 0
+    assert corrections.check(session, gmail, ME, cfg) == 0
     assert gmail.checked == []
 
 
@@ -351,7 +359,7 @@ def test_check_gmail_failure_is_raised_and_changes_no_row(cfg, session):
     _checkable(session, "a", "b")
     gmail = _LabelGmail(current={"a": ["INBOX"]}, error=HttpError(503))
     with pytest.raises(HttpError):
-        corrections.check(session, gmail, "me@acme.com", cfg)
+        corrections.check(session, gmail, ME, cfg)
     assert all(m.correction_checked_at is None for m in session.query(Message))
     assert session.query(SenderRule).count() == 0
 
@@ -361,7 +369,7 @@ def test_match_reads_address_and_domain_rules_in_one_query(cfg, session):
     rules.set_rule(session, "me@acme.com", "@shop.com", "newsletter", RuleSource.MANUAL)
     session.commit()
     with selects_from(session.get_bind(), "sender_rules") as queries:
-        rule, stale = rules.match(session, "me@acme.com", "other@shop.com", cfg.by_key)
+        rule, stale = rules.load(session, "me@acme.com", "other@shop.com").match(cfg.by_key)
     assert rule.sender_key == "@shop.com" and stale is None
     assert len(queries) == 1
 
@@ -420,3 +428,19 @@ def test_an_answer_not_counted_in_another_category_restarts_a_pending_rule(cfg, 
     session.commit()
     rule = auto_rule(session)
     assert (rule.category, rule.hits, rule.active) == ("newsletter", 0, False)
+
+
+def test_check_records_a_listed_senders_correction_without_a_rule(cfg, session, caplog):
+    """A sender in decide_each_email: the correction is stored on the email, no sender rule."""
+    _checkable(session, "pulled_back", "other")
+    gmail = _LabelGmail(
+        current={"pulled_back": ["INBOX", "Jev/Marketing"], "other": ["INBOX", "Jev/Marketing"]}
+    )
+    listed = Account(email="me@acme.com", decide_each_email=["@shop.com"])
+    caplog.set_level("INFO", logger="inbox_jev.corrections")
+    assert corrections.check(session, gmail, listed, cfg) == 2
+    assert {m.corrected_category for m in session.query(Message)} == {"important"}
+    assert session.query(SenderRule).count() == 0
+    assert [r.getMessage() for r in caplog.records] == [
+        "correction recorded: sender decided per email"
+    ] * 2
