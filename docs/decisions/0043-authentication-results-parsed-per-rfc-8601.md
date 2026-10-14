@@ -88,6 +88,9 @@ on 400 recent production emails all parse (`test_real_gmail_header_shapes_parse`
 - The parse relies on Gmail writing the envelope sender as SMTP accepted it (an unquoted local part
   has none of `;`, `(`, `)`, `"`, `\`, `[` or `]`, a quoted one keeps its quotes, a literal its
   brackets); see Known gaps in the spec. A raw `;` in `header.from` (no RFC 5322 domain holds one)
-  meets Gmail's real DMARC verdict, so at worst it turns a real `fail` into `none`, never a pass.
+  meets Gmail's real DMARC verdict, so it can't forge a DMARC pass: at worst a real DMARC `fail`
+  reads as `none`. It can still add a `dkim=pass` (DKIM passes when any signature passes) or turn
+  SPF into `none` (two SPF verdicts that disagree). Neither verifies a sender, and any sender can
+  get a real DKIM pass by signing with its own domain.
 - A header without a trusted `mx.google.com` authserv-id, lookalikes included, is not read (as ADR
   0022 already intended).

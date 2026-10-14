@@ -1,5 +1,8 @@
 # inbox-jev
 
+> **Not an engineer?** Read **[How Inbox Jev sorts your email](docs/guide.md)**: what it does to
+> your inbox, how to correct it and what to do when it gets something wrong, in plain words.
+
 Triage your Gmail inbox with [TypeSafe Jev](https://typesafe.ai). Every few minutes it reads new
 inbox emails, asks Jev which category they belong to (with a calibrated confidence), and:
 
@@ -37,8 +40,9 @@ company survey, review request or promotion; only on emails that stay in the inb
 
 ## How it decides
 
-The full functional spec, with flowcharts, decision tables, the exact checks and worked examples, is
-in **[docs/how-it-decides.md](docs/how-it-decides.md)**. The reasons behind each rule, and the
+A plain-language overview is in **[docs/guide.md](docs/guide.md)**. The full functional spec, with
+flowcharts, decision tables, the exact checks and worked examples, is in
+**[docs/how-it-decides.md](docs/how-it-decides.md)**. The reasons behind each rule, and the
 alternatives that were rejected, are in **[docs/decisions/](docs/decisions/README.md)**. In short,
 for each new inbox email:
 

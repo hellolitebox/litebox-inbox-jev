@@ -727,7 +727,9 @@ def test_a_from_domain_outside_rfc_5322_never_forges_a_pass():
     """Gmail writes header.from only in its DMARC resinfo, so text there that splits off a
     resinfo of its own (a raw `;`, which no RFC 5322 domain holds) meets Gmail's real DMARC
     verdict: a pass it forged disagrees with that verdict, and two DMARC verdicts that disagree
-    are none. At worst a real fail reads as none; never a pass."""
+    are none. At worst a real DMARC fail reads as none; never a DMARC pass. (DKIM and SPF are
+    not protected the same way: an injected dkim=pass counts, since any signature passing is a
+    pass, and an injected spf=pass makes SPF none. Neither verifies a sender.)"""
     rng = random.Random(5322)
     pieces = [*_HEADER_I_PIECES, *_LITERAL_PIECES, "[t:", "]"]
     for _ in range(3000):

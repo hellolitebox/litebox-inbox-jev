@@ -1,5 +1,8 @@
 # How inbox-jev decides
 
+> **New here?** Read the [plain-language guide](guide.md) first. This document is the technical spec
+> it simplifies.
+
 This is the functional spec of the triage logic: what happens to one email, which signals are
 checked, and why. Everything here describes the code on `main` (`src/inbox_jev/`) and the shipped
 [`categories.yaml`](../categories.yaml). Numbers are the shipped defaults; where a setting can
@@ -11,7 +14,8 @@ change them, the setting is named.
   [`tests/test_spec_examples.py`](../tests/test_spec_examples.py) that runs the real code. A test
   fails if an ID exists on only one side.
 - **Changing decision logic?** Update this document, the matching examples and tests, and add an ADR
-  when it is a design decision, in the same PR (see [CLAUDE.md](../CLAUDE.md)).
+  when it is a design decision, in the same PR (see [CLAUDE.md](../CLAUDE.md)). When the change
+  alters something the [guide](guide.md) explains, update the guide too.
 
 Contents:
 
@@ -1632,7 +1636,8 @@ Behaviour found while writing this spec, documented as it is today:
   `)`, `"`, `\`, `[` or `]` (RFC 5321 refuses it at `MAIL FROM`), a quoted one keeps its quotes and
   an address literal its brackets. A server that dropped them could let one add a verdict; this
   assumes Gmail keeps them. A raw `;` in `header.from` (no RFC 5322 domain holds one) meets Gmail's
-  real DMARC verdict, so at worst a real `fail` reads as `none`, never a pass.
+  real DMARC verdict, so it can't forge a DMARC pass (at worst a real DMARC `fail` reads as `none`);
+  it can still add a `dkim=pass` or turn SPF into `none`, neither of which verifies a sender.
 - The grammar is strict (an allowlist): if Gmail starts writing something it doesn't accept (a new
   SPF, DKIM or DMARC result word, a trailing `;`), those emails lose their verdicts, unverified and
   never unsubscribed, until the grammar is widened. Every shape Gmail wrote on 400 recent production

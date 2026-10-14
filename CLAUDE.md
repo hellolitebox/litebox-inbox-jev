@@ -218,8 +218,8 @@ email bodies.
   `triage.record_attempt`. `run` and `unsubscribe-retry` (`unsubscribe_retry.retry_unsubscribes`)
   both do; `tests/test_safety_gates.py` runs the same scenarios through every path, so add a new
   path there.
-- Keep README.md, `categories.yaml` comments and `accounts.example.yaml` in sync with behaviour in
-  the same PR.
+- Keep README.md, `categories.yaml` comments, `accounts.example.yaml` and `docs/guide.md` (for what
+  it explains, e.g. the digest's sections) in sync with behaviour in the same PR.
 - Secrets live only in `.env`, `secrets/` and `accounts.yaml`, which are gitignored. Never log email
   bodies.
 - Schema changes: the project uses `create_all` with no migrations yet. A change to an existing
@@ -242,7 +242,12 @@ change to decision logic must, **in the same PR**:
   only one side, or when the doc's "**Test**:" name isn't the test's name;
 - add an ADR (`docs/decisions/NNNN-title.md`, plus the index) when the change is a design decision:
   a new rule or guard, a changed threshold or default, a trade-off between safety and coverage.
-  Supersede an old ADR instead of rewriting it.
+  Supersede an old ADR instead of rewriting it;
+- update [`docs/guide.md`](docs/guide.md), the plain-language guide for the inbox owner and
+  colleagues who aren't engineers, when the change alters something it explains (labels and what
+  happens to them, how sure Jev must be, the safety nets, how corrections are learned, the digest,
+  what is sent to Jev or stored). Keep its style: plain words, no code identifiers, file paths,
+  section numbers or `EX-NN` IDs.
 
 Decision logic means: `categories.yaml` (categories, actions, thresholds, criteria, archive group,
 needs_reply, tags, auto_rule), `policy.py`, `triage.py` (pipeline, `previous_contact`, user edits,

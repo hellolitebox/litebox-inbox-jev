@@ -145,7 +145,10 @@ to match (tables, numbers, flowcharts, "Known gaps"), that affected `EX-NN` exam
 outcome needs a new `EX-NN`), and that a design decision has an ADR in `docs/decisions/` (with the
 index updated). Read the changed doc sections against the code, not just the diff. Missing updates
 are a **major** finding; a stale or wrong statement in the spec is a finding like any other bug. A
-PR body saying "no behaviour change" must be borne out by the diff.
+PR body saying "no behaviour change" must be borne out by the diff. Also check `docs/guide.md`, the
+plain-language guide: a change that alters something it explains (labels and what happens to them,
+confidence bars, safety nets, learning from corrections, the digest, privacy) must update it in the
+same PR. A guide left stale, or a guide statement the code contradicts, is a **minor** finding.
 
 **Public Suffix List update** (CLAUDE.md and `/ship`, "PSL lane"): a PR that changes only
 `src/inbox_jev/public_suffix_list.dat` needs no spec update. Check that the diff is the list alone,

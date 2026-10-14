@@ -57,7 +57,8 @@ is to resolve every blocker, major and minor finding on the PR branch, plus any 
    defaults, or the `cli.py` commands `restore`, `reprocess`, `rules set`/`delete`,
    `unsubscribe-retry`), update `docs/how-it-decides.md`, the affected `EX-NN` examples and
    `tests/test_spec_examples.py` (a new rule or guard that changes an outcome gets a new `EX-NN`),
-   and the ADR in `docs/decisions/` if the fix changes a design decision, in the same push (see
+   the ADR in `docs/decisions/` if the fix changes a design decision, and `docs/guide.md` when the
+   change alters something it explains (keep its plain-language style), in the same push (see
    CLAUDE.md, "Decision logic docs").
 5. Make the checks green in the worktree's own venv, built from `uv.lock` exactly as CI does:
    ```
