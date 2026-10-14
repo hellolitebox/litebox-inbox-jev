@@ -133,7 +133,7 @@ def test_keep_rule_and_allowlist_ask_jev_for_flags_only(setup):
         assert (rows["3"].source, rows["3"].category) == ("allowlist", "important")
         # Flags-only answers never count toward an auto rule ("Internal": notification 0.99).
         assert s.query(SenderRule).filter_by(source="auto").count() == 0
-        text = digest.build(s, ctx.cfg, account.email, language=DigestLanguage.ES)
+        text = digest.build(s, ctx.cfg, account.email, language=DigestLanguage.ES, gmail=gmail)
     reply_section = text.split("Piden respuesta")[1]
     assert "50% off" in reply_section and "Internal" in reply_section
 

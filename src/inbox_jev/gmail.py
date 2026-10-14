@@ -7,12 +7,12 @@ import html
 import logging
 import os
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from email.message import EmailMessage as MimeMessage
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Self
+from typing import Any, Self, TypeVar
 
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
@@ -33,6 +33,8 @@ from .system_labels import INBOX
 
 log = logging.getLogger(__name__)
 
+_T = TypeVar("_T")
+
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.send",
@@ -40,7 +42,7 @@ SCOPES = [
 # Calls per batch HTTP request: Gmail accepts up to 100 but advises at most 50, since larger
 # batches are likely to trigger rate limiting.
 BATCH_SIZE = 50
-# Retries (exponential backoff with jitter) for a label check asked again outside its batch.
+# Retries (exponential backoff with jitter) for a call asked again outside its batch (`_get_one`).
 SINGLE_RETRIES = 3
 
 
@@ -189,6 +191,27 @@ def _to_email(msg: dict[str, Any], snippet: str, body: str) -> Email:
     )
 
 
+@dataclass(frozen=True)
+class ThreadMessage:
+    """One message of a thread as `Gmail.get_threads` reads it: no headers or body."""
+
+    id: str
+    label_ids: tuple[str, ...]
+    internal_date_ms: int
+
+
+def _label_ids(msg: dict[str, Any]) -> list[str]:
+    label_ids: list[str] = msg.get("labelIds", [])
+    return label_ids
+
+
+def _thread_messages(thread: dict[str, Any]) -> list[ThreadMessage]:
+    return [
+        ThreadMessage(m["id"], tuple(m.get("labelIds", ())), int(m.get("internalDate", 0)))
+        for m in thread.get("messages", [])
+    ]
+
+
 class Gmail:
     """One account's Gmail API client. Close it (`close`, or use it as a context manager) when
     the account's work ends: it holds the HTTP connections of the googleapiclient service."""
@@ -265,80 +288,111 @@ class Gmail:
     def get_label_ids(self, message_ids: Sequence[str]) -> dict[str, list[str] | None]:
         """Current labels of each message, or None for one that no longer exists (HTTP 404).
 
-        One batch HTTP request per BATCH_SIZE messages instead of one request each. A message
-        whose call fails otherwise (e.g. rate limited), alone in the batch or because the whole
-        batch request failed, is logged and asked again on its own, with backoff; if that fails
-        too, the error is raised and no later batch is sent.
+        Batched (`_batched_get`): one HTTP request per BATCH_SIZE messages.
         """
-        found: dict[str, list[str] | None] = {}
-        unique = list(dict.fromkeys(message_ids))  # a batch rejects duplicate request ids
+        return self._batched_get(message_ids, self._minimal_get, _label_ids, "label check")
+
+    def get_threads(self, thread_ids: Sequence[str]) -> dict[str, list[ThreadMessage] | None]:
+        """The messages (id, labels, date) of each thread, or None for one that no longer
+        exists (HTTP 404). Read-only, `format=minimal` (no headers or body).
+
+        Batched (`_batched_get`): one HTTP request per BATCH_SIZE threads.
+        """
+        return self._batched_get(thread_ids, self._minimal_thread, _thread_messages, "thread check")
+
+    def _batched_get(
+        self,
+        ids: Sequence[str],
+        request: Callable[[str], Any],
+        parse: Callable[[dict[str, Any]], _T],
+        what: str,
+    ) -> dict[str, _T | None]:
+        """`parse` of the response to `request(id)` for each id, or None for a 404.
+
+        One batch HTTP request per BATCH_SIZE ids instead of one request each. An id whose call
+        fails otherwise (e.g. rate limited), alone in the batch or because the whole batch
+        request failed, is logged and asked again on its own, with backoff; if that fails too,
+        the error is raised and no later batch is sent. `what` names the call in that log.
+        """
+        found: dict[str, _T | None] = {}
+        unique = list(dict.fromkeys(ids))  # a batch rejects duplicate request ids
         for start in range(0, len(unique), BATCH_SIZE):
             chunk = unique[start : start + BATCH_SIZE]
-            answers, failed = self._get_label_ids_batch(chunk)
+            answers, failed = self._batch(chunk, request, parse)
             found.update(answers)
             if failed:
                 log.warning(
-                    "batched label check failed: retrying one by one",
+                    "batched Gmail calls failed: retrying one by one",
                     extra={
+                        "call": what,
                         "failed": len(failed),
                         "error_types": sorted({type(exc).__name__ for exc in failed.values()}),
                     },
                 )
-            for message_id in chunk:
-                if message_id in failed:
-                    found[message_id] = self._get_label_ids_one(message_id)
+            for item_id in chunk:
+                if item_id in failed:
+                    found[item_id] = self._get_one(item_id, request, parse)
         return found
 
-    def _get_label_ids_batch(
-        self, message_ids: list[str]
-    ) -> tuple[dict[str, list[str] | None], dict[str, Exception]]:
-        """One batch request for `message_ids`: (answers, failures to ask again one by one).
+    def _batch(
+        self,
+        ids: list[str],
+        request: Callable[[str], Any],
+        parse: Callable[[dict[str, Any]], _T],
+    ) -> tuple[dict[str, _T | None], dict[str, Exception]]:
+        """One batch request for `ids`: (answers, failures to ask again one by one).
 
         If the batch request itself fails (HTTP error on the batch, transport error, malformed
-        reply), every message without an answer yet counts as failed with that error.
+        reply), every id without an answer yet counts as failed with that error.
         """
-        answers: dict[str, list[str] | None] = {}
+        answers: dict[str, _T | None] = {}
         failed: dict[str, Exception] = {}
 
         def collect(
             request_id: str, response: dict[str, Any] | None, exc: Exception | None
         ) -> None:
             if exc is None:
-                answers[request_id] = (response or {}).get("labelIds", [])
+                answers[request_id] = parse(response or {})
             elif is_not_found(exc):
                 answers[request_id] = None
             else:
                 failed[request_id] = exc
 
         batch = self._service.new_batch_http_request(callback=collect)
-        for message_id in message_ids:
-            batch.add(self._minimal_get(message_id), request_id=message_id)
+        for item_id in ids:
+            batch.add(request(item_id), request_id=item_id)
         try:
             batch.execute()
         except Exception as exc:
-            for message_id in message_ids:
-                if message_id not in answers:
-                    failed.setdefault(message_id, exc)
+            for item_id in ids:
+                if item_id not in answers:
+                    failed.setdefault(item_id, exc)
         return answers, failed
 
-    def _get_label_ids_one(self, message_id: str) -> list[str] | None:
-        """Current labels of one message, or None if it no longer exists.
+    @staticmethod
+    def _get_one(
+        item_id: str, request: Callable[[str], Any], parse: Callable[[dict[str, Any]], _T]
+    ) -> _T | None:
+        """`parse` of one call, or None if its resource no longer exists.
 
         googleapiclient retries a 429, a 5xx or a rate-limit 403 up to SINGLE_RETRIES times with
         exponential backoff; any other error, or one that outlasts the retries, is raised.
         """
         try:
-            msg = self._minimal_get(message_id).execute(num_retries=SINGLE_RETRIES)
+            response: dict[str, Any] = request(item_id).execute(num_retries=SINGLE_RETRIES)
         except Exception as exc:
             if is_not_found(exc):
                 return None
             raise
-        label_ids: list[str] = msg.get("labelIds", [])
-        return label_ids
+        return parse(response)
 
     def _minimal_get(self, message_id: str) -> Any:
         """The messages.get request for a message's id and labels only (not yet executed)."""
         return self._svc.messages().get(userId="me", id=message_id, format="minimal")
+
+    def _minimal_thread(self, thread_id: str) -> Any:
+        """The threads.get request for its messages' ids, labels and dates (not yet executed)."""
+        return self._svc.threads().get(userId="me", id=thread_id, format="minimal")
 
     def has_written_to(self, query: str, scans: DomainScans | None = None) -> bool:
         """Whether I wrote to `query`, an address or a domain. Cached for this object's life.

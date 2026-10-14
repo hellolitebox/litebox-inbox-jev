@@ -1,23 +1,46 @@
-"""Daily digest per account, sent as a Slack DM (or printed)."""
+"""Daily digest per account, sent as a Slack DM (or printed).
+
+It lists only what still needs the user: before listing an email it asks Gmail (read-only)
+whether it is still in the inbox, whether the user has replied in its thread since and, for the
+low-confidence count, whether it still has the review label.
+"""
 
 from __future__ import annotations
 
+import logging
+import re
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import timedelta
-from typing import TypedDict, TypeVar
+from typing import Protocol, TypedDict, TypeVar
+from urllib.parse import quote
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .config import Action, CategoriesConfig, DigestLanguage
+from .config import Action, CategoriesConfig, DigestLanguage, Mode
 from .db import MAX_ERROR_ATTEMPTS, Message, MessageStatus, Run, Unsubscribe, now
+from .gmail import ThreadMessage
+from .system_labels import INBOX, SENT
 from .unsubscribe import UnsubscribeStatus
+
+log = logging.getLogger(__name__)
 
 MAX_ITEMS = 15
 
 _T = TypeVar("_T")
+
+
+class ThreadReader(Protocol):
+    """What the digest reads from Gmail: `gmail.Gmail.get_threads` and `labels` (read-only)."""
+
+    def get_threads(
+        self, thread_ids: Sequence[str]
+    ) -> Mapping[str, Sequence[ThreadMessage] | None]: ...
+
+    def labels(self) -> Mapping[str, str]: ...
 
 
 class PluralForms(TypedDict):
@@ -42,6 +65,8 @@ class DigestMessages(TypedDict):
     header: str
     processed: PluralForms
     summary: str
+    handled: PluralForms
+    pending_check_failed: str
     nothing: str
     no_subject: str
     needs_reply: str
@@ -51,6 +76,8 @@ class DigestMessages(TypedDict):
     link_in_body: str
     unsubscribe_failed: str
     low_confidence: str
+    low_confidence_dry_run: str
+    see_in_gmail: str
     learned: str
     errors: str
     error_emails: PluralForms
@@ -69,6 +96,10 @@ MESSAGES: dict[DigestLanguage, DigestMessages] = {
         "header": "*📬 Inbox Jev — {account}* (last {hours}h, mode: {modes})",
         "processed": {"one": "{n} processed", "other": "{n} processed"},
         "summary": "{processed} — {summary} · to review: {low}",
+        "handled": {"one": "{n} already handled", "other": "{n} already handled"},
+        "pending_check_failed": (
+            "_Couldn't check Gmail for what is already handled, so everything is listed._"
+        ),
         "nothing": "nothing",
         "no_subject": "(no subject)",
         "needs_reply": "\n*⚡ Needs reply ({n})*",
@@ -77,8 +108,16 @@ MESSAGES: dict[DigestLanguage, DigestMessages] = {
         "link": "link",
         "link_in_body": "link in the body",
         "unsubscribe_failed": "\n*❗ Unsubscribe failed ({n})*",
-        "low_confidence": "\n*🤔 Low confidence ({n})* — left in the inbox with {label}",
-        "learned": "\n*🧠 Corrections learned ({n})*",
+        "low_confidence": (
+            "\n*🤔 Low confidence: {n}* from the last {hours}h still in the inbox with {label}"
+            " ({link})"
+        ),
+        "low_confidence_dry_run": (
+            "\n*🤔 Low confidence: {n}* from the last {hours}h still in the inbox"
+            " (dry run: not labeled)"
+        ),
+        "see_in_gmail": "see in Gmail",
+        "learned": "\n*🧠 Corrections learned: {n}*",
         "errors": "\n*⚠️ Errors*: {emails} ({gave_up} not retried again), {failed_runs}",
         "error_emails": {"one": "{n} email", "other": "{n} emails"},
         "failed_runs": {"one": "{n} failed run", "other": "{n} failed runs"},
@@ -94,6 +133,10 @@ MESSAGES: dict[DigestLanguage, DigestMessages] = {
         "header": "*📬 Inbox Jev — {account}* (últimas {hours}h, modo: {modes})",
         "processed": {"one": "{n} procesado", "other": "{n} procesados"},
         "summary": "{processed} — {summary} · a revisar: {low}",
+        "handled": {"one": "{n} ya resuelto", "other": "{n} ya resueltos"},
+        "pending_check_failed": (
+            "_No se pudo consultar Gmail para ver qué ya está resuelto: se lista todo._"
+        ),
         "nothing": "nada",
         "no_subject": "(sin asunto)",
         "needs_reply": "\n*⚡ Piden respuesta ({n})*",
@@ -102,8 +145,16 @@ MESSAGES: dict[DigestLanguage, DigestMessages] = {
         "link": "link",
         "link_in_body": "link en el cuerpo",
         "unsubscribe_failed": "\n*❗ Unsubscribe fallido ({n})*",
-        "low_confidence": "\n*🤔 Baja confianza ({n})* — quedaron en el Inbox con {label}",
-        "learned": "\n*🧠 Correcciones aprendidas ({n})*",
+        "low_confidence": (
+            "\n*🤔 Baja confianza: {n}* de las últimas {hours}h siguen en el Inbox con {label}"
+            " ({link})"
+        ),
+        "low_confidence_dry_run": (
+            "\n*🤔 Baja confianza: {n}* de las últimas {hours}h siguen en el Inbox"
+            " (dry run: sin etiqueta)"
+        ),
+        "see_in_gmail": "ver en Gmail",
+        "learned": "\n*🧠 Correcciones aprendidas: {n}*",
         "errors": "\n*⚠️ Errores*: {emails} ({gave_up} sin más reintentos), {failed_runs}",
         "error_emails": {"one": "{n} mail", "other": "{n} mails"},
         "failed_runs": {"one": "{n} corrida fallida", "other": "{n} corridas fallidas"},
@@ -126,6 +177,17 @@ def plural(forms: PluralForms, n: int) -> str:
 
 def gmail_link(account: str, gmail_id: str) -> str:
     return f"https://mail.google.com/mail/u/?authuser={account}#all/{gmail_id}"
+
+
+def gmail_search_link(account: str, query: str) -> str:
+    """A link to the Gmail search `query` in `account`'s mailbox."""
+    mailbox = quote(account, safe="@")
+    return f"https://mail.google.com/mail/u/{mailbox}/#search/{quote(query, safe='')}"
+
+
+def label_query(label: str) -> str:
+    """The Gmail search term for a label: Gmail writes `Jev/Review` as `label:jev-review`."""
+    return "label:" + re.sub(r"[\s/]+", "-", label.strip().lower())
 
 
 def esc(text: object, limit: int | None = None) -> str:
@@ -161,11 +223,16 @@ def build(
     hours: int = 24,
     *,
     language: DigestLanguage,
+    gmail: ThreadReader | None,
 ) -> str:
     """The digest text for `account` over the last `hours`, in `language`.
 
     `language` has no default on purpose: the account's `digest_language` is the only default,
     so a caller can't silently render a different language than the account's.
+
+    `gmail` is read to drop the emails already handled (`check_pending`); None (it couldn't be
+    opened) or a failed read lists them all, with a line saying so. Neither has a default, so
+    a caller can't skip the check by forgetting it.
     """
     t = MESSAGES[language]
     since = now() - timedelta(hours=hours)
@@ -180,33 +247,145 @@ def build(
         select(Unsubscribe).where(Unsubscribe.account == account, Unsubscribe.attempted_at >= since)
     ).all()
     runs = session.scalars(select(Run).where(Run.account == account, Run.started_at >= since)).all()
-    learned = session.scalars(
-        select(Message).where(
+    learned = session.scalar(
+        select(func.count())
+        .select_from(Message)
+        .where(
             Message.account == account,
             Message.corrected_category.is_not(None),
             Message.correction_checked_at >= since,
         )
-    ).all()
+    )
 
     modes = sorted({m.mode for m in done})
     low = [m for m in done if m.low_confidence]
     kept = _kept_on_purpose(cfg, done)
     listed = {id(m) for _, msgs in kept for m in msgs}
     reply = [m for m in done if _needs_reply(cfg, m) and id(m) not in listed]
+    pending = check_pending(
+        gmail, [*(m for _, msgs in kept for m in msgs), *reply], low, cfg.review_label
+    )
+
     out = [t["header"].format(account=account, hours=hours, modes=", ".join(modes) or "—")]
-    out += _summary(t, cfg, done, low)
+    out += _summary(t, cfg, done, low, pending)
     for label, msgs in kept:
-        out += _section(f"\n*🔔 {label} ({len(msgs)})*", msgs, lambda m: _line(t, account, m))
+        shown = pending.keep(msgs)
+        out += _section(f"\n*🔔 {label} ({len(shown)})*", shown, lambda m: _line(t, account, m))
+    reply = pending.keep(reply)
     out += _section(t["needs_reply"].format(n=len(reply)), reply, lambda m: _line(t, account, m))
     out += _unsubscribe_sections(t, unsubs)
-    out += _low_confidence(t, cfg, account, low)
-    out += _section(
-        t["learned"].format(n=len(learned)),
-        learned,
-        lambda m: f"• {esc(m.sender)}: {esc(m.category)} → {esc(m.corrected_category)}",
-    )
+    out += _low_confidence(t, cfg, account, hours, pending.keep_for_review(low))
+    if learned:
+        out.append(t["learned"].format(n=learned))
     out += _errors(t, account, errors, [r for r in runs if r.error])
     return "\n".join(out)
+
+
+@dataclass(frozen=True)
+class Pending:
+    """Which of the checked emails still need the user (`check_pending`).
+
+    `gmail_ids` are the ones still pending in their thread (`is_pending`), what the listed
+    sections keep; `review_ids` the low-confidence ones still left for review
+    (`is_left_for_review`), what the Low-confidence line counts. Both are None when the check
+    couldn't be made: then every email counts as pending.
+    """
+
+    gmail_ids: frozenset[str] | None
+    review_ids: frozenset[str] | None
+    handled: int = 0
+
+    @property
+    def failed(self) -> bool:
+        return self.gmail_ids is None
+
+    def keep(self, msgs: Sequence[Message]) -> list[Message]:
+        """`msgs` without the ones already handled (all of them when the check failed)."""
+        return _keep(msgs, self.gmail_ids)
+
+    def keep_for_review(self, low: Sequence[Message]) -> list[Message]:
+        """The low-confidence `low` still left for review (all of them when the check failed)."""
+        return _keep(low, self.review_ids)
+
+
+def _keep(msgs: Sequence[Message], ids: frozenset[str] | None) -> list[Message]:
+    return list(msgs) if ids is None else [m for m in msgs if m.gmail_id in ids]
+
+
+def check_pending(
+    gmail: ThreadReader | None,
+    listed: Sequence[Message],
+    low: Sequence[Message],
+    review_label: str,
+) -> Pending:
+    """Which of the emails the sections would list (`listed`) and of the low-confidence ones
+    the Low-confidence line would count (`low`) are still pending, from one batched read of
+    their threads (and one read of the label list, for `review_label`'s id, when a low-confidence
+    email should have it).
+
+    The review label only matters for the Low-confidence line: an email also listed elsewhere
+    (Needs reply) stays there until it leaves the inbox or is replied to. An email counts as
+    handled only when no section that would show it still does.
+
+    A failed read (token, Gmail API) doesn't fail the digest: it is logged and every email
+    counts as pending (`Pending.failed`), so the digest lists them as before.
+    """
+    unique = {m.gmail_id: m for m in (*listed, *low)}
+    if not unique:
+        return Pending(frozenset(), frozenset())
+    if gmail is None:
+        return Pending(None, None)
+    try:
+        threads = gmail.get_threads(sorted({m.thread_id for m in unique.values()}))
+        review_id = (
+            gmail.labels().get(review_label) if any(_labeled_for_review(m) for m in low) else None
+        )
+    except Exception as exc:  # any failure only costs the check, never the digest
+        log.warning(
+            "digest pending check failed: listing every email",
+            exc_info=True,
+            extra={"emails": len(unique), "error_type": type(exc).__name__},
+        )
+        return Pending(None, None)
+    ids = frozenset(i for i, m in unique.items() if is_pending(m, threads.get(m.thread_id)))
+    review_ids = frozenset(
+        m.gmail_id
+        for m in low
+        if is_left_for_review(m, threads.get(m.thread_id), review_label_id=review_id)
+    )
+    shown = (ids & {m.gmail_id for m in listed}) | review_ids
+    return Pending(ids, review_ids, handled=len(unique) - len(shown))
+
+
+def _own(m: Message, thread: Sequence[ThreadMessage] | None) -> ThreadMessage | None:
+    """`m` itself in its `thread`, or None when it was deleted."""
+    return next((x for x in thread or () if x.id == m.gmail_id), None)
+
+
+def is_pending(m: Message, thread: Sequence[ThreadMessage] | None) -> bool:
+    """Whether `m` still needs the user: it is still in the inbox and no message of its thread
+    that I sent is dated after it. A deleted email or thread is not pending."""
+    own = _own(m, thread)
+    if own is None or INBOX not in own.label_ids:
+        return False
+    return not any(
+        SENT in x.label_ids and x.internal_date_ms > own.internal_date_ms for x in thread or ()
+    )
+
+
+def is_left_for_review(
+    m: Message, thread: Sequence[ThreadMessage] | None, *, review_label_id: str | None
+) -> bool:
+    """Whether the low-confidence `m` is still left for review: it is pending (`is_pending`)
+    and, if it was labeled for review (`_labeled_for_review`), it still has that label
+    (`review_label_id`, None when the label doesn't exist): removing it accepts or corrects the
+    suggestion. It says nothing about a reply, so only the Low-confidence line uses it."""
+    if not is_pending(m, thread):
+        return False
+    own = _own(m, thread)
+    return not _labeled_for_review(m) or (
+        own is not None and review_label_id is not None and review_label_id in own.label_ids
+    )
 
 
 def _section(title: str, items: Sequence[_T], line: Callable[[_T], str]) -> list[str]:
@@ -215,15 +394,23 @@ def _section(title: str, items: Sequence[_T], line: Callable[[_T], str]) -> list
 
 
 def _summary(
-    t: DigestMessages, cfg: CategoriesConfig, done: list[Message], low: list[Message]
+    t: DigestMessages,
+    cfg: CategoriesConfig,
+    done: list[Message],
+    low: list[Message],
+    pending: Pending,
 ) -> list[str]:
-    """How many emails were processed, per category (low-confidence ones apart)."""
+    """How many emails were processed, per category (low-confidence ones apart), and how many
+    of the ones the digest would list were already handled (or that the check failed)."""
     counts = Counter(m.category for m in done if not m.low_confidence)
     summary = " · ".join(
         f"{cfg.by_key[k].label if k in cfg.by_key else k}: {n}" for k, n in counts.most_common()
     )
     processed = plural(t["processed"], len(done))
-    return [t["summary"].format(processed=processed, summary=summary or t["nothing"], low=len(low))]
+    line = t["summary"].format(processed=processed, summary=summary or t["nothing"], low=len(low))
+    if pending.handled:
+        line += " · " + plural(t["handled"], pending.handled)
+    return [line, t["pending_check_failed"]] if pending.failed else [line]
 
 
 def _kept_on_purpose(cfg: CategoriesConfig, done: list[Message]) -> list[tuple[str, list[Message]]]:
@@ -265,15 +452,31 @@ def _unsubscribe_sections(t: DigestMessages, unsubs: Sequence[Unsubscribe]) -> l
     ]
 
 
+def _labeled_for_review(m: Message) -> bool:
+    """Whether the pass that decided `m` gave it the review label: a low-confidence email in a
+    mode that labels (`dry_run` changes nothing in Gmail)."""
+    return bool(m.low_confidence) and m.mode != Mode.DRY_RUN
+
+
 def _low_confidence(
-    t: DigestMessages, cfg: CategoriesConfig, account: str, low: list[Message]
+    t: DigestMessages, cfg: CategoriesConfig, account: str, hours: int, low: list[Message]
 ) -> list[str]:
-    """Emails left in the inbox with the review label, with Jev's guess and its confidence."""
-    return _section(
-        t["low_confidence"].format(n=len(low), label=cfg.review_label),
-        low,
-        lambda m: _line(t, account, m, f" → {esc(m.category)}? ({(m.confidence or 0):.0%})"),
-    )
+    """How many pending low-confidence emails of the last `hours` still have the review label,
+    with a link to that Gmail search; and, apart, how many `dry_run` left unlabeled (no link:
+    the search would not find them)."""
+    labeled = sum(1 for m in low if _labeled_for_review(m))
+    out = []
+    if labeled:
+        query = f"{label_query(cfg.review_label)} in:inbox"
+        link = _link(gmail_search_link(account, query), t["see_in_gmail"])
+        out.append(
+            t["low_confidence"].format(
+                n=labeled, hours=hours, label=esc(cfg.review_label), link=link
+            )
+        )
+    if unlabeled := len(low) - labeled:
+        out.append(t["low_confidence_dry_run"].format(n=unlabeled, hours=hours))
+    return out
 
 
 def _errors(

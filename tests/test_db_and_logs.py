@@ -97,7 +97,7 @@ def test_make_engine_adds_missing_columns(tmp_path, engines):
         assert msg.decided_labels is None
         # Pre-column rows fall back to the needs_reply score in the digest.
         cfg = load_categories(ROOT / "categories.yaml")
-        out = build(s, cfg, "me@acme.com", hours=10_000, language=DigestLanguage.ES)
+        out = build(s, cfg, "me@acme.com", hours=10_000, language=DigestLanguage.ES, gmail=None)
     assert "Piden respuesta (1)" in out and "Old proposal" in out
 
 

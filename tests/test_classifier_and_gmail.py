@@ -16,7 +16,14 @@ from inbox_jev.classifier import (
     build_questions,
     build_state,
 )
-from inbox_jev.gmail import BATCH_SIZE, SINGLE_RETRIES, Email, Gmail, is_not_found
+from inbox_jev.gmail import (
+    BATCH_SIZE,
+    SINGLE_RETRIES,
+    Email,
+    Gmail,
+    ThreadMessage,
+    is_not_found,
+)
 from inbox_jev.sent_scan import (
     NEVER_VERDICT_TTL,
     SENT_ADDRESS_READS,
@@ -778,3 +785,53 @@ def test_gmail_closes_its_service_connections(monkeypatch):
     assert closed == [True]
     gmail.close()  # again: harmless
     assert closed == [True, True]
+
+
+class _FakeThreadService(_FakeGmailService):
+    """`_FakeGmailService` answering threads.get from `threads` (thread id -> messages)."""
+
+    def __init__(self, threads, **kwargs):
+        super().__init__(**kwargs)
+        self.threads_by_id = threads
+
+    def threads(self):
+        return self
+
+    def get(self, userId, id, format):
+        assert (userId, format) == ("me", "minimal")
+        return _FakeGet(self, id)
+
+    def answer(self, thread_id):
+        return {"id": thread_id, "messages": self.threads_by_id.get(thread_id, [])}
+
+
+def test_get_threads_batches_and_reads_ids_labels_and_dates(monkeypatch):
+    ids = [f"t{i}" for i in range(60)]
+    svc = _FakeThreadService(
+        threads={
+            "t1": [
+                {"id": "m1", "labelIds": ["INBOX"], "internalDate": "100"},
+                {"id": "m2", "labelIds": ["SENT"], "internalDate": "200"},
+                {"id": "m3", "internalDate": "300"},  # no labels at all
+            ]
+        },
+        batch_errors={"t5": HttpError(404), "t7": HttpError(429)},
+    )
+    result = _gmail(monkeypatch, svc).get_threads([*ids, "t1"])  # a repeat is asked once
+    assert [len(b) for b in svc.batches] == [BATCH_SIZE, 10]
+    assert svc.singles == ["t7"]  # a rate-limited call is asked again on its own
+    assert result["t1"] == [
+        ThreadMessage("m1", ("INBOX",), 100),
+        ThreadMessage("m2", ("SENT",), 200),
+        ThreadMessage("m3", (), 300),
+    ]
+    assert result["t5"] is None  # deleted in Gmail
+    assert result["t0"] == [] and result["t7"] == [] and len(result) == 60
+
+
+def test_get_threads_raises_when_the_single_retry_fails_too(monkeypatch):
+    svc = _FakeThreadService(
+        threads={}, batch_errors={"t0": HttpError(503)}, single_errors={"t0": HttpError(401)}
+    )
+    with pytest.raises(HttpError):
+        _gmail(monkeypatch, svc).get_threads(["t0", "t1"])

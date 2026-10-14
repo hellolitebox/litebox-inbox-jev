@@ -41,7 +41,9 @@ def _runs(ctx):
 
 def _digest(ctx, account, hours=24):
     with ctx.sessions() as s:
-        return digest.build(s, ctx.cfg, account.email, hours, language=DigestLanguage.ES)
+        return digest.build(
+            s, ctx.cfg, account.email, hours, language=DigestLanguage.ES, gmail=None
+        )
 
 
 def test_expired_token_is_recorded_on_the_run_and_raised(triage_setup, monkeypatch):

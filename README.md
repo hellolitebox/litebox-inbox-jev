@@ -304,10 +304,22 @@ When a PR changes `deploy/systemd/`, copy the units and `daemon-reload` again af
 
 ## Daily digest
 
-One Slack DM per account (`slack_user_id`), by default at 08:00. It lists: totals per category and
-how many are in Review; one section per keep category other than `important` (e.g. `Jev/Action`);
-emails that need a reply; unsubscribes done, pending a manual click, or failed; low-confidence
-emails; corrections learned; and errors. Errors are failed runs (identical ones grouped, e.g. an
+One Slack DM per account (`slack_user_id`), by default at 08:00. It lists only what still needs you.
+Before listing an email it reads its Gmail thread (read-only, one batched call for all of them): an
+email no longer in the inbox (archived, deleted) or with a message you sent in its thread dated
+after it (you replied) is dropped. A low-confidence email without the review label any more (you
+accepted or corrected the suggestion) leaves the low-confidence count, but stays under Needs reply
+if it is there and you haven't replied. The totals line says how many emails no section shows any
+more ("4 already handled"). If that read fails (token, Gmail API), the digest is still sent, listing
+them all, with a line saying the check failed.
+
+It shows: totals per category, how many are in Review and how many were already handled; one section
+per keep category other than `important` (e.g. `Jev/Action`) and the emails that need a reply,
+pending ones only (at most 15 per section); unsubscribes done, pending a manual click (with its
+link), or failed, in full; one line with how many of the period's low-confidence emails are still in
+the inbox with the review label, linking to the Gmail search `label:jev-review in:inbox` (which also
+shows older ones), and one without a link for those a `dry_run` pass left unlabeled; how many
+corrections were learned; and errors. Errors are failed runs (identical ones grouped, e.g. an
 expired Gmail token, with the fix: `run inbox-jev auth add EMAIL`, or "Jev unavailable") and emails
 that stopped being retried. An email that fails is retried with a backoff (5, 10, 20 … minutes) and
 given up after 8 failures, about 10.5 hours (at once when Jev refuses that email with a 4xx; when
@@ -315,7 +327,8 @@ Jev refuses two emails in a row the same way, the run fails and each counts an o
 `inbox-jev retry-errors` retries them again. Failed emails are listed by subject and sender
 (details: [docs/how-it-decides.md §1](docs/how-it-decides.md#1-the-pass-over-an-inbox)). Everything
 taken from an email is escaped for Slack, so a subject can't mention `@channel` or fake a link.
-Preview it with `inbox-jev digest --dry-print`.
+Preview it with `inbox-jev digest --dry-print` (it reads Gmail too, read-only, for the pending
+check).
 
 The digest's language is set per account with `digest_language` in `accounts.yaml`: `en` (default)
 or `es`; any other value is rejected when the file is loaded. Category and label names come from

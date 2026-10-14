@@ -167,7 +167,7 @@ def test_ex02_payment_approval_stays_with_action_label(spec):
     assert (row.category, row.archived, row.low_confidence) == ("action_required", False, False)
     with ctx.sessions() as s:
         assert s.query(SenderRule).count() == 0  # 0.93 < 0.95 and a keep signal
-        text = digest.build(s, ctx.cfg, account.email, language=DigestLanguage.ES)
+        text = digest.build(s, ctx.cfg, account.email, language=DigestLanguage.ES, gmail=gmail)
     assert "Jev/Action (1)" in text and text.count("Approve payment to Acme") == 1
 
 
@@ -546,7 +546,9 @@ def test_ex13_failing_email_backs_off_then_gives_up(spec):
     assert ctx.classifier.calls == calls
     assert not [m for m in gmail.modified if m[0] == "1"]  # untouched in Gmail
     with ctx.sessions() as s:
-        text = digest.build(s, ctx.cfg, account.email, hours=48, language=DigestLanguage.ES)
+        text = digest.build(
+            s, ctx.cfg, account.email, hours=48, language=DigestLanguage.ES, gmail=gmail
+        )
     assert "Invoice 7" in text.split("Sin más reintentos")[1]
 
     ctx.classifier.answers["Invoice 7"] = answer("transactional", transactional=0.95)
@@ -626,7 +628,7 @@ def test_ex15_keep_rule_still_gets_needs_reply(spec):
     assert (row.source, row.category, row.confidence) == ("rule", "important", 1.0)
     with ctx.sessions() as s:
         assert s.query(SenderRule).count() == 2  # the answer counted toward nothing
-        text = digest.build(s, ctx.cfg, account.email, language=DigestLanguage.ES)
+        text = digest.build(s, ctx.cfg, account.email, language=DigestLanguage.ES, gmail=gmail)
     assert "Signed contract by Friday?" in text.split("Piden respuesta")[1]
 
 
@@ -794,7 +796,7 @@ def test_ex21_revoked_jev_key_stops_jev_but_not_rules(spec):
     assert (lea.source, lea.category, lea.needs_reply) == ("allowlist", "important", None)
     assert (issue.source, issue.archived) == ("rule", True)
     with ctx.sessions() as s:
-        text = digest.build(s, ctx.cfg, account.email, language=DigestLanguage.ES)
+        text = digest.build(s, ctx.cfg, account.email, language=DigestLanguage.ES, gmail=gmail)
     assert "1 corrida fallida" in text and "TYPESAFE_API_KEY" in text
 
     jev.error = None  # the key is fixed: the next run decides the emails that waited
@@ -874,7 +876,7 @@ def test_ex23_jev_refuses_one_email(spec):
     triage.run_account(ctx, account, Mode.ACT)
     assert jev.calls == calls  # never retried by itself
     with ctx.sessions() as s:
-        text = digest.build(s, ctx.cfg, account.email, language=DigestLanguage.ES)
+        text = digest.build(s, ctx.cfg, account.email, language=DigestLanguage.ES, gmail=gmail)
     gave_up = text.split("Sin más reintentos")[1]
     assert "#all/1|Invoice 7> — billing@vendor.example" in gave_up  # stored though Jev failed
     assert "TypeSafeUnprocessableEntityError (HTTP 422" in gave_up

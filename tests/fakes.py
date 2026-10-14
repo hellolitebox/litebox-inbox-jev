@@ -15,12 +15,12 @@ import pytest
 from sqlalchemy.orm import Session
 from typesafe_sdk import TypeSafeAPIError
 
-from inbox_jev import corrections, labels, triage
+from inbox_jev import corrections, digest, labels, triage
 from inbox_jev.classification import Classification
 from inbox_jev.classifier import JevError, JevState
 from inbox_jev.config import Account, Mode
 from inbox_jev.db import Message, MessageStatus, Unsubscribe
-from inbox_jev.gmail import Email, Gmail
+from inbox_jev.gmail import Email, Gmail, ThreadMessage
 from inbox_jev.policy import DecisionSource
 from inbox_jev.sent_scan import DomainScans, SentMail
 from inbox_jev.system_labels import INBOX, SPAM
@@ -48,7 +48,10 @@ class FakeGmail:
         self.written_queries: list[str] = []
         self.header_errors: dict[str, Exception] = {}
         self.label_batches: list[list[str]] = []
+        self.thread_batches: list[list[str]] = []
+        self.threads_error: Exception | None = None  # `get_threads` raises it
         self.closes = 0  # `close` calls: whoever opened the client must close it
+        self.label_reads = 0  # `labels` calls
         self._labels = {"INBOX": "INBOX", "SPAM": "SPAM"}
 
     def ensure_labels(self, names: list[str]) -> dict[str, str]:
@@ -57,6 +60,7 @@ class FakeGmail:
         return self._labels
 
     def labels(self) -> dict[str, str]:
+        self.label_reads += 1
         return self._labels
 
     def list_inbox_ids(self, lookback: str, limit: int) -> list[str]:
@@ -76,6 +80,18 @@ class FakeGmail:
     def get_label_ids(self, message_ids: Sequence[str]) -> dict[str, list[str] | None]:
         self.label_batches.append(list(message_ids))
         return {i: self.emails[i].label_ids if i in self.emails else None for i in message_ids}
+
+    def get_threads(self, thread_ids: Sequence[str]) -> dict[str, list[ThreadMessage] | None]:
+        """Each thread's emails among `emails` (None for a thread with none, as a 404)."""
+        self.thread_batches.append(list(thread_ids))
+        if self.threads_error is not None:
+            raise self.threads_error
+        threads: dict[str, list[ThreadMessage] | None] = dict.fromkeys(thread_ids)
+        for e in self.emails.values():
+            if e.thread_id in threads:
+                message = ThreadMessage(e.id, tuple(e.label_ids), e.internal_date_ms)
+                threads[e.thread_id] = [*(threads[e.thread_id] or []), message]
+        return threads
 
     def modify(self, message_id: str, add: list[str], remove: list[str]) -> None:
         self.modified.append((message_id, add, remove))
@@ -380,7 +396,7 @@ if TYPE_CHECKING:
     def _conforms(gmail: Gmail, fake: FakeGmail, fake_labels: FakeLabels) -> None:
         """Never run: mypy checks that `gmail.Gmail` and the fakes satisfy every Protocol they
         stand in for (`triage.GmailApi`, `corrections.LabelReader`, `labels.LabelApi`,
-        `sent_scan.SentMail`)."""
+        `sent_scan.SentMail`, `digest.ThreadReader`)."""
         _gmail_api: triage.GmailApi = gmail
         _gmail_sent_mail: SentMail = gmail
         _gmail_reader: corrections.LabelReader = gmail
@@ -388,3 +404,5 @@ if TYPE_CHECKING:
         _fake_api: triage.GmailApi = fake
         _fake_reader: corrections.LabelReader = fake
         _fake_label_api: labels.LabelApi = fake_labels
+        _gmail_threads: digest.ThreadReader = gmail
+        _fake_threads: digest.ThreadReader = fake

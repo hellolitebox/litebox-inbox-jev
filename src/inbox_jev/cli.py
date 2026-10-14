@@ -5,8 +5,8 @@ from __future__ import annotations
 import logging
 import os
 import re
-from collections.abc import Callable
-from contextlib import closing
+from collections.abc import Callable, Iterator
+from contextlib import closing, contextmanager
 from datetime import timedelta
 from functools import partial
 from typing import Annotated
@@ -225,6 +225,26 @@ def run(
         _each_account(accounts, "account run", run_one, logs_its_failures=True)
 
 
+@contextmanager
+def _digest_gmail(s: Settings, email: str) -> Iterator[gmail_mod.Gmail | None]:
+    """The account's Gmail client for the digest's pending check (closed on exit), or None when
+    it can't be opened (e.g. an expired token): the digest is still sent, listing everything."""
+    try:
+        client = gmail_mod.connect(s.google_tokens_dir, email)
+    except Exception as exc:  # the token failing only costs the pending check
+        log.warning(
+            "digest: Gmail unavailable, pending check skipped",
+            exc_info=True,
+            extra={"account": email, "error_type": type(exc).__name__},
+        )
+        client = None
+    if client is None:
+        yield None
+        return
+    with closing(client):
+        yield client
+
+
 @app.command()
 def digest(
     account: AccountOpt = None,
@@ -238,9 +258,9 @@ def digest(
     with open_sessions(s.database_url) as sessions:
 
         def send(acc: Account) -> None:
-            with sessions() as session:
+            with _digest_gmail(s, acc.email) as gmail, sessions() as session:
                 text = digest_mod.build(
-                    session, cfg, acc.email, hours, language=acc.digest_language
+                    session, cfg, acc.email, hours, language=acc.digest_language, gmail=gmail
                 )
             if dry_print or not (s.slack_bot_token and acc.slack_user_id):
                 typer.echo(text + "\n")
