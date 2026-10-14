@@ -451,6 +451,7 @@ class Checker:
             *(["needs_reply"] if cfg.needs_reply.label in decision.add_labels else []),
             *(["stale_rule"] if checked.stale_rule else []),
             *(["flags_failed"] if checked.flags_failed else []),
+            *([f"calendar={email.calendar_method}"] if email.calendar_method else []),
         ]
         acts = self.account.act_categories
         if acts is not None and decision.category not in acts:

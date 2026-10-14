@@ -35,9 +35,17 @@ categories:
       client-portal service, or fix or renew something before a deadline. Also a new
       submission from a form on my or my company's own website or landing page (a lead, a
       contact, quote or demo request) relayed by a form or CRM tool such as HubSpot, Typeform,
-      Webflow, Jotform or Google Forms: someone is waiting for my reply. Not receipts,
-      reminders of things already done, FYI alerts, held-spam reports, surveys, feedback or
-      review requests, or promotional calls to action.
+      Webflow, Jotform or Google Forms: someone is waiting for my reply. Also a meeting that
+      someone booked, rescheduled or cancelled with me through a scheduling link or booking
+      page (HubSpot Meetings "You've been booked by", Calendly, Cal.com, Chili Piper, Google
+      Calendar appointment schedules): someone expects me at that time. Also a calendar
+      invitation, update or cancellation that a person sent me from their own calendar (Google
+      Calendar, Outlook): it waits on my RSVP or changes my day; so is a response to an
+      invitation I sent that proposes a new time or carries a note asking me something. Not
+      receipts, reminders of things already done or of meetings already in my calendar, daily
+      agendas, a plain response to an invitation I sent (Accepted, Declined, Tentative, "has
+      accepted this invitation"), FYI alerts, held-spam reports, surveys, feedback or review
+      requests, or promotional calls to action.
     action: keep
     min_confidence: 0.0
 
@@ -45,8 +53,11 @@ categories:
     label: Jev/Transactional
     criteria: >-
       Automated record of something I did or bought, with nothing left for me to do: receipts,
-      paid invoices, payment or order confirmations, bookings, shipping updates, password
-      resets, verification codes, copies of documents I already signed or filed.
+      paid invoices, payment or order confirmations, confirmations of bookings and reservations
+      made by me or for me (travel, hotels, restaurants, an appointment with a provider),
+      shipping updates, password resets, verification codes, copies of documents I already
+      signed or filed. Not a meeting someone booked with me through my scheduling link, which is
+      action_required.
     action: archive
     min_confidence: 0.80
 
@@ -59,7 +70,14 @@ categories:
       Groups "Moderator's spam report"). Nothing for me to do. This includes form and CRM
       tools' dashboards, reports, deal or pipeline updates and account notices, but not a new
       submission from a form on my own website or landing page (a lead or contact request),
-      which is action_required.
+      which is action_required. It also includes calendar and scheduling tools' daily agendas,
+      reminders of meetings already in my calendar ("starts in 10 minutes") and account
+      notices, but not a meeting someone booked, rescheduled or cancelled with me through a
+      scheduling link, nor an invitation, update or cancellation a person sent me from their own
+      calendar, which are action_required. It includes a plain response to an invitation I sent
+      ("Accepted: …", "Declined: …", "Tentative: …", "<name> has accepted this invitation", from
+      Google Calendar or Outlook): nothing left for me to do, but not one that proposes a new
+      time or carries a note asking me something, which is action_required.
     action: archive
     min_confidence: 0.80
 
@@ -143,6 +161,10 @@ needs_reply:
     an expiring document, secure my account), or a lead or contact request submitted through a
     form on my own website. No: company or bulk mail (surveys, feedback,
     ratings or reviews, promotions, webinars or events), even if it asks me to reply or click,
+    a scheduling tool's notice that someone booked, moved or cancelled a meeting with me
+    (already confirmed: I only attend), a calendar invitation, update or cancellation, or a
+    response proposing a new time (I answer it in my calendar, not by email) unless it also
+    asks me a personal question,
     a conversation between other people that isn't addressed to me, and phishing.
   threshold: 0.7
 

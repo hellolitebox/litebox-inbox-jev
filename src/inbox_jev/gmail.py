@@ -21,7 +21,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 from . import signals
-from .body import extract_body, extract_link_domains
+from .body import calendar_method, extract_body, extract_link_domains
 from .sent_scan import (
     RECIPIENT_HEADERS,
     DomainScans,
@@ -168,6 +168,9 @@ class Email:
     # Domains the body's links point to (`body.extract_link_domains`); empty for a header-only
     # read (`Gmail.get_headers`).
     link_domains: list[str] = field(default_factory=list)
+    # The iTIP method of its calendar part (`body.calendar_method`: "REPLY" for a response to an
+    # invitation, "REQUEST" for one...), None for any other email and for a header-only read.
+    calendar_method: str | None = None
 
     def header(self, name: str) -> str:
         return signals.first_header(self.headers, name.lower()) or ""
@@ -179,7 +182,11 @@ class Email:
 
 
 def _to_email(
-    msg: dict[str, Any], snippet: str, body: str, link_domains: list[str] | None = None
+    msg: dict[str, Any],
+    snippet: str,
+    body: str,
+    link_domains: list[str] | None = None,
+    calendar: str | None = None,
 ) -> Email:
     """An `Email` from a messages.get response; its headers keyed by lowercased name."""
     headers: dict[str, list[str]] = {}
@@ -194,6 +201,7 @@ def _to_email(
         body=body,
         internal_date_ms=int(msg.get("internalDate", 0)),
         link_domains=link_domains or [],
+        calendar_method=calendar,
     )
 
 
@@ -279,6 +287,7 @@ class Gmail:
             snippet=html.unescape(msg.get("snippet", "")),
             body=extract_body(payload),
             link_domains=extract_link_domains(payload),
+            calendar=calendar_method(payload),
         )
 
     def get_headers(self, message_id: str, names: list[str], num_retries: int = 0) -> Email:

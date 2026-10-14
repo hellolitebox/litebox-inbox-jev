@@ -645,7 +645,15 @@ def process(p: AccountPass, message_id: str) -> Message:
         msg = _upsert_message(session, account.email, email, sig, prev)
         _apply_labels(p.gmail, message_id, msg, p.label_ids, actions)
         _store_outcome(msg, mode, inputs.classification, decision, actions)
-        _learn_auto_rule(p, sig, inputs, decision, known, counted_before=counted_before)
+        _learn_auto_rule(
+            p,
+            sig,
+            inputs,
+            decision,
+            known,
+            counted_before=counted_before,
+            calendar=email.calendar_method is not None,
+        )
         if (
             actions.unsubscribe
             and not p.unsub_budget.exhausted
@@ -822,6 +830,7 @@ def _learn_auto_rule(
     known: rules.SenderRules,
     *,
     counted_before: bool,
+    calendar: bool,
 ) -> None:
     """Count Jev's decision toward an auto rule for the sender (`rules.record_auto`).
 
@@ -831,7 +840,8 @@ def _learn_auto_rule(
     without Jev (and act) as soon as the mode is label or act. An email Jev's answer was already
     learned from (`counted_before`: processed again in a stronger mode, or after `reprocess`)
     adds no hit: an auto rule needs that many different emails. Its new answer can still reset a
-    pending rule. `known` is the sender's rules `process` read for this email.
+    pending rule. `known` is the sender's rules `process` read for this email. `calendar`: the
+    email is a calendar message (`Email.calendar_method`), which never counts.
     """
     classification = inputs.classification
     if (
@@ -850,6 +860,7 @@ def _learn_auto_rule(
             inputs.contact,
             count=not counted_before,
             known=known,
+            calendar=calendar,
         )
 
 

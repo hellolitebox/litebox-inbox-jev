@@ -23,6 +23,7 @@ from fakes import (
     JevFails,
     SentMailService,
     age_errors,
+    calendar_payload,
     email,
     gmail_factory,
     jev_http_error,
@@ -37,7 +38,7 @@ from typesafe_sdk import (
 
 from inbox_jev import digest, jev_guard, rules, scan_rows, triage
 from inbox_jev import unsubscribe as unsub
-from inbox_jev.body import extract_body, extract_link_domains
+from inbox_jev.body import calendar_method, extract_body, extract_link_domains
 from inbox_jev.classification import Classification, PreviousContact
 from inbox_jev.classifier import build_state
 from inbox_jev.config import Account, DigestLanguage, Mode, Settings
@@ -1771,3 +1772,121 @@ def test_ex45_a_sender_decided_per_email_is_unsubscribed_only_on_a_manual_rule(s
     assert gmail.sent == ["u@vendor.example"]
     with ctx.sessions() as s:
         assert [u.list_key for u in s.query(Unsubscribe)] == ["vendor.example"]
+
+
+# --- EX-46 -----------------------------------------------------------------------------------
+
+
+def test_ex46_a_meeting_booked_through_a_scheduling_link_stays_in_the_inbox(spec):
+    """EX-46 (docs/how-it-decides.md §5, §3.1 categories, §3.2 needs reply, ADR 0046)."""
+    ctx, gmail, account = spec
+    tool = "Scheduler <noreply@meetings.scheduler.example>"
+    booked = "You've been booked by: Ana Diaz ana@client.example"
+    canceled = "Canceled: Intro call with Ana Diaz"
+    reminder = "Reminder: Intro call with Ana Diaz starts in 10 minutes"
+    invitation = "Invitation: Weekly sync @ Wed 10am - 10:30am"
+    accepted = "Accepted: Ana Diaz and me + 1 @ Thu 3pm - 3:30pm"
+    new_time = "New time proposed: Weekly sync @ Wed 10am - 10:30am"
+    colleague = "Bea Ruiz <bea@partner.example>"
+    gmail.emails = {
+        "1": email("1", tool, booked),
+        "2": email("2", tool, canceled),
+        "3": email("3", tool, reminder),
+        "4": email("4", colleague, invitation),
+        "5": email("5", "Ana Diaz <ana@client.example>", accepted),
+        "6": email("6", colleague, new_time),
+    }
+    ctx.classifier.answers[booked] = answer(
+        "action_required", needs_reply=0.20, action_required=0.90, notification=0.08
+    )
+    ctx.classifier.answers[canceled] = answer(
+        "action_required", needs_reply=0.15, action_required=0.86, notification=0.12
+    )
+    ctx.classifier.answers[reminder] = answer(
+        "notification", notification=0.96, action_required=0.03
+    )
+    ctx.classifier.answers[invitation] = answer(
+        "action_required", needs_reply=0.25, action_required=0.82, notification=0.10
+    )
+    ctx.classifier.answers[accepted] = answer(
+        "notification", notification=0.93, action_required=0.05
+    )
+    ctx.classifier.answers[new_time] = answer(
+        "action_required", needs_reply=0.30, action_required=0.84, notification=0.12
+    )
+    triage.run_account(ctx, account, Mode.ACT)
+
+    # booked, cancelled, a person's invitation and a proposed new time: kept as an action,
+    # no Needs Reply
+    for gmail_id in ("1", "2", "4", "6"):
+        row = _row(ctx, gmail_id)
+        assert (row.category, row.archived) == ("action_required", False)
+        labels = gmail.emails[gmail_id].label_ids
+        assert "INBOX" in labels and "Label_Jev/Action" in labels
+        assert "Label_Jev/Needs Reply" not in labels
+    # a reminder of a meeting already in the calendar, and a plain "Accepted:" response to an
+    # invitation I sent: archived
+    for gmail_id in ("3", "5"):
+        row = _row(ctx, gmail_id)
+        assert (row.category, row.archived) == ("notification", True)
+        labels = gmail.emails[gmail_id].label_ids
+        assert "INBOX" not in labels and "Label_Jev/Notifications" in labels
+
+    # The criteria tell Jev that a booking or a person's invitation needs me, that reminders
+    # don't, that a booking made for me is a record, and that neither waits for an email reply.
+    action = ctx.cfg.by_key["action_required"].criteria
+    assert "booked, rescheduled or cancelled with me through a scheduling link" in action
+    assert "invitation, update or cancellation that a person sent me" in action
+    assert "reminders of things already done or of meetings already in my calendar" in action
+    assert "a plain response to an invitation I sent (Accepted, Declined, Tentative" in action
+    assert "invitation I sent that proposes a new time or carries a note asking me" in action
+    notification = ctx.cfg.by_key["notification"].criteria
+    assert "reminders of meetings already in my calendar" in notification
+    assert "but not a meeting someone booked, rescheduled or cancelled with me" in notification
+    assert "nor an invitation, update or cancellation a person sent me" in notification
+    assert "It includes a plain response to an invitation I sent" in notification
+    assert "not one that proposes a new time or carries a note asking me something" in notification
+    transactional = ctx.cfg.by_key["transactional"].criteria
+    assert "bookings and reservations made by me or for me" in transactional
+    assert "Not a meeting someone booked with me through my scheduling link" in transactional
+    question = ctx.cfg.needs_reply.question
+    assert "booked, moved or cancelled a meeting with me" in question
+    assert "a calendar invitation, update or cancellation, or a" in question
+    assert "response proposing a new time (I answer it in my calendar" in question
+
+
+# --- EX-47 -----------------------------------------------------------------------------------
+
+
+def test_ex47_rsvp_responses_from_a_person_never_teach_a_rule_on_them(spec):
+    """EX-47 (docs/how-it-decides.md §5, §3.5 automatic rules, §4.6, ADR 0047)."""
+    ctx, gmail, account = spec
+    ana = "Ana Diaz <ana@client.example>"
+    responses = {
+        "1": "Accepted: Kickoff @ Mon 10am",
+        "2": "Accepted: Review @ Tue 3pm",
+        "3": "Accepted: Retro @ Fri 4pm",
+    }
+    for gmail_id, subject in responses.items():
+        rsvp = email(gmail_id, ana, subject)
+        # As `Gmail.get` reads it: the iTIP part of Google Calendar's response
+        rsvp.calendar_method = calendar_method(calendar_payload("REPLY", subject))
+        gmail.emails[gmail_id] = rsvp
+        ctx.classifier.answers[subject] = answer(
+            "notification", notification=0.99, important=0.003, action_required=0.002
+        )
+    triage.run_account(ctx, account, Mode.ACT)
+
+    for gmail_id in responses:
+        row = _row(ctx, gmail_id)
+        assert (row.category, row.archived) == ("notification", True)
+    with ctx.sessions() as s:
+        assert s.query(SenderRule).filter_by(sender_key="ana@client.example").count() == 0
+
+    # Her next real email goes to Jev and stays
+    gmail.emails["4"] = email("4", ana, "Contract question")
+    ctx.classifier.answers["Contract question"] = answer("important", important=0.97)
+    triage.run_account(ctx, account, Mode.ACT)
+    row = _row(ctx, "4")
+    assert (row.source, row.category, row.archived) == ("jev", "important", False)
+    assert "INBOX" in gmail.emails["4"].label_ids

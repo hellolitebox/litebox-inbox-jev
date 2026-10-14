@@ -50,6 +50,26 @@ def test_jev_failure_prints_a_safe_description_and_goes_on(cfg, account, make_se
     assert gmail.modified == [] and gmail.sent == []  # read-only, as ever
 
 
+def test_report_shows_the_calendar_method(cfg, account, make_sessions, capsys):
+    """A real-mail check can see which emails are calendar messages (kept out of auto rules,
+    ADR 0047)."""
+    rsvp = email("1", "Ana <ana@client.example>", "Accepted: Kickoff")
+    rsvp.calendar_method = "REPLY"
+    gmail = FakeGmail([rsvp, email("2", "Bob <bob@else.org>", "Lunch")])
+    jev = FakeClassifier(
+        {
+            "Accepted: Kickoff": make_classification("notification", 0.99),
+            "Lunch": make_classification("important", 0.9),
+        }
+    )
+    with make_sessions("sqlite:///:memory:")() as session:
+        Checker(session, gmail, jev, cfg, account, Mode.ACT, body_chars=3000).run(["1", "2"])
+
+    lines = capsys.readouterr().out.splitlines()
+    assert " calendar=REPLY]" in lines[0]
+    assert "calendar=" not in lines[2]
+
+
 def _with_rules(sessions, account):
     """`sessions` with a keep rule (ann@keep.org), a cold_outreach rule (bob@agency.io: spares
     known contacts, so the sent-mail search can veto its unsubscribe) and a marketing rule

@@ -10,6 +10,7 @@ import re
 import unicodedata
 from collections import Counter
 from collections.abc import Iterator
+from email.message import Message
 from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import unquote, urlsplit
@@ -280,3 +281,42 @@ def extract_link_domains(payload: dict[str, Any], limit: int = LINK_DOMAINS_MAX)
             urls += [u.rstrip(".,;:!?") for u in _TEXT_URL.findall(text)]
     counts = Counter(d for d in map(link_domain, urls) if d)
     return [domain for domain, _ in counts.most_common(limit)]
+
+
+# An iTIP method as RFC 5545 allows it (an iana-token, or an x-name, which is one too), capped:
+# it comes from the sender, and `dry_classify` prints it.
+_ITIP_METHOD = re.compile(r"[A-Za-z0-9-]{1,32}")
+
+
+def calendar_method(payload: dict[str, Any]) -> str | None:
+    """The iTIP method (RFC 5546) of the email's calendar part, uppercased, or None when it has
+    none: an invitation or update (`REQUEST`), a response to one (`REPLY`), a cancellation
+    (`CANCEL`), a proposed new time (`COUNTER`)...
+
+    iMIP (RFC 6047) carries an iTIP message as a `text/calendar` part whose Content-Type names
+    the method (`text/calendar; charset="UTF-8"; method=REPLY`), as Google Calendar and Outlook
+    send them. Read from the part's own headers in the `full` payload, never from the Subject;
+    the first `text/calendar` part with a method wins, wherever it sits in the tree. The value is
+    sender-controlled, so only an RFC 5545 iana-token (letters, digits, `-`, at most 32) counts
+    as a method: anything else (control or escape characters, a 100 KB string) is no method. An
+    RFC 2231-encoded parameter (`method*=us-ascii''REPLY`) counts by its value, whatever charset
+    it names. Never raises.
+    """
+    if payload.get("mimeType", "").lower() == "text/calendar":
+        content_type = Message()
+        for h in payload.get("headers", []) or []:
+            if h.get("name", "").lower() == "content-type":
+                content_type["Content-Type"] = h.get("value", "")
+                break
+        method = content_type.get_param("method")
+        if method is not None:
+            # RFC 2231 (`method*=us-ascii''REPLY`) gives (charset, language, value), the value
+            # already percent-decoded. A token is ASCII, so the sender's charset is ignored:
+            # decoding with it can raise (`idna`, `undefined`) or turn junk into a token.
+            token = (method[2] if isinstance(method, tuple) else method).strip()
+            if _ITIP_METHOD.fullmatch(token):
+                return token.upper()
+    for child in payload.get("parts", []) or []:
+        if found := calendar_method(child):
+            return found
+    return None

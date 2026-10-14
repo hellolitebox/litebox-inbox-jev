@@ -5,6 +5,7 @@ check `FakeGmail` against `triage.GmailApi`, and `_conforms` checks the fakes an
 against every Protocol they stand in for, so neither can drift from what its callers use.
 """
 
+import base64
 import re
 from collections.abc import Callable, Mapping, Sequence
 from datetime import timedelta
@@ -176,6 +177,59 @@ def email(id: str, sender: str, subject: str, **headers: str) -> Email:
     h = {"from": [sender], "subject": [subject], "authentication-results": [GMAIL_PASS]}
     h.update({k.replace("_", "-"): [v] for k, v in headers.items()})
     return Email(id, "t" + id, ["INBOX"], h, "", "body", 1_700_000_000_000)
+
+
+def _part(part_id: str, content_type: str, text: str = "", **extra: Any) -> dict[str, Any]:
+    """One MIME part as Gmail's `full` format returns it: its own headers, base64url data."""
+    data = base64.urlsafe_b64encode(text.encode()).decode().rstrip("=")
+    return {
+        "partId": part_id,
+        "mimeType": content_type.split(";")[0].strip(),
+        "filename": extra.pop("filename", ""),
+        "headers": [{"name": "Content-Type", "value": content_type}, *extra.pop("headers", [])],
+        "body": {"size": len(text), "data": data} if text else {"size": 0},
+        **extra,
+    }
+
+
+def calendar_payload(
+    method: str, subject: str = "Accepted: Kickoff @ Mon 10am", content_type: str | None = None
+) -> dict[str, Any]:
+    """A Google Calendar email's `full` payload: multipart/mixed holding a multipart/alternative
+    (text/plain, text/html, then the iMIP text/calendar part, `content_type`, by default
+    `text/calendar; charset="UTF-8"; method=<method>`) and the same calendar as an `invite.ics`
+    attachment fetched by id, as Gmail returns RSVPs (`REPLY`) and invitations (`REQUEST`).
+    """
+    content_type = content_type or f'text/calendar; charset="UTF-8"; method={method}'
+    ics = f"BEGIN:VCALENDAR\r\nMETHOD:{method}\r\nBEGIN:VEVENT\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    alternative = _part(
+        "0",
+        'multipart/alternative; boundary="b2"',
+        parts=[
+            _part("0.0", 'text/plain; charset="UTF-8"; format=flowed; delsp=yes', "Ana accepted"),
+            _part("0.1", 'text/html; charset="UTF-8"', "<p>Ana accepted</p>"),
+            _part(
+                "0.2",
+                content_type,
+                ics,
+                headers=[{"name": "Content-Transfer-Encoding", "value": "7bit"}],
+            ),
+        ],
+    )
+    attachment = _part(
+        "1",
+        'application/ics; name="invite.ics"',
+        filename="invite.ics",
+        headers=[{"name": "Content-Disposition", "value": 'attachment; filename="invite.ics"'}],
+    )
+    attachment["body"] = {"size": len(ics), "attachmentId": "ANGjdJ_attachment"}
+    payload = _part("", 'multipart/mixed; boundary="b1"', parts=[alternative, attachment])
+    payload["headers"] = [
+        {"name": "From", "value": "Ana Diaz <ana@client.example>"},
+        {"name": "Subject", "value": subject},
+        *payload["headers"],
+    ]
+    return payload
 
 
 class HttpError(Exception):

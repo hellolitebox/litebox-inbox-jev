@@ -1,15 +1,18 @@
 import base64
+import encodings.aliases
+import re
 import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from fakes import SENT_BASE_S, HttpError, SentMailService, sent_mail_gmail
+from fakes import SENT_BASE_S, HttpError, SentMailService, calendar_payload, sent_mail_gmail
 
 from inbox_jev import gmail as gmail_module
 from inbox_jev.body import (
     HOSTNAME_MAX,
     LABEL_MAX,
     LINK_DOMAINS_MAX,
+    calendar_method,
     extract_body,
     extract_link_domains,
     link_domain,
@@ -272,6 +275,121 @@ def test_gmail_get_reads_body_and_link_domains(monkeypatch):
     }
     email = _gmail(monkeypatch, _FullGetService(msg)).get("1")
     assert (email.body, email.snippet, email.link_domains) == ("Hi x", "a & b", ["site.example"])
+
+
+@pytest.mark.parametrize("method", ["REPLY", "REQUEST", "CANCEL", "COUNTER"])
+def test_calendar_method_reads_the_imip_part_of_a_google_calendar_email(method):
+    """A response (REPLY), an invitation or update (REQUEST), a cancellation, a proposed new
+    time: the method comes from the text/calendar part's Content-Type, inside the
+    multipart/alternative next to the plain and HTML versions."""
+    assert calendar_method(calendar_payload(method)) == method
+
+
+def test_calendar_method_reads_quoted_and_lowercase_parameters():
+    """Outlook-style parameters: quoted, lowercase, in another order."""
+    payload = calendar_payload(
+        "cancel", content_type='text/calendar; method="cancel"; charset=utf-8'
+    )
+    assert calendar_method(payload) == "CANCEL"
+
+
+def test_calendar_method_is_none_without_an_imip_part():
+    """No calendar part, a Subject that only looks like an RSVP, or a text/calendar part whose
+    Content-Type names no method: not a calendar message."""
+    plain = {
+        "mimeType": "multipart/alternative",
+        "headers": [{"name": "Subject", "value": "Accepted: Kickoff @ Mon 10am"}],
+        "parts": [
+            _html("<p>Accepted</p>"),
+            {"mimeType": "text/plain", "body": {"data": b64("ok")}},
+        ],
+    }
+    assert calendar_method(plain) is None
+    no_method = calendar_payload("REPLY", content_type='text/calendar; charset="UTF-8"')
+    assert calendar_method(no_method) is None
+    no_content_type = calendar_payload("REPLY")
+    calendar_part = no_content_type["parts"][0]["parts"][2]
+    calendar_part["headers"] = [
+        h for h in calendar_part["headers"] if h["name"].lower() != "content-type"
+    ]
+    assert calendar_method(no_content_type) is None
+
+
+def test_calendar_method_reads_a_content_type_that_is_not_the_first_header():
+    """The part's Content-Type is found among its headers, wherever it sits."""
+    payload = calendar_payload("REPLY")
+    calendar_part = payload["parts"][0]["parts"][2]
+    calendar_part["headers"].reverse()
+    assert calendar_part["headers"][0]["name"].lower() != "content-type"
+    assert calendar_method(payload) == "REPLY"
+
+
+def test_calendar_method_decodes_an_rfc2231_parameter():
+    """`method*=us-ascii''REPLY` (RFC 2231) is the same method as `method=REPLY`."""
+    payload = calendar_payload("REPLY", content_type="text/calendar; method*=us-ascii''REPLY")
+    assert calendar_method(payload) == "REPLY"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '"REPLY\x00EVIL"',
+        '"REPLY\x1b]0;pwned\x07\x1b[2J"',
+        "A" * 100_000,
+        '"RE PLY"',
+        "A" * 33,
+        "us-ascii''REPLY%00EVIL",
+    ],
+    ids=["nul", "escape-sequences", "100kb", "space", "33-chars", "rfc2231-nul"],
+)
+def test_calendar_method_is_none_for_a_value_that_is_not_an_itip_token(value):
+    """The method is sender-controlled text: only an RFC 5545 iana-token (letters, digits, `-`,
+    at most 32) is a method, so a NUL, terminal escape sequences or 100 KB never reach
+    `Email.calendar_method` or `dry_classify`'s output; the email then counts like any other."""
+    param = f"method*={value}" if value.startswith("us-ascii") else f"method={value}"
+    payload = calendar_payload("REPLY", content_type=f"text/calendar; {param}")
+    assert calendar_method(payload) is None
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("idna''REPLY", "REPLY"),
+        ("undefined''REPLY", "REPLY"),
+        ("rot13''ERCYL", "ERCYL"),
+        ("utf-16''%FF%FER%00E%00", None),
+        ("us-ascii''%2541", None),
+    ],
+    ids=["idna", "undefined", "rot13", "utf-16", "no-double-decoding"],
+)
+def test_calendar_method_ignores_an_rfc2231_charset(value, expected):
+    """The charset named in `method*=<charset>''<value>` is the sender's choice and is never used
+    to decode: `idna` and `undefined` would raise and fail the whole fetch. The value counts as
+    it is, so `rot13''ERCYL` is the token `ERCYL`, not `REPLY` (any method only keeps the email
+    out of auto rules), and percent-decoding happens once (`%2541` is `%41`, not `A`)."""
+    payload = calendar_payload("REPLY", content_type=f"text/calendar; method*={value}")
+    assert calendar_method(payload) == expected
+
+
+def test_calendar_method_never_raises_whatever_the_rfc2231_charset():
+    """Every codec Python knows, plus unknown names, against values that are valid, junk,
+    non-ASCII or broken percent-escapes: the result is None or an uppercase iTIP token."""
+    charsets = {*encodings.aliases.aliases, *encodings.aliases.aliases.values()}
+    charsets |= {"idna", "undefined", "rot13", "zlib", "uu", "base64", "nope", "", "%00"}
+    values = ["REPLY", "x", "%FF%FER%00E%00", "%00", "%", "%zz", "%E2%80%8B", "A" * 40, ""]
+    for charset in sorted(charsets):
+        for value in values:
+            ctype = f"text/calendar; method*={charset}'en'{value}"
+            method = calendar_method(calendar_payload("REPLY", content_type=ctype))
+            assert method is None or re.fullmatch(r"[A-Z0-9-]{1,32}", method), (charset, value)
+
+
+def test_gmail_get_reads_the_calendar_method(monkeypatch):
+    msg = {"id": "1", "threadId": "t", "snippet": "", "payload": calendar_payload("REPLY")}
+    email = _gmail(monkeypatch, _FullGetService(msg)).get("1")
+    assert (email.calendar_method, email.body) == ("REPLY", "Ana accepted")
+    plain = {"id": "2", "threadId": "t", "snippet": "", "payload": _html("<p>Hi</p>")}
+    assert _gmail(monkeypatch, _FullGetService(plain)).get("2").calendar_method is None
 
 
 def test_previous_contact_wire_values_are_the_ones_jev_is_told_about():

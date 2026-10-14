@@ -109,6 +109,7 @@ def record_auto(
     *,
     count: bool = True,
     known: SenderRules | None = None,
+    calendar: bool = False,
 ) -> None:
     """Count consistent high-confidence answers; activate after cfg.auto_rule.hits.
 
@@ -122,7 +123,8 @@ def record_auto(
     (`SenderRules.match` sends its sender to Jev: auto rules are keyed on the exact address, so
     they come first).
     `known` is the sender's rules already read for this email (`load`); without it they are
-    read here.
+    read here. `calendar`: the email is a calendar message (`Email.calendar_method`: an
+    invitation, a response to one, a cancellation), which never counts (`_counts_toward_rule`).
     """
     other_keep = cfg.keep_probability(classification.probabilities, exclude=decision.category)
     keep_signal = other_keep >= cfg.auto_rule.max_keep_probability
@@ -130,7 +132,7 @@ def record_auto(
     if rule is not None and (_is_keep(cfg, decision.category) or keep_signal):
         _reset_pending_archive_rule(cfg, rule)
     if not _counts_toward_rule(
-        cfg, classification, decision, previous_contact, keep_signal=keep_signal
+        cfg, classification, decision, previous_contact, keep_signal=keep_signal, calendar=calendar
     ):
         return
     if rule is None:
@@ -155,9 +157,17 @@ def _counts_toward_rule(
     previous_contact: PreviousContact | None,
     *,
     keep_signal: bool,
+    calendar: bool,
 ) -> bool:
     """Whether Jev's answer can count toward an auto rule: confident (not low-confidence, at
-    least `auto_rule.min_confidence`) and no keep category likely enough (`keep_signal`).
+    least `auto_rule.min_confidence`), no keep category likely enough (`keep_signal`) and not a
+    calendar message (`calendar`).
+
+    A calendar message (an invitation, a response to one, a cancellation: ADR 0047) says nothing
+    about the sender's other mail, and Google Calendar and Outlook send a response from the
+    responder's own address: three "Accepted:" answers would otherwise teach an archiving rule on
+    a person. It adds no hit, creates no rule and switches no pending rule's category; the keep
+    reset in `record_auto` still applies to it, since a reset only sends more mail to Jev.
 
     Unverified senders (unsubscribe_skipped_unverified) can earn a rule: the rule path re-runs
     the DMARC/List-Unsubscribe and group checks on every email, so it never unsubscribes them.
@@ -175,6 +185,7 @@ def _counts_toward_rule(
         or decision.archive_group
         or known_contact
         or keep_signal
+        or calendar
         or classification.confidence < cfg.auto_rule.min_confidence
     )
 

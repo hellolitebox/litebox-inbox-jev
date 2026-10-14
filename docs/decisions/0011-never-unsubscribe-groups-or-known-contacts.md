@@ -37,3 +37,5 @@ cover all of that company's mail.
 - Rule hits that could unsubscribe run 1–2 sent-mail searches, only when the answer can change the
   outcome.
 - `marketing` still unsubscribes known contacts (its flag is the default `true`).
+- A failed sent-mail search (`None`) not blocking an outreach unsubscribe in `run` is deliberate
+  (see Alternatives); the maintainer re-confirmed it on 2026-10-14 (#55).

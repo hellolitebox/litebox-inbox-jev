@@ -56,3 +56,5 @@ decision changes: add a new one and mark the old one `Superseded by NNNN`.
 | [0043](0043-authentication-results-parsed-per-rfc-8601.md) | Authentication-Results is parsed per RFC 8601 | Accepted | #50 |
 | [0044](0044-instructions-rules-by-path-one-check-hook.md) | Instructions: invariants in CLAUDE.md, rules by path, one check script, a hook for the hard prohibitions | Accepted | #52 |
 | [0045](0045-senders-decided-per-email.md) | Senders decided per email, and website form leads are an action | Accepted | #54 |
+| [0046](0046-meetings-booked-with-me-are-an-action.md) | A meeting someone booked with me through a scheduling link is an action | Accepted | #55 |
+| [0047](0047-calendar-messages-teach-no-auto-rule.md) | Calendar messages never count toward an auto rule | Accepted | #55 |

@@ -22,9 +22,9 @@ and anything moved to Spam can be moved back.
 | Label in Gmail | What goes there | What happens to it |
 | -- | -- | -- |
 | `Jev/Important` | Written by a real person to you: clients, teammates, partners, candidates, questions or requests for you. Not mass mail that only uses your name, and not someone else's conversation pasted into an email from an unrelated sender. | Stays in the inbox |
-| `Jev/Action` | Automated email that needs you to do something: approve a payment or a held message, update an expiring card, verify your account, act on a security alert, review or sign a document or tax return through a signing or client-portal service. Not surveys or promotions. | Stays in the inbox |
-| `Jev/Transactional` | Records of something you did or bought: receipts, paid invoices, order and booking confirmations, shipping updates, password resets, codes, copies of documents you already signed. | Archived |
-| `Jev/Notifications` | Automatic "for your information" alerts and summaries from tools you use (GitHub, Slack, Google Drive, Jira, monitoring…). | Archived |
+| `Jev/Action` | Automated email that needs you to do something: approve a payment or a held message, update an expiring card, verify your account, act on a security alert, review or sign a document or tax return through a signing or client-portal service, a message from the contact form on your website, someone booking, moving or cancelling a meeting with you through your scheduling link (HubSpot, Calendly and the like), or a person's calendar invitation, update or cancellation waiting on your answer, or a reply to your own invitation that proposes a new time or asks you something. Not surveys or promotions, and not reminders of meetings already in your calendar. | Stays in the inbox |
+| `Jev/Transactional` | Records of something you did or bought: receipts, paid invoices, order confirmations, confirmations of bookings made by you or for you (flights, hotels, restaurants, an appointment with a provider), shipping updates, password resets, codes, copies of documents you already signed. | Archived |
+| `Jev/Notifications` | Automatic "for your information" alerts and summaries from tools you use (GitHub, Slack, Google Drive, Jira, monitoring…), including your daily agenda, "your meeting starts in 10 minutes" reminders, and the notices that someone accepted, declined or said "maybe" to an invitation you sent. | Archived |
 | `Jev/Newsletters` | Newsletters, blog updates and industry news you subscribed to. | Archived |
 | `Jev/Marketing` | Promotions from real companies: sales, discounts, launches, webinars. | Archived, and unsubscribed when it is safe (see [What it unsubscribes you from](#what-it-unsubscribes-you-from-and-what-it-never-does)) |
 | `Jev/Outreach` | Unsolicited sales pitches written to look personal: agencies, freelancers, "quick question" follow-up sequences. | Archived, and unsubscribed when it is safe |
@@ -34,7 +34,10 @@ and anything moved to Spam can be moved back.
 [Safety nets](#safety-nets)). A few more labels can appear next to those:
 
 - `Jev/Needs Reply`: the sender seems to expect an answer or an action from you personally. It is
-  only added to emails that stay in your inbox.
+  only added to emails that stay in your inbox. A meeting someone booked with you doesn't get it
+  (the booking is already confirmed, you only need to be there), nor does a calendar invitation or a
+  reply proposing a new time (you answer it in your calendar), unless it also asks you something
+  personally.
 - `Jev/Invoices`: the email contains a bill you need to pay.
 - `Jev/Review`: Jev wasn't sure enough, so the email stays in your inbox with its best guess. See
   below.
@@ -91,7 +94,10 @@ There is one exception, with its own exception:
 **Learning by itself.** When Jev has been very sure (about 95%) that three different emails from a
 sender are the same kind, without a confident different answer in between, and nothing suggested
 they could be personal, Inbox Jev remembers that and stops asking Jev what kind that sender's emails
-are. This never happens for outreach from someone you have written to.
+are. This never happens for outreach from someone you have written to. Calendar emails never count
+toward it: an invitation, a cancellation, or the "Accepted" or "Declined" notice someone's calendar
+sends when they answer your invitation. Those notices come from the person's own address, so three
+of them could otherwise teach Inbox Jev to archive everything that person writes to you.
 
 **Senders that send both kinds.** Some senders send both important and unimportant mail from the
 same address. A sales tool's notifications address, for example, sends you weekly dashboards

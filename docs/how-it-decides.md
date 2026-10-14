@@ -237,9 +237,9 @@ load).
 | Category | Label | `action` | `min_confidence` | Notes |
 | -- | -- | -- | -- | -- |
 | `important` | `Jev/Important` | keep | 0.0 | Allowlist target. Also the fallback for an answer naming an unknown category. Not mass mail that only greets you by name, nor a conversation between other people pasted into a message from an unrelated sender. |
-| `action_required` | `Jev/Action` | keep | 0.0 | Own digest section. Includes a held message pending your approval, and a document, tax return or agreement to review or sign through a document, e-signature or client-portal service ([EX-39](#ex-39--a-tax-portal-notice-that-passes-dmarc)), and a new submission from a form on my own website or landing page (a lead, contact, quote or demo request relayed by a form or CRM tool such as HubSpot, Typeform, Webflow, Jotform or Google Forms: someone waits for a reply; [EX-44](#ex-44--a-sender-decided-per-email-keeps-its-leads-and-archives-its-fyis), [ADR 0045](decisions/0045-senders-decided-per-email.md)). Excludes surveys, feedback or review requests and promotional calls to action ([ADR 0038](decisions/0038-surveys-are-not-a-personal-action.md)). |
-| `transactional` | `Jev/Transactional` | archive | 0.80 | Includes copies of documents you already signed or filed. |
-| `notification` | `Jev/Notifications` | archive | 0.80 | Includes groups' held-spam reports, and form and CRM tools' dashboards, reports, deal or pipeline updates and account notices; not a new submission from a form on my own website (that is `action_required`). |
+| `action_required` | `Jev/Action` | keep | 0.0 | Own digest section. Includes a held message pending your approval, and a document, tax return or agreement to review or sign through a document, e-signature or client-portal service ([EX-39](#ex-39--a-tax-portal-notice-that-passes-dmarc)), and a new submission from a form on my own website or landing page (a lead, contact, quote or demo request relayed by a form or CRM tool such as HubSpot, Typeform, Webflow, Jotform or Google Forms: someone waits for a reply; [EX-44](#ex-44--a-sender-decided-per-email-keeps-its-leads-and-archives-its-fyis), [ADR 0045](decisions/0045-senders-decided-per-email.md)), and a meeting someone booked, rescheduled or cancelled with you through a scheduling link or booking page (HubSpot Meetings "You've been booked by", Calendly, Cal.com, Chili Piper, Google Calendar appointment schedules: someone expects you at that time; [EX-46](#ex-46--a-meeting-booked-through-a-scheduling-link-stays-in-the-inbox), [ADR 0046](decisions/0046-meetings-booked-with-me-are-an-action.md)), and a calendar invitation, update or cancellation a person sent you from their own calendar (Google Calendar, Outlook: it waits on your RSVP or changes your day; same EX-46 and ADR), and a response to an invitation you sent that proposes a new time or carries a note asking you something. Excludes surveys, feedback or review requests and promotional calls to action ([ADR 0038](decisions/0038-surveys-are-not-a-personal-action.md)), reminders of meetings already in your calendar and daily agendas, and a plain response to an invitation you sent (Accepted, Declined, Tentative). |
+| `transactional` | `Jev/Transactional` | archive | 0.80 | Includes copies of documents you already signed or filed, and confirmations of bookings and reservations made by you or for you (travel, hotels, restaurants, an appointment with a provider); not a meeting someone booked with you through your scheduling link, which is `action_required`. |
+| `notification` | `Jev/Notifications` | archive | 0.80 | Includes groups' held-spam reports, and form and CRM tools' dashboards, reports, deal or pipeline updates and account notices; not a new submission from a form on my own website (that is `action_required`). Also calendar and scheduling tools' daily agendas, reminders of meetings already in your calendar ("starts in 10 minutes") and account notices; not a meeting someone booked, rescheduled or cancelled with you through a scheduling link, nor an invitation, update or cancellation a person sent you from their own calendar (those are `action_required`, [EX-46](#ex-46--a-meeting-booked-through-a-scheduling-link-stays-in-the-inbox)). Also a plain response to an invitation you sent ("Accepted: …", "Declined: …", "Tentative: …", "<name> has accepted this invitation", Google Calendar or Outlook): nothing is left to do; but not one that proposes a new time or carries a note asking you something (that is `action_required`). |
 | `newsletter` | `Jev/Newsletters` | archive | 0.80 |  |
 | `marketing` | `Jev/Marketing` | archive_unsubscribe | 0.90 | `unsubscribe_known_contacts: true` (default). |
 | `cold_outreach` | `Jev/Outreach` | archive_unsubscribe | 0.90 | `unsubscribe_known_contacts: false`. |
@@ -295,13 +295,19 @@ still gets `Jev/Needs Reply` (the action may be real)
 
 What counts as "a reply or an action" is spelled out in the question itself (`needs_reply.question`,
 [4.7](#47-what-jev-receives)): yes for a person writing to you or something only you can do (pay,
-sign, approve, authorize, confirm an appointment, renew an expiring document, secure your account);
-no for company or bulk mail (surveys, feedback, ratings or reviews, promotions, webinars or events),
-even if it asks you to reply or click, a conversation between other people that isn't addressed to
-you, and phishing ([EX-38](#ex-38--a-fake-reply-with-a-voicemail-lure)). A person's own "can you
-give feedback on this?" or invitation is a person writing to you. `action_required` excludes the
-same calls to action, and `important` excludes mass mail that only greets you by name, so a survey's
-keep probability stays low too ([EX-33](#ex-33--a-satisfaction-survey-from-a-no-reply-sender),
+sign, approve, authorize, confirm an appointment, renew an expiring document, secure your account)
+or a lead or contact request from a form on your own website; no for company or bulk mail (surveys,
+feedback, ratings or reviews, promotions, webinars or events), even if it asks you to reply or
+click, a scheduling tool's notice that someone booked, moved or cancelled a meeting with you (it is
+already confirmed: you only attend), a calendar invitation, update or cancellation, or a response
+proposing a new time, unless it also asks you a personal question (you answer it in your calendar,
+not by email; both are `action_required` without `Jev/Needs Reply`,
+[EX-46](#ex-46--a-meeting-booked-through-a-scheduling-link-stays-in-the-inbox)), a conversation
+between other people that isn't addressed to you, and phishing
+([EX-38](#ex-38--a-fake-reply-with-a-voicemail-lure)). A person's own "can you give feedback on
+this?" or invitation is a person writing to you. `action_required` excludes the same calls to
+action, and `important` excludes mass mail that only greets you by name, so a survey's keep
+probability stays low too ([EX-33](#ex-33--a-satisfaction-survey-from-a-no-reply-sender),
 [ADR 0038](decisions/0038-surveys-are-not-a-personal-action.md)).
 
 ### 3.3 Unsubscribe conditions
@@ -315,7 +321,7 @@ An unsubscribe is irreversible. During `run` it happens only when **all** of the
 | 3 | **Not a sender decided per email** ([3.5](#35-sender-rules)) unless a **manual** rule decided the email: Jev's answer, the email's own correction or a stored decision never unsubscribe a sender in `decide_each_email` (`Veto.DECIDED_EACH_EMAIL`; [EX-45](#ex-45--a-sender-decided-per-email-is-unsubscribed-only-on-a-manual-rule)). The email keeps its category and is archived | `policy.unsubscribe_gate` |
 | 4 | **Verified**: `dmarc=pass` in Gmail's own `Authentication-Results` ([4.2](#42-dmarc)) and a `List-Unsubscribe` header with an `https:` or `mailto:` URI (an `http:`-only header counts as none, [4.3](#43-list-unsubscribe-one-click-and-mailto)). If not, the email keeps its category, is archived, and `unsubscribe_skipped_unverified` is set. It is never moved to Spam for this | `policy.unsubscribe_gate` |
 | 5 | **Not a group or discussion list** (`_group_list`): no `List-Post` header; no unsubscribe target on `googlegroups.com` / `groups.google.com` (host or subdomain); not relayed by a Google Group (`group_author` found, trusted or not); sender domain and `List-Id` not on the account's own domain (or a subdomain) | `policy.unsubscribe_gate` |
-| 6 | For a category with `unsubscribe_known_contacts: false` (`cold_outreach`): `previous_contact` is not `wrote_to_sender` / `wrote_to_their_domain` (`known_contact_kept` otherwise). Unknown (`None`, the search failed or wasn't run) does **not** block it | `policy.unsubscribe_gate` |
+| 6 | For a category with `unsubscribe_known_contacts: false` (`cold_outreach`): `previous_contact` is not `wrote_to_sender` / `wrote_to_their_domain` (`known_contact_kept` otherwise). Unknown (`None`, the search failed or wasn't run) does **not** block it: deliberate, so that one failed search doesn't stop every outreach unsubscribe ([ADR 0011](decisions/0011-never-unsubscribe-groups-or-known-contacts.md), re-confirmed by the maintainer on 2026-10-14; `unsubscribe-retry` holds the row instead) | `policy.unsubscribe_gate` |
 | 7 | Mode is `act`, and the account has no `act_categories` or lists the category | `policy.acts_on`, from `policy.plan` |
 | 8 | The run's budget (`MAX_UNSUBSCRIBES_PER_RUN`, 20) has attempts left | `triage.process` |
 | 9 | The list isn't **settled**: no `unsubscribes` row for `(account, list_key)`, or its row is `failed` with fewer than 3 attempts | `triage._unsubscribe` |
@@ -469,7 +475,7 @@ at 0 hits without switching its category
 | Step | Condition | Effect |
 | -- | -- | -- |
 | Reset | The decision is a keep category, **or** the keep categories other than the decided one hold ≥ `auto_rule.max_keep_probability` (0.02) — even on a low-confidence answer — **and** the sender has a pending (inactive) `auto` rule to a non-keep category | `hits = 0` |
-| Doesn't count | `low_confidence`, `archive_group`, a known contact (`previous_contact` is `wrote_to_sender` / `wrote_to_their_domain`) in a category that spares known contacts, the keep signal above, or Jev's confidence < `auto_rule.min_confidence` (0.95) | nothing more |
+| Doesn't count | `low_confidence`, `archive_group`, a known contact (`previous_contact` is `wrote_to_sender` / `wrote_to_their_domain`) in a category that spares known contacts, the keep signal above, a calendar message (`Email.calendar_method` is set), or Jev's confidence < `auto_rule.min_confidence` (0.95) | nothing more |
 | Already learned from | The answer would count, but the email's row held a Jev decision from `label` or `act` | a pending `auto` rule to another category: `hits = 0`, category unchanged; otherwise nothing |
 | Counts, no rule yet |  | new `auto` rule, `hits = 1`, active if `auto_rule.hits` ≤ 1 |
 | Counts, rule is manual/correction, or an active auto rule to an existing category |  | unchanged |
@@ -481,6 +487,17 @@ DMARC/`List-Unsubscribe`/group checks on each email. A known contact never earns
 category that spares known contacts (`cold_outreach`), whether the sender is verified, unverified or
 a group: such a "pitch" is where Jev is most likely wrong, so the sender stays on the Jev path. Keep
 categories can earn a rule too.
+
+A **calendar message** (an email with an iTIP `text/calendar` part, any method: an invitation or
+update, a response to an invitation, a cancellation, a proposed new time;
+[4.6](#46-body-extraction)) never counts, whatever Jev answers: no hit, no new rule, no switch or
+restart of a pending rule's category. Google Calendar and Outlook send a response from the
+responder's own address, so three confident "Accepted:" answers would otherwise turn on a rule to
+`notification` on a **person** and archive their next real email without asking Jev; and calendar
+traffic says nothing about a sender's other mail. The keep reset above still applies to it: a reset
+only sends more mail to Jev. See
+[EX-47](#ex-47--rsvp-responses-from-a-person-never-teach-a-rule-on-them) and
+[ADR 0047](decisions/0047-calendar-messages-teach-no-auto-rule.md).
 
 ### 3.6 Modes and `act_categories`
 
@@ -813,6 +830,20 @@ leave the module, never a path or query string: those can carry the recipient's 
 token. One caveat: on a private suffix of the list (`github.io`, `web.app`, `workers.dev`) the
 registrable domain includes the site's own label, which can name a person (`jane.github.io`) or be a
 per-recipient token (`<token>.workers.dev`); Jev already gets `recipient`, so this adds little.
+
+`body.calendar_method(payload)` reads, from the same `full` payload, the iTIP method (RFC 5546) of a
+calendar part: the first `text/calendar` part, anywhere in the tree (an attachment too), whose own
+Content-Type carries a `method` parameter (iMIP, RFC 6047:
+`text/calendar; charset="UTF-8"; method=REPLY`), uppercased. Google Calendar and Outlook write it on
+invitations and updates (`REQUEST`), responses (`REPLY`), cancellations (`CANCEL`) and proposed new
+times (`COUNTER`). The value comes from the sender, so only an RFC 5545 token (letters, digits and
+`-`, at most 32 characters) is a method. An RFC 2231-encoded parameter (`method*=us-ascii''REPLY`)
+counts by its percent-decoded value, and the charset it names is never used to decode (a sender's
+`idna` or `undefined` would fail the read). Any other value (control or escape characters, a 100 KB
+string) is no method, and the email counts toward rules like any other. It is stored on the email as
+`Email.calendar_method` (None otherwise, and for a header-only read), never sent to Jev, and only
+keeps the email out of auto rules ([3.5](#35-sender-rules)). `dry_classify.py` shows it as
+`calendar=<METHOD>`.
 
 ### 4.7 What Jev receives
 
@@ -1594,6 +1625,56 @@ probabilities that matter are shown; the rest are ~0.
   ask for that ([3.3](#33-unsubscribe-conditions) condition 3, [3.5](#35-sender-rules),
   [ADR 0045](decisions/0045-senders-decided-per-email.md)).
 
+### EX-46 — A meeting booked through a scheduling link stays in the inbox
+
+- **Test**: `test_ex46_a_meeting_booked_through_a_scheduling_link_stays_in_the_inbox`
+- **Input**: in `act`, three emails from a scheduling tool, `noreply@meetings.scheduler.example`:
+  `You've been booked by: Ana Diaz ana@client.example` (Jev: action_required 0.90, notification
+  0.08, `needs_reply` 0.20), `Canceled: Intro call with Ana Diaz` (action_required 0.86,
+  notification 0.12, `needs_reply` 0.15) and
+  `Reminder: Intro call with Ana Diaz starts in 10 minutes` (notification 0.96, action_required
+  0.03); and a colleague's calendar invitation from `bea@partner.example`,
+  `Invitation: Weekly sync @ Wed 10am - 10:30am` (action_required 0.82, notification 0.10,
+  `needs_reply` 0.25), and her `New time proposed: Weekly sync @ Wed 10am - 10:30am`
+  (action_required 0.84, notification 0.12, `needs_reply` 0.30); and a response to an invitation I
+  sent, from `ana@client.example`, `Accepted: Ana Diaz and me + 1 @ Thu 3pm - 3:30pm` (notification
+  0.93, action_required 0.05).
+- **Outcome**: the booking, the cancellation, the invitation and the proposed new time stay in the
+  inbox with `Jev/Action` and no `Jev/Needs Reply`; the reminder and the "Accepted:" response are
+  archived with `Jev/Notifications`.
+- **Why**: someone who booked, moved or cancelled a meeting through your scheduling link expects you
+  at that time (or no longer does), and that changes your day. Before, Jev called such a notice a
+  notification: some landed in Review (0.41–0.57), and some were already archived in production
+  (Calendly bookings at 0.68 through the archive group, and at 0.87 by Jev alone). It asks for no
+  answer (the booking is already confirmed), so `needs_reply` says no. A person's calendar
+  invitation waits on your RSVP, which you give in the calendar, not by email: `action_required`,
+  and `needs_reply` no unless the invitation also asks you a personal question. A reminder of a
+  meeting already in your calendar, a daily agenda or the tool's account notice changes nothing and
+  stays a notification, and so does a plain response (Accepted, Declined, Tentative) to an
+  invitation you sent: it tells you who is coming and asks nothing (on real mail, such an "Accepted:
+  …" moved from a stored `notification` to `action_required` with the first wording of this change).
+  A response that proposes a new time waits on you to accept or reject it, and one with a note
+  asking you something waits on your answer: both are `action_required`. As in EX-39, the test pins
+  the criteria and the outcome of Jev's answer, not Jev's judgement ([3.1](#31-categories),
+  [ADR 0046](decisions/0046-meetings-booked-with-me-are-an-action.md)).
+
+### EX-47 — RSVP responses from a person never teach a rule on them
+
+- **Test**: `test_ex47_rsvp_responses_from_a_person_never_teach_a_rule_on_them`
+- **Input**: in `act`, three responses to invitations I sent, from `ana@client.example`'s own
+  address, each with a `text/calendar; method=REPLY` part: `Accepted: Kickoff @ Mon 10am`,
+  `Accepted: Review @ Tue 3pm` and `Accepted: Retro @ Fri 4pm` (Jev: notification 0.99, keep
+  categories 0.005 in all). Then Ana writes `Contract question` (no calendar part; Jev: important
+  0.97).
+- **Outcome**: the three responses are archived as `Jev/Notifications`, and no `auto` rule exists
+  for `ana@client.example` after them. Ana's question goes to Jev and stays in the inbox as
+  `Jev/Important`.
+- **Why**: each response would otherwise count (0.99 ≥ 0.95, no keep signal), and the third would
+  turn on an `auto` rule to `notification` on Ana's address: her question would be archived without
+  asking Jev. A calendar message, read from its iTIP part and not its Subject, never counts toward
+  an auto rule ([3.5](#35-sender-rules),
+  [ADR 0047](decisions/0047-calendar-messages-teach-no-auto-rule.md)).
+
 ## 6. Glossary
 
 - **Action**: what a category does: `keep`, `archive`, `archive_unsubscribe`, `spam`.
@@ -1724,6 +1805,19 @@ Behaviour found while writing this spec, documented as it is today:
   decide again if the sender leaves the list. `dry_classify.py` asks Jev for an email of such a
   sender that you corrected, where a `run` in a stronger mode would apply the correction (with
   `--reference`, which ignores every rule, that is the point).
+- A meeting booked through a scheduling link is kept only when Jev is asked
+  ([EX-46](#ex-46--a-meeting-booked-through-a-scheduling-link-stays-in-the-inbox)): a scheduling
+  tool whose address also sends FYIs (HubSpot sends both from its notifications address) can earn an
+  `auto` rule to `notification` from those FYIs, which then archives the bookings without asking.
+  List such an address in `decide_each_email` ([3.5](#35-sender-rules)). It happened once: HubSpot's
+  notifications address had such a rule, deleted after #54, and the address is now in
+  `decide_each_email`; checked on 2026-10-14, no Calendly, Cal.com or Google Calendar sender had a
+  rule. Calendly's bookings, sure enough at 0.95 or more, would more likely earn an `auto` rule to
+  `action_required`, which keeps them.
+- A calendar message is recognised only by an iTIP `text/calendar` part with a `method` parameter
+  ([4.6](#46-body-extraction)): a response forwarded as text, one from a tool that sends no calendar
+  part, or a part whose Content-Type leaves the method out still counts toward an auto rule like any
+  email ([ADR 0047](decisions/0047-calendar-messages-teach-no-auto-rule.md)).
 - An email processed again in a stronger mode (`label`, then `act`, or after `reprocess`) is still
   sent to Jev again (its stored answer isn't reused). Its new answer adds no auto-rule hit even when
   the first answer didn't count (e.g. 0.93 then 0.97): the sender just needs another email. And an

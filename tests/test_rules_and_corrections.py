@@ -75,6 +75,47 @@ def test_auto_rule_resets_on_disagreement(cfg, session):
     assert _first_active(session, "n@sub.com") is None
 
 
+@pytest.mark.parametrize("category", ["notification", "action_required"])
+def test_calendar_message_never_counts_toward_an_auto_rule(cfg, session, category):
+    """RSVP responses (notification) and invitations (action_required) from one person, each
+    sure enough to count: no hit, no rule (ADR 0047)."""
+    c = make_classification(category, 0.99)
+    d = Decision(category=category, confidence=0.99, source=DecisionSource.JEV)
+    for _ in range(cfg.auto_rule.hits + 2):
+        rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", c, d, calendar=True)
+    session.commit()
+    assert auto_rule(session) is None
+
+
+def test_calendar_message_neither_counts_nor_switches_a_pending_rule(cfg, session):
+    """A pending rule keeps its hits and category through a calendar answer in another
+    category; the next ordinary email still counts on it."""
+    news = make_classification("newsletter", 0.99)
+    news_d = Decision(category="newsletter", confidence=0.99, source=DecisionSource.JEV)
+    note = make_classification("notification", 0.99)
+    note_d = Decision(category="notification", confidence=0.99, source=DecisionSource.JEV)
+    rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", news, news_d)
+    rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", note, note_d, calendar=True)
+    rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", news, news_d)
+    session.commit()
+    rule = auto_rule(session)
+    assert (rule.category, rule.hits, rule.active) == ("newsletter", 2, False)
+
+
+def test_calendar_keep_answer_still_restarts_a_pending_archive_rule(cfg, session):
+    """The keep reset applies to a calendar message too: it only sends more mail to Jev."""
+    note = make_classification("notification", 0.99)
+    d = Decision(category="notification", confidence=0.99, source=DecisionSource.JEV)
+    for _ in range(cfg.auto_rule.hits - 1):
+        rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", note, d)
+    invite = make_classification("action_required", 0.97)
+    invite_d = Decision(category="action_required", confidence=0.97, source=DecisionSource.JEV)
+    rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", invite, invite_d, calendar=True)
+    session.commit()
+    rule = auto_rule(session)
+    assert (rule.category, rule.hits, rule.active) == ("notification", 0, False)
+
+
 def test_low_confidence_does_not_count(cfg, session):
     c = make_classification("newsletter", 0.5)
     d = Decision(category="newsletter", confidence=0.5, source=DecisionSource.JEV)
