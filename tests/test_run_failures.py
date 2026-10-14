@@ -195,17 +195,6 @@ def test_transient_token_failure_mid_run_still_fails_the_run(triage_setup, monke
         assert s.query(Message).filter_by(gmail_id="2").count() == 0
 
 
-def test_unknown_act_category_is_recorded_on_the_run(triage_setup):
-    ctx, gmail, account = triage_setup
-    account.act_categories = ["notifications"]
-    with pytest.raises(ValueError):
-        triage.run_account(ctx, account, Mode.ACT)
-    [run] = _runs(ctx)
-    assert run.finished_at is not None
-    assert run.error == "ValueError: me@acme.com: unknown act_categories ['notifications']"
-    assert gmail.modified == []
-
-
 def test_digest_groups_identical_run_failures(triage_setup, monkeypatch):
     ctx, gmail, account = triage_setup
 

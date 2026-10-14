@@ -9,9 +9,9 @@
 #                        category and label and is only archived, never unsubscribed or spammed.
 #                        See docs/how-it-decides.md, section 3.3)
 #   spam                 move to Gmail Spam
-# min_confidence: below it, nothing destructive happens; the email stays in the inbox with the
-#   review label plus the suggested category label (unless archive_group_min_confidence below
-#   applies).
+# min_confidence (0 to 1, like every threshold and probability in this file): below it, nothing
+#   destructive happens; the email stays in the inbox with the review label plus the suggested
+#   category label (unless archive_group_min_confidence below applies).
 # unsubscribe_known_contacts (archive_unsubscribe only, default true): false archives but never
 #   unsubscribes when you have written to the sender or their domain.
 categories:

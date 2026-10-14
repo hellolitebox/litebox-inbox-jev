@@ -7,6 +7,8 @@ import logging
 import sys
 from datetime import UTC, datetime
 
+from .config import LogLevel
+
 _RESERVED = set(vars(logging.makeLogRecord({}))) | {"message", "asctime"}
 
 
@@ -41,12 +43,12 @@ class DropSdkSuccess(logging.Filter):
         )
 
 
-def setup(level: str = "INFO") -> None:
+def setup(level: LogLevel = LogLevel.INFO) -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter())
     root = logging.getLogger()
     root.handlers[:] = [handler]
-    root.setLevel(level.upper())
+    root.setLevel(level.value)
     for noisy in ("googleapiclient", "httpx", "httpx2", "httpcore", "urllib3"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     sdk = logging.getLogger("typesafe_sdk")

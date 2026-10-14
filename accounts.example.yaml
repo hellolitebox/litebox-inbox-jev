@@ -1,5 +1,7 @@
 # Copy to accounts.yaml (gitignored). One entry per Gmail account.
 # Each account needs a token: `inbox-jev auth add you@example.com`
+# Category keys below (act_categories, min_confidence) must exist in categories.yaml: an unknown
+# key, in any account, stops every command that reads this file with a message listing them all.
 accounts:
   - email: you@example.com
     # Slack member ID to DM the daily digest to (Profile → ⋯ → Copy member ID). Optional.
@@ -29,6 +31,6 @@ accounts:
     # In act mode, only these categories are archived/spammed/unsubscribed; the others just get
     # their labels. Useful to roll out act gradually. Optional (default: all categories).
     act_categories: [transactional, notification, newsletter]
-    # Per-account confidence overrides by category key. Optional.
+    # Per-account confidence overrides by category key, each between 0 and 1. Optional.
     min_confidence:
       marketing: 0.95

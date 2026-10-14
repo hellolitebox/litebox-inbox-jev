@@ -27,10 +27,12 @@ from inbox_jev.classifier import Classifier, JevError, build_state, describe_jev
 from inbox_jev.config import (
     Account,
     CategoriesConfig,
+    ConfigError,
     Mode,
     Settings,
     load_accounts,
     load_categories,
+    validate_accounts,
 )
 from inbox_jev.db import Message
 from inbox_jev.gmail import connect
@@ -175,9 +177,12 @@ def main() -> None:
 
     s = Settings()
     cfg = load_categories(args.categories or s.categories_file)
-    accounts = [
-        a for a in load_accounts(s.accounts_file) if a.email.lower() == args.account.lower()
-    ]
+    all_accounts = load_accounts(s.accounts_file)
+    try:
+        validate_accounts(all_accounts, cfg)  # as every CLI command does: the whole file
+    except ConfigError as exc:
+        sys.exit(f"{s.accounts_file}: {exc}")
+    accounts = [a for a in all_accounts if a.email.lower() == args.account.lower()]
     if not accounts:
         sys.exit(f"{args.account} is not in {s.accounts_file}")
     account = accounts[0]

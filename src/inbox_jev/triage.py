@@ -312,8 +312,11 @@ def run_account(
 ) -> Run:
     """One pass over an account's inbox, recorded as a `Run` row.
 
-    The row is committed first, so any failure (bad config, an expired Gmail token, Gmail or DB
-    errors) is stored in `runs.error` with `finished_at` set, then re-raised for the caller.
+    The row is committed first, so any failure (no TYPESAFE_API_KEY, an expired Gmail token,
+    Gmail or DB errors) is stored in `runs.error` with `finished_at` set, then re-raised for the
+    caller. The account is expected to have passed `config.validate_accounts` (the CLI checks the
+    whole file before any run); an `act_categories` key that isn't a category would only match
+    nothing, so that category is labeled and never acted on (fail closed).
     """
     mode = effective_mode(ctx.settings, account, mode_override)
     with ctx.sessions() as session:
@@ -356,9 +359,6 @@ def _run_pass(
     lookback: str | None,
     counts: RunCounts,
 ) -> None:
-    unknown = set(account.act_categories or []) - set(ctx.cfg.by_key)
-    if unknown:
-        raise ValueError(f"{account.email}: unknown act_categories {sorted(unknown)}")
     jev = JevGuard(ctx.classifier, account.email)  # no API key: fails before touching Gmail
     scans = DomainScanRows(session, account.email)  # a database without the upsert: likewise
     gmail = ctx.gmail(account.email)

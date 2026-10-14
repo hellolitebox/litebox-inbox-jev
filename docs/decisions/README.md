@@ -51,3 +51,4 @@ record when the decision changes: add a new one and mark the old one `Superseded
 | [0038](0038-surveys-are-not-a-personal-action.md) | Surveys, reviews and promotional calls to action are not a personal action | Accepted | #38 |
 | [0039](0039-address-search-reads-recipients.md) | The address search reads the recipients of its matches | Accepted | #39 |
 | [0040](0040-domain-scan-kept-across-runs.md) | The domain search's scan is kept across runs until every match is read | Accepted | #39 |
+| [0041](0041-accounts-checked-against-categories-at-start.md) | Check the accounts file against the categories file when a command starts | Accepted | #41 |

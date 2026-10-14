@@ -151,11 +151,12 @@ shows the whole backlog, including re-listed "needs reply" and low-confidence em
 
 ### Rolling out a category change
 
-- **Deploy first** (`git pull && docker compose build`), **then** add a new key to
-  `act_categories` in the server's `accounts.yaml`: a key the running code doesn't know makes
-  every triage run fail. Until it is listed, the new category is only labeled and stays in the
-  inbox, which is safe. On rollback, remove the key from `accounts.yaml` **first**, then deploy
-  the old code.
+- **Deploy first** (`scripts/deploy.sh`), **then** add a new key to `act_categories` (or
+  `min_confidence`) in the server's `accounts.yaml`: a key the running code's `categories.yaml`
+  doesn't have makes every command that reads `accounts.yaml` refuse to start, `run` and
+  `digest` included (see [Configuration checks](#configuration-checks)). Until it is listed, the
+  new category is only labeled and stays in the inbox, which is safe. On rollback, remove the key
+  from `accounts.yaml` **first**, then deploy the old code.
 - When a category's meaning changes (for example `spam` narrowed to fraud), review
   `inbox-jev rules list --all` for rules with that category (auto, correction or manual) and
   `rules delete` the ones that no longer fit: a rule skips Jev, so it keeps the old meaning.
@@ -208,6 +209,26 @@ uv run pre-commit install                  # gitleaks + ruff before every commit
 uv run inbox-jev auth add you@example.com  # opens the browser; token → secrets/tokens/
 ```
 
+### Configuration checks
+
+Settings and both YAML files are checked when a command starts, so a typo stops it with a
+message instead of misbehaving later:
+
+- `.env`: `MODE` is `dry_run`, `label` or `act`; `LOOKBACK` a Gmail `newer_than` value (`2d`,
+  `3m`, `1y`); `LOG_LEVEL` one of `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` (any case);
+  `MAX_MESSAGES_PER_RUN` and `BODY_CHARS` at least 1; `MAX_UNSUBSCRIBES_PER_RUN` at least 0 (0
+  never unsubscribes).
+- `categories.yaml`: every `min_confidence`, `threshold`, `max_keep_probability` and
+  `archive_group_*` value is between 0 and 1, `auto_rule.hits` at least 1, plus the checks in
+  its comments.
+- `accounts.yaml`: an account's `min_confidence` values are between 0 and 1, and its
+  `act_categories` and `min_confidence` keys must be categories in `categories.yaml`. That
+  cross-check covers the whole file, whatever `-a` names, in every command that reads it (`run`,
+  `digest`, `unsubscribe-retry`, `senders backfill`, `labels rename`): the command exits 2 before
+  opening the database or Gmail, with one message listing every unknown key of every account. No
+  `runs` row is stored and no digest is sent while it fails, so after editing either file run
+  `inbox-jev digest --dry-print` once to check them.
+
 ### 2. Try it locally
 ```bash
 uv run inbox-jev run --mode dry_run --limit 30
@@ -224,7 +245,7 @@ uv run inbox-jev digest --dry-print
 | `inbox-jev digest [-a EMAIL] [--hours 24] [--dry-print]` | Slack digest |
 | `inbox-jev restore -a EMAIL --since 1d [--category marketing]` | Undo: back to inbox, remove labels (emails deleted in Gmail are skipped) |
 | `inbox-jev reprocess -a EMAIL --category KEY [--low-confidence-only]` | Have the next `act` run redo that category's emails still in the inbox (pair with `run --lookback`) |
-| `inbox-jev rules list [-a EMAIL] [--all]` / `rules set -a EMAIL @domain.com newsletter` / `rules delete -a EMAIL SENDER` | Sender rules (`rules set` takes an address or `@domain`) |
+| `inbox-jev rules list [-a EMAIL] [--all]` / `rules set -a EMAIL @domain.com newsletter` / `rules delete -a EMAIL SENDER` | Sender rules (`rules set` and `rules delete` take an address or `@domain`, any case; `rules delete` also removes a rule stored as typed before `rules set` checked its input) |
 | `inbox-jev retry-errors -a EMAIL` | Have the next `run` retry emails that failed, including those that stopped retrying after 8 failures (pair with `run --lookback`) |
 | `inbox-jev unsubscribe-retry [-a EMAIL]` | Retry failed unsubscribes after re-checking them against the current rules, corrections and [unsubscribe checks](docs/how-it-decides.md#33-unsubscribe-conditions) |
 | `inbox-jev senders backfill [-a EMAIL]` | Store the author, not the group, for group emails saved before authors were recovered |

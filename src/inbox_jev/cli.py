@@ -20,11 +20,13 @@ from . import gmail as gmail_mod
 from .config import (
     Account,
     CategoriesConfig,
+    ConfigError,
     Mode,
     Settings,
     check_lookback,
     load_accounts,
     load_categories,
+    validate_accounts,
 )
 from .db import Message, MessageStatus, SenderRule, now, open_sessions
 from .signals import ADDRESS, DOMAIN
@@ -84,8 +86,19 @@ def _settings(*, announce: bool = False) -> Settings:
     return settings
 
 
-def _accounts(settings: Settings, only: str | None) -> list[Account]:
+def _accounts(settings: Settings, cfg: CategoriesConfig, only: str | None) -> list[Account]:
+    """The accounts file's accounts (only `only`, when given), checked against `cfg`.
+
+    The whole file is checked, whatever `only` names, so every command that reads it fails the
+    same way, before it opens the database or touches Gmail (exit 2, one message listing every
+    problem).
+    """
     accounts = load_accounts(settings.accounts_file)
+    try:
+        validate_accounts(accounts, cfg)
+    except ConfigError as exc:
+        typer.echo(f"{settings.accounts_file}: {exc}", err=True)
+        raise typer.Exit(2) from exc
     if only:
         accounts = [a for a in accounts if a.email.lower() == only.lower()]
         if not accounts:
@@ -163,7 +176,7 @@ def auth_add(email: str) -> None:
 def run(
     account: AccountOpt = None,
     mode: Annotated[Mode | None, typer.Option(help="Override MODE for this run.")] = None,
-    limit: Annotated[int | None, typer.Option(help="Max inbox messages to look at.")] = None,
+    limit: Annotated[int | None, typer.Option(min=1, help="Max inbox messages to look at.")] = None,
     lookback: Annotated[
         str | None,
         typer.Option(
@@ -179,6 +192,7 @@ def run(
     """
     s = _settings(announce=True)
     cfg = load_categories(s.categories_file)
+    accounts = _accounts(s, cfg, account)
     connect = partial(gmail_mod.connect, s.google_tokens_dir)
     with (
         open_sessions(s.database_url) as sessions,
@@ -188,7 +202,7 @@ def run(
         def run_one(acc: Account) -> None:
             triage.run_account(ctx, acc, mode, limit, lookback)
 
-        _each_account(_accounts(s, account), "account run", run_one)
+        _each_account(accounts, "account run", run_one)
 
 
 @app.command()
@@ -200,6 +214,7 @@ def digest(
     """Send the daily digest to each account's Slack user (exits 1 if any account failed)."""
     s = _settings(announce=not dry_print)  # the timer case announces; a preview doesn't
     cfg = load_categories(s.categories_file)
+    accounts = _accounts(s, cfg, account)
     with open_sessions(s.database_url) as sessions:
 
         def send(acc: Account) -> None:
@@ -213,7 +228,7 @@ def digest(
             digest_mod.send_slack(s.slack_bot_token, acc.slack_user_id, text)
             log.info("digest sent", extra={"account": acc.email})
 
-        _each_account(_accounts(s, account), "digest", send)
+        _each_account(accounts, "digest", send)
 
 
 @app.command()
@@ -284,6 +299,7 @@ def unsubscribe_retry(account: AccountOpt = None) -> None:
     """
     s = _settings()
     cfg = load_categories(s.categories_file)
+    accounts = _accounts(s, cfg, account)
     connect = partial(gmail_mod.connect, s.google_tokens_dir)
     with (
         open_sessions(s.database_url) as sessions,
@@ -296,7 +312,7 @@ def unsubscribe_retry(account: AccountOpt = None) -> None:
                 for list_key, outcome in triage.retry_unsubscribes(ctx, session, gmail, acc):
                     typer.echo(f"{acc.email} {list_key}: {outcome}")
 
-        _each_account(_accounts(s, account), "unsubscribe retry", retry)
+        _each_account(accounts, "unsubscribe retry", retry)
 
 
 @senders_app.command("backfill")
@@ -308,6 +324,7 @@ def senders_backfill(account: AccountOpt = None) -> None:
     and the command exits 1.
     """
     s = _settings()
+    accounts = _accounts(s, load_categories(s.categories_file), account)
     with open_sessions(s.database_url) as sessions:
 
         def backfill(acc: Account) -> None:
@@ -319,7 +336,7 @@ def senders_backfill(account: AccountOpt = None) -> None:
                 f"{skipped} skipped (deleted in Gmail)"
             )
 
-        _each_account(_accounts(s, account), "senders backfill", backfill)
+        _each_account(accounts, "senders backfill", backfill)
 
 
 @app.command()
@@ -378,19 +395,24 @@ def rules_delete(
     account: Annotated[str, typer.Option("--account", "-a")],
     sender: Annotated[str, typer.Argument(help="Address or @domain.")],
 ) -> None:
-    """Remove the rule for SENDER (Jev decides again)."""
+    """Remove the rule for SENDER (an address or @domain; Jev decides again)."""
+    invalid: typer.BadParameter | None = None
+    try:
+        key = _sender_key(sender)
+    except typer.BadParameter as exc:
+        # A rule stored before `rules set` checked its input (e.g. a bare domain) never matches
+        # a sender, but must still be deletable: look it up as typed, lowercased.
+        key, invalid = sender.strip().lower(), exc
     s = _settings()
     with open_sessions(s.database_url) as sessions, sessions() as session:
         rule = session.scalar(
-            select(SenderRule).where(
-                SenderRule.account == account, SenderRule.sender_key == sender.lower()
-            )
+            select(SenderRule).where(SenderRule.account == account, SenderRule.sender_key == key)
         )
         if rule is None:
-            raise typer.BadParameter("no such rule")
+            raise invalid or typer.BadParameter("no such rule")
         session.delete(rule)
         session.commit()
-    typer.echo(f"Deleted rule for {sender}")
+    typer.echo(f"Deleted rule for {key}")
 
 
 @labels_app.command("rename")
@@ -399,11 +421,13 @@ def labels_rename(old: str, new: str, account: AccountOpt = None) -> None:
     categories.yaml to NEW as well, and run this before the next triage pass, or that pass
     creates NEW as a separate, empty label."""
     s = _settings()
-    if new not in load_categories(s.categories_file).all_labels():
+    cfg = load_categories(s.categories_file)
+    accounts = _accounts(s, cfg, account)
+    if new not in cfg.all_labels():
         typer.echo(f"warning: {new!r} is not a label in {s.categories_file}", err=True)
     failed = False
     with open_sessions(s.database_url) as sessions:
-        for acc in _accounts(s, account):
+        for acc in accounts:
             # One account failing (refusal, missing token, Gmail error) doesn't stop the others.
             try:
                 gmail = gmail_mod.connect(s.google_tokens_dir, acc.email)

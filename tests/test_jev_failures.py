@@ -34,7 +34,7 @@ from inbox_jev.classifier import (
     describe_jev_error,
     failure_kind,
 )
-from inbox_jev.config import Mode, Settings
+from inbox_jev.config import LogLevel, Mode, Settings
 from inbox_jev.db import MAX_ERROR_ATTEMPTS, Message, MessageStatus, Run, now
 from inbox_jev.logs import JsonFormatter
 from inbox_jev.rules import RuleSource
@@ -345,9 +345,9 @@ def test_sdk_logger_never_logs_bodies_even_at_debug():
     root, sdk = logging.getLogger(), logging.getLogger("typesafe_sdk")
     saved = (root.handlers[:], root.level, sdk.level)
     try:
-        logs.setup("DEBUG")
+        logs.setup(LogLevel.DEBUG)
         assert root.level == logging.DEBUG and sdk.getEffectiveLevel() == logging.INFO
-        logs.setup("WARNING")
+        logs.setup(LogLevel.WARNING)
         assert sdk.getEffectiveLevel() == logging.WARNING
     finally:
         root.handlers[:], _, _ = saved

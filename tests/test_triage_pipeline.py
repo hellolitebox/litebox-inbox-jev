@@ -97,12 +97,15 @@ def test_act_categories_gate_actions_end_to_end(setup):
         assert s.query(Unsubscribe).count() == 0
 
 
-def test_unknown_act_category_fails_the_run(setup):
+def test_unknown_act_category_fails_closed_in_a_run(setup):
+    """The CLI refuses such a file (`config.validate_accounts`); a caller that skips the check
+    still never acts on the category the typo meant: it is only labeled."""
     ctx, gmail, account = setup
-    account.act_categories = ["notifications"]  # typo
-    with pytest.raises(ValueError, match="unknown act_categories"):
-        triage.run_account(ctx, account, Mode.ACT)
-    assert gmail.modified == []
+    account.act_categories = ["notifications"]  # typo for notification
+    triage.run_account(ctx, account, Mode.ACT)
+    assert gmail.modified  # labeled
+    assert all(remove == [] for _, _, remove in gmail.modified)  # nothing archived or spammed
+    assert gmail.sent == []
 
 
 def test_unverified_marketing_is_archived_not_spammed_or_unsubscribed(setup):

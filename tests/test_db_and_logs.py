@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from typesafe_sdk import Noul, RetryPolicy, TypeSafeClient, TypeSafeError
 
 from inbox_jev import db, logs
-from inbox_jev.config import DigestLanguage, Mode, load_categories
+from inbox_jev.config import DigestLanguage, LogLevel, Mode, load_categories
 from inbox_jev.db import SQLITE_BUSY_TIMEOUT_MS, Base, Message, MessageStatus, make_engine
 from inbox_jev.digest import build
 from inbox_jev.policy import DecisionSource
@@ -179,8 +179,8 @@ def test_setup_keeps_sdk_at_info_with_filter(monkeypatch):
     monkeypatch.setattr(sdk, "filters", list(sdk.filters))
     monkeypatch.setattr(sdk, "level", sdk.level)
     monkeypatch.setattr(httpx2_log, "level", httpx2_log.level)
-    logs.setup("INFO")
-    logs.setup("INFO")
+    logs.setup(LogLevel.INFO)
+    logs.setup(LogLevel.INFO)
     assert sdk.getEffectiveLevel() == logging.INFO
     assert sum(isinstance(f, logs.DropSdkSuccess) for f in sdk.filters) == 1
     assert httpx2_log.level == logging.WARNING

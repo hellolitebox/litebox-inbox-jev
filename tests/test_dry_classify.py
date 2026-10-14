@@ -1,7 +1,12 @@
 """scripts/dry_classify.py: a failed Jev call never prints the SDK's text (it can echo the
-email) and doesn't stop the check of the next emails."""
+email) and doesn't stop the check of the next emails; an accounts file that doesn't match
+categories.yaml stops it with the CLI's one-line message."""
 
-from conftest import make_classification
+import sys
+
+import dry_classify
+import pytest
+from conftest import ROOT, make_classification
 from dry_classify import Checker
 from fakes import FakeClassifier, FakeGmail, email, jev_http_error
 from typesafe_sdk import TypeSafeUnprocessableEntityError
@@ -39,3 +44,17 @@ def test_jev_failure_prints_a_safe_description_and_goes_on(cfg, account, make_se
     assert lines[1].startswith("2  was=-  now=important@0.90  KEEP")
     assert lines[-1] == "emails=2 jev_calls=2"
     assert gmail.modified == [] and gmail.sent == []  # read-only, as ever
+
+
+def test_accounts_not_matching_categories_exit_with_a_message(monkeypatch, tmp_path):
+    accounts = tmp_path / "accounts.yaml"
+    accounts.write_text("accounts:\n  - email: a@acme.com\n    act_categories: [markting]\n")
+    monkeypatch.setenv("ACCOUNTS_FILE", str(accounts))
+    monkeypatch.setenv("CATEGORIES_FILE", str(ROOT / "categories.yaml"))
+    monkeypatch.setattr(sys, "argv", ["dry_classify.py", "--account", "a@acme.com", "--ids", "1"])
+    monkeypatch.setattr(dry_classify, "connect", lambda d, email: pytest.fail("Gmail opened"))
+    with pytest.raises(SystemExit) as exc:
+        dry_classify.main()
+    message = str(exc.value.code)
+    assert message.startswith(f"{accounts}: accounts use categories")
+    assert "a@acme.com: unknown act_categories ['markting']" in message

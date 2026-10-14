@@ -7,7 +7,15 @@ from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from inbox_jev import cli
-from inbox_jev.config import Account, CategoriesConfig, DigestLanguage, Settings
+from inbox_jev.config import (
+    Account,
+    CategoriesConfig,
+    ConfigError,
+    DigestLanguage,
+    LogLevel,
+    Settings,
+    validate_accounts,
+)
 
 
 def account(text):
@@ -182,3 +190,98 @@ def test_env_example_lists_every_setting():
     text = (ROOT / ".env.example").read_text()
     listed = set(re.findall(r"^#?([A-Z][A-Z0-9_]*)=", text, re.MULTILINE))
     assert {name.upper() for name in Settings.model_fields} - listed == set()
+
+
+def test_settings_defaults_are_unchanged():
+    s = Settings(_env_file=None)
+    assert (s.max_messages_per_run, s.max_unsubscribes_per_run, s.body_chars) == (200, 20, 3000)
+    assert s.log_level is LogLevel.INFO
+
+
+@pytest.mark.parametrize(("value", "level"), [("debug", "DEBUG"), (" Warning ", "WARNING")])
+def test_log_level_is_case_insensitive(value, level):
+    assert Settings(_env_file=None, log_level=value).log_level == level
+
+
+@pytest.mark.parametrize("value", ["verbose", "WARN", ""])
+def test_log_level_rejects_unknown_levels(value):
+    # "WARN" is an alias `logging` accepts, but only the five canonical names are documented.
+    with pytest.raises(ValidationError, match="log_level"):
+        Settings(_env_file=None, log_level=value)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("max_messages_per_run", 0),
+        ("max_messages_per_run", -1),
+        ("max_unsubscribes_per_run", -1),
+        ("body_chars", 0),
+        ("body_chars", -100),  # would cut the body from the end
+    ],
+)
+def test_settings_reject_out_of_range_ints(field, value):
+    with pytest.raises(ValidationError, match=field):
+        Settings(_env_file=None, **{field: value})
+
+
+def test_zero_unsubscribes_per_run_is_allowed():
+    """MAX_UNSUBSCRIBES_PER_RUN=0 is the documented way to never unsubscribe."""
+    assert Settings(_env_file=None, max_unsubscribes_per_run=0).max_unsubscribes_per_run == 0
+
+
+def _with(cfg, path, value):
+    """`cfg` as a dict with the key at `path` (a dotted path, indexes as ints) set to `value`."""
+    data = cfg.model_dump()
+    *parents, last = [int(k) if k.isdigit() else k for k in path.split(".")]
+    node = data
+    for key in parents:
+        node = node[key]
+    node[last] = value
+    return data
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "categories.0.min_confidence",
+        "tags.0.threshold",
+        "needs_reply.threshold",
+        "auto_rule.min_confidence",
+        "auto_rule.max_keep_probability",
+        "archive_group_min_confidence",
+        "archive_group_reply_keep_probability",
+    ],
+)
+@pytest.mark.parametrize("value", [-0.1, 1.5])
+def test_probabilities_must_be_between_0_and_1(cfg, path, value):
+    with pytest.raises(ValidationError, match="less than or equal to 1|greater than or equal"):
+        CategoriesConfig.model_validate(_with(cfg, path, value))
+
+
+def test_auto_rule_needs_at_least_one_hit(cfg):
+    with pytest.raises(ValidationError, match="hits"):
+        CategoriesConfig.model_validate(_with(cfg, "auto_rule.hits", 0))
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.5])
+def test_account_min_confidence_must_be_between_0_and_1(value):
+    with pytest.raises(ValidationError, match="min_confidence"):
+        account(f"min_confidence: {{marketing: {value}}}\n")
+
+
+def test_validate_accounts_accepts_known_keys(cfg):
+    ok = account("act_categories: [marketing]\nmin_confidence: {newsletter: 0.9}\n")
+    validate_accounts([ok, account("")], cfg)  # no error
+
+
+def test_validate_accounts_lists_every_unknown_key_of_every_account(cfg):
+    a = account("act_categories: [marketing, notifications]\nmin_confidence: {markting: 0.9}\n")
+    b = Account.model_validate({"email": "b@acme.com", "act_categories": ["promo"]})
+    with pytest.raises(ConfigError) as err:
+        validate_accounts([a, b], cfg)
+    message = str(err.value)
+    assert "me@acme.com: unknown act_categories ['notifications']" in message
+    assert "me@acme.com: unknown min_confidence ['markting']" in message
+    assert "b@acme.com: unknown act_categories ['promo']" in message
+    assert "known: important," in message

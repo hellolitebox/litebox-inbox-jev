@@ -6,6 +6,7 @@ import re
 from enum import StrEnum
 from functools import cached_property
 from pathlib import Path
+from typing import Annotated
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -13,6 +14,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .psl import is_public_suffix
 from .signals import DOMAIN, domain_of, on_domain
+
+# A probability or confidence threshold: Jev's probabilities are between 0 and 1.
+Probability = Annotated[float, Field(ge=0.0, le=1.0)]
 
 # Gmail `newer_than:` units: days, months, years.
 LOOKBACK_RE = re.compile(r"^\d+[dmy]$")
@@ -158,6 +162,16 @@ class DigestLanguage(StrEnum):
     ES = "es"
 
 
+class LogLevel(StrEnum):
+    """LOG_LEVEL: a `logging` level name, accepted in any case (`info`, `Info`)."""
+
+    DEBUG = "DEBUG"
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+    CRITICAL = "CRITICAL"
+
+
 class Action(StrEnum):
     KEEP = "keep"
     ARCHIVE = "archive"
@@ -178,15 +192,20 @@ class Settings(BaseSettings):
     categories_file: Path = Path("categories.yaml")
     mode: Mode = Mode.DRY_RUN
     lookback: str = "2d"
-    max_messages_per_run: int = 200
-    max_unsubscribes_per_run: int = 20
-    body_chars: int = 3000
-    log_level: str = "INFO"
+    max_messages_per_run: int = Field(default=200, ge=1)
+    max_unsubscribes_per_run: int = Field(default=20, ge=0)  # 0 never unsubscribes
+    body_chars: int = Field(default=3000, ge=1)
+    log_level: LogLevel = LogLevel.INFO
 
     @field_validator("lookback")
     @classmethod
     def _check_lookback(cls, value: str) -> str:
         return check_lookback(value)
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def _upper_log_level(cls, value: object) -> object:
+        return value.strip().upper() if isinstance(value, str) else value
 
 
 class Category(BaseModel):
@@ -194,7 +213,7 @@ class Category(BaseModel):
     label: str
     criteria: str
     action: Action
-    min_confidence: float = 0.0
+    min_confidence: Probability = 0.0
     # archive_unsubscribe only: False never unsubscribes when I wrote to the sender or their
     # domain (previous_contact); the email is still archived. Applies on the Jev and rule paths.
     unsubscribe_known_contacts: bool = True
@@ -204,21 +223,21 @@ class Tag(BaseModel):
     key: str
     label: str
     question: str
-    threshold: float = 0.8
+    threshold: Probability = 0.8
 
 
 class NeedsReply(BaseModel):
     label: str = "Jev/Needs Reply"
     question: str = "Does the sender expect a reply or an action from me personally?"
-    threshold: float = 0.7
+    threshold: Probability = 0.7
 
 
 class AutoRule(BaseModel):
-    hits: int = 3
-    min_confidence: float = 0.95
+    hits: int = Field(default=3, ge=1)
+    min_confidence: Probability = 0.95
     # An answer only counts when the keep categories (other than the decided one) add up to less
     # than this: senders that mix routine and action-needed mail never earn an archive rule.
-    max_keep_probability: float = Field(default=0.02, ge=0.0, le=1.0)
+    max_keep_probability: Probability = 0.02
 
 
 class CategoriesConfig(BaseModel):
@@ -230,13 +249,13 @@ class CategoriesConfig(BaseModel):
     auto_rule: AutoRule = Field(default_factory=AutoRule)
     # Archive when the archive categories' probabilities add up to this, even if the top one
     # alone is below its min_confidence. None disables it.
-    archive_group_min_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    archive_group_min_confidence: Probability | None = None
     # needs_reply only blocks a group archive when the keep categories (important,
     # action_required) together reach this, unless I have written to the sender or their
     # domain and the email can be replied to (then any reply signal blocks it). 0 = any reply
     # signal blocks it. Must be at most 1 - archive_group_min_confidence: above that the keep
     # categories can never reach it.
-    archive_group_reply_keep_probability: float = Field(default=0.05, ge=0.0, le=1.0)
+    archive_group_reply_keep_probability: Probability = 0.05
 
     @model_validator(mode="after")
     def _validate(self) -> CategoriesConfig:
@@ -289,9 +308,11 @@ class Account(BaseModel):
     # Opt-in: empty means no group is trusted, not even the account's own domain. Only list
     # domains whose Google Workspace you control.
     group_domains: list[str] = Field(default_factory=list)
-    min_confidence: dict[str, float] = Field(default_factory=dict)
+    # Keys must be categories in categories.yaml (`validate_accounts`).
+    min_confidence: dict[str, Probability] = Field(default_factory=dict)
     # In act mode, only these category keys get their action; the rest are labeled only.
     # Absent = all categories act; [] = none do. An explicit empty key is rejected (fail closed).
+    # Keys must be categories in categories.yaml (`validate_accounts`).
     act_categories: list[str] | None = None
 
     @field_validator("act_categories", mode="before")
@@ -319,6 +340,34 @@ class Account(BaseModel):
 
 class AccountsConfig(BaseModel):
     accounts: list[Account]
+
+
+class ConfigError(ValueError):
+    """The accounts file doesn't fit the categories file (see `validate_accounts`)."""
+
+
+def validate_accounts(accounts: list[Account], cfg: CategoriesConfig) -> None:
+    """Raise ConfigError listing every `act_categories` and `min_confidence` key, of every
+    account, that isn't a category in `cfg`.
+
+    The two files load separately, so each model can't check this alone. An unknown key would
+    otherwise be ignored: a typo in `act_categories` would silently leave that category
+    labeled only, and one in `min_confidence` would leave the category on its default threshold.
+    """
+    problems: list[str] = []
+    for account in accounts:
+        for field, keys in (
+            ("act_categories", account.act_categories or []),
+            ("min_confidence", account.min_confidence),
+        ):
+            unknown = sorted(set(keys) - set(cfg.by_key))
+            if unknown:
+                problems.append(f"{account.email}: unknown {field} {unknown}")
+    if problems:
+        raise ConfigError(
+            "accounts use categories that aren't in the categories file "
+            f"(known: {', '.join(cfg.by_key)}):\n" + "\n".join(f"  {p}" for p in problems)
+        )
 
 
 def load_categories(path: Path) -> CategoriesConfig:

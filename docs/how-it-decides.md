@@ -26,12 +26,16 @@ Contents:
 
 `inbox-jev run` (`triage.run_account`) handles one account:
 
-1. The **mode** is `--mode`, else the account's `mode`, else `MODE` from `.env` (default
-   `dry_run`). A `runs` row is stored before anything else, so every failure below ends up in
-   `runs.error` (shown in the digest) and the run still gets its `finished_at`. An
-   `act_categories` key that isn't in `categories.yaml` fails the account's run before anything
-   is touched. So does a Gmail token that can't be refreshed, with one of three `runs.error`
-   texts, depending on how google-auth reports the failure:
+1. First, the command checks the whole `accounts.yaml` against `categories.yaml`
+   (`config.validate_accounts`): an `act_categories` or `min_confidence` key, of any account,
+   that isn't a category stops `run` with exit 2 and one message listing them all, before the
+   database or Gmail is opened, so no `runs` row is stored (and `digest` fails the same way; see
+   Known gaps). The **mode** is `--mode`, else the account's `mode`, else `MODE` from `.env`
+   (default `dry_run`). A `runs` row is then stored before anything else, so every failure below
+   ends up in `runs.error` (shown in the digest) and the run still gets its `finished_at`. A
+   Gmail token that can't be refreshed fails the account's run before anything
+   is touched, with one of three `runs.error` texts, depending on how google-auth reports the
+   failure:
    - `invalid_grant` (token expired or revoked): run `inbox-jev auth add EMAIL`;
    - a failure google-auth marks retryable (a 5xx or `temporarily_unavailable` with a JSON
      error body): "temporary", it will retry next run;
@@ -212,7 +216,8 @@ Review decision never gets `unsubscribe_skipped_unverified`
 ### 3.1 Categories
 
 From `categories.yaml`. An account can raise or lower any threshold with `min_confidence:
-{category: value}` in `accounts.yaml`.
+{category: value}` in `accounts.yaml` (a category key, a value between 0 and 1; every threshold
+and probability in `categories.yaml` is between 0 and 1 too, or the file fails to load).
 
 | Category | Label | `action` | `min_confidence` | Notes |
 |---|---|---|---|---|
@@ -445,7 +450,11 @@ Keep categories can earn a rule too.
 | `act`, category not in the account's `act_categories` | yes | yes | no (treated as `label`) |
 
 - `act_categories` is matched against the **final** category. Absent = every category acts; `[]`
-  = none; an empty key (`act_categories:` with nothing) is rejected at load.
+  = none; an empty key (`act_categories:` with nothing) is rejected at load, and so is a key
+  that isn't a category in `categories.yaml` (`config.validate_accounts`, run by every command
+  that reads `accounts.yaml`). `triage.run_account` itself doesn't repeat that check: a key that
+  matches no category only fails closed (the category it was meant for is labeled, not acted
+  on).
 - In `act`, archive removes `INBOX`; spam removes `INBOX` and adds `SPAM` (the row is `spammed`,
   not `archived`).
 - When an email is processed again (weaker mode before, or `reprocess`), labels from the earlier
@@ -1430,6 +1439,10 @@ Behaviour found while writing this spec, documented as it is today:
 - `FREE_MAIL` is a list: a free-mail provider missing from it (a small regional one) is still
   searched as a company domain, so writing to one person there makes its other users known
   contacts. Adding one is always safe.
+- An `accounts.yaml` that doesn't fit `categories.yaml` (an unknown `act_categories` or
+  `min_confidence` key) stops every command that reads it, `digest` included, so it shows up
+  only as the timers' failed units and their stderr (`journalctl`), not in Slack. Run
+  `inbox-jev digest --dry-print` after editing either file.
 - Machine addresses that need context to recognise (`notifications@`, `updates@`, opaque VERP
   tokens on a normal host, a ticketing system's `support+123@`) are not detected: they still
   make a known contact. Being wrong there keeps more mail, the safe side.

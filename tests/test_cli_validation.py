@@ -61,6 +61,42 @@ def test_rules_set_refuses_anything_else(db, sender):
         assert s.query(SenderRule).count() == 0
 
 
+def test_rules_delete_normalises_the_sender_like_rules_set(db):
+    assert _invoke("rules", "set", "-a", "me@acme.com", "@Example.com", "marketing").exit_code == 0
+    result = _invoke("rules", "delete", "-a", "me@acme.com", "  @EXAMPLE.com ")
+    assert result.exit_code == 0, result.output
+    assert "Deleted rule for @example.com" in result.output
+    with db() as s:
+        assert s.query(SenderRule).count() == 0
+
+
+def test_rules_delete_refuses_a_sender_that_is_no_rule_key(db):
+    result = _invoke("rules", "delete", "-a", "me@acme.com", "example.com")
+    assert result.exit_code == 2 and "neither an address" in result.output
+
+
+@pytest.mark.parametrize("legacy", ["example.com", "acme billing"])
+def test_rules_delete_removes_a_legacy_rule_that_is_no_rule_key(db, legacy):
+    """A rule stored as typed before `rules set` checked its input can still be deleted."""
+    with db() as s:
+        s.add(
+            SenderRule(
+                account="me@acme.com", sender_key=legacy, category="marketing", source="manual"
+            )
+        )
+        s.commit()
+    result = _invoke("rules", "delete", "-a", "me@acme.com", f" {legacy.upper()} ")
+    assert result.exit_code == 0, result.output
+    assert f"Deleted rule for {legacy}" in result.output
+    with db() as s:
+        assert s.query(SenderRule).count() == 0
+
+
+def test_rules_delete_of_a_missing_rule_is_a_usage_error(db):
+    result = _invoke("rules", "delete", "-a", "me@acme.com", "ana@example.com")
+    assert result.exit_code == 2 and "no such rule" in result.output
+
+
 def test_rules_set_refuses_an_unknown_category(db):
     result = _invoke("rules", "set", "-a", "me@acme.com", "ana@example.com", "markting")
     assert result.exit_code == 2 and "unknown category 'markting'" in result.output

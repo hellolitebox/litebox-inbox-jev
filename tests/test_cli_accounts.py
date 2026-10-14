@@ -112,3 +112,32 @@ def test_labels_rename_tells_refusals_from_failures(env, monkeypatch):
     assert "a@acme.com: refused: 'INBOX' is a system label" in result.output
     assert "b@acme.com: failed: unparseable Gmail answer" in result.output
     assert result.exit_code == 1
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["run"],
+        ["run", "-a", "b@acme.com"],  # the whole file is checked, not only the named account
+        ["digest", "--dry-print"],
+        ["unsubscribe-retry"],
+        ["senders", "backfill"],
+        ["labels", "rename", "Jev/Old", "Jev/New"],
+    ],
+)
+def test_accounts_not_matching_categories_fail_every_command_before_it_starts(
+    env, monkeypatch, tmp_path, command
+):
+    (tmp_path / "accounts.yaml").write_text(
+        "accounts:\n"
+        "  - email: a@acme.com\n    act_categories: [notifications]\n"
+        "  - email: b@acme.com\n    min_confidence: {markting: 0.9}\n"
+    )
+    connected = []
+    monkeypatch.setattr(cli.gmail_mod, "connect", lambda d, email: connected.append(email))
+    result = CliRunner().invoke(cli.app, command)
+    assert result.exit_code == 2, result.output
+    assert "a@acme.com: unknown act_categories ['notifications']" in result.output
+    assert "b@acme.com: unknown min_confidence ['markting']" in result.output
+    assert connected == []
+    assert not (tmp_path / "db.sqlite").exists()  # the database isn't even opened

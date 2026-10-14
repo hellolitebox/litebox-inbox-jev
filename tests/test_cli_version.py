@@ -56,7 +56,7 @@ def _stub_digest(monkeypatch):
     monkeypatch.setattr(cli, "Settings", lambda: settings)
     monkeypatch.setattr(cli, "load_categories", lambda path: None)
     monkeypatch.setattr(cli, "open_sessions", lambda url: nullcontext())
-    monkeypatch.setattr(cli, "_accounts", lambda s, only: [])
+    monkeypatch.setattr(cli, "_accounts", lambda s, cfg, only: [])
 
 
 def test_digest_announces_the_revision_unless_previewing(monkeypatch, caplog):
