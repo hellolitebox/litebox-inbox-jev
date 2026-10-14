@@ -182,8 +182,9 @@ def build(
     out = [t["header"].format(account=account, hours=hours, modes=", ".join(modes) or "—")]
 
     counts = Counter(m.category for m in done if not m.low_confidence)
-    labels = {c.key: c.label for c in cfg.categories}
-    summary = " · ".join(f"{labels.get(k or '', k)}: {n}" for k, n in counts.most_common())
+    summary = " · ".join(
+        f"{cfg.by_key[k].label if k in cfg.by_key else k}: {n}" for k, n in counts.most_common()
+    )
     low = [m for m in done if m.low_confidence]
     out.append(
         t["summary"].format(

@@ -16,27 +16,29 @@ from __future__ import annotations
 
 import argparse
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from sqlalchemy import Engine, create_engine, make_url, select
 from sqlalchemy.orm import Session
 
 from inbox_jev import rules, triage
-from inbox_jev.classifier import Classifier, JevError, build_state, describe_jev_error
+from inbox_jev.classification import Classification
+from inbox_jev.classifier import Classifier, JevError, JevState, describe_jev_error
 from inbox_jev.config import (
     Account,
     CategoriesConfig,
     ConfigError,
     Mode,
     Settings,
+    find_account,
     load_accounts,
     load_categories,
     validate_accounts,
 )
 from inbox_jev.db import Message
 from inbox_jev.gmail import connect
-from inbox_jev.policy import Decision, decide, flags_only, is_allowed
+from inbox_jev.policy import Decision, decide
 
 
 def _short(text: str, n: int) -> str:
@@ -63,6 +65,18 @@ def _outcome(decision: Decision) -> str:
 
 
 @dataclass
+class _CountingClassifier:
+    """`classifier` counting the calls made to it, failed ones included."""
+
+    classifier: triage.Classifies
+    calls: int = 0
+
+    def classify(self, state: JevState) -> Classification:
+        self.calls += 1
+        return self.classifier.classify(state)
+
+
+@dataclass
 class Checker:
     """Decides emails as this checkout's code would, read-only, and prints one report each."""
 
@@ -74,7 +88,18 @@ class Checker:
     mode: Mode  # the sent-mail search on rules depends on it
     body_chars: int
     ignore_rules: bool = False
-    jev_calls: int = 0
+    _jev: _CountingClassifier = field(init=False, repr=False)
+    _sources: triage.InputSources = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._jev = _CountingClassifier(self.classifier)
+        self._sources = triage.InputSources(
+            self.cfg, self.session, self.gmail, self._jev, self.account, self.mode, self.body_chars
+        )
+
+    @property
+    def jev_calls(self) -> int:
+        return self._jev.calls
 
     def run(self, ids: list[str]) -> None:
         """Print each email's report, then the totals.
@@ -86,7 +111,6 @@ class Checker:
             try:
                 report = self.report(message_id)
             except JevError as exc:
-                self.jev_calls += 1
                 report = f"{message_id}  JEV FAILED: {describe_jev_error(exc)}"
             print(report)
         print(f"emails={len(ids)} jev_calls={self.jev_calls}")
@@ -97,7 +121,6 @@ class Checker:
         Raises `JevError` when Jev decides the email and the call fails.
         """
         cfg, account, session = self.cfg, self.account, self.session
-        flags_failed = False
         email = self.gmail.get(message_id)
         sig = triage.signals_for(email, account)
         old = session.scalar(
@@ -108,31 +131,20 @@ class Checker:
             if self.ignore_rules
             else rules.match(session, account.email, sig.sender, cfg.by_key)
         )
-        # Same calls as `run` (triage._gather_inputs): Jev with the sent-mail search when no rule
-        # or allowlist decides, Jev for the flags only on keep rules and the allowlist, and the
-        # sent-mail search on a rule only when it could unsubscribe.
-        classification, contact = None, None
-        if not is_allowed(account, sig) and rule is None:
-            contact = triage.previous_contact(self.gmail, account.email, sig.sender)
-            classification = self.classifier.classify(
-                build_state(email, account.email, self.body_chars, contact, sig)
-            )
-        elif flags_only(cfg, account, sig, rule.category if rule else None):
-            classification = triage.flags_classification(
-                self.classifier, email, account, self.body_chars, sig
-            )
-            flags_failed = classification is None
-        elif rule and triage.rule_needs_contact(
-            cfg, session, account, sig, rule.category, self.mode
-        ):
-            contact = triage.previous_contact(self.gmail, account.email, sig.sender)
-        self.jev_calls += classification is not None or flags_failed
+        calls_before = self._jev.calls
+        # The same calls as `run`: Jev with the sent-mail search when no rule or allowlist
+        # decides, Jev for the flags only on keep rules and the allowlist, and the sent-mail
+        # search on a rule only when it could unsubscribe.
+        inputs = triage.gather_inputs(self._sources, email, sig, rule)
+        classification, contact = inputs.classification, inputs.contact
+        # Only the flags-only call's failure leaves no answer: Jev's own failure raises.
+        flags_failed = classification is None and self._jev.calls > calls_before
         decision = decide(
             cfg,
             account,
             sig,
             classification,
-            rule.category if rule else None,
+            inputs.rule_category,
             previous_contact=contact,
         )
         flags = [
@@ -182,10 +194,9 @@ def main() -> None:
         validate_accounts(all_accounts, cfg)  # as every CLI command does: the whole file
     except ConfigError as exc:
         sys.exit(f"{s.accounts_file}: {exc}")
-    accounts = [a for a in all_accounts if a.email.lower() == args.account.lower()]
-    if not accounts:
+    account = find_account(all_accounts, args.account)
+    if account is None:
         sys.exit(f"{args.account} is not in {s.accounts_file}")
-    account = accounts[0]
 
     gmail = connect(s.google_tokens_dir, account.email)
     ids = list(args.ids)

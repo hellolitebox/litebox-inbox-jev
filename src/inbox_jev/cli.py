@@ -24,6 +24,7 @@ from .config import (
     Mode,
     Settings,
     check_lookback,
+    find_account,
     load_accounts,
     load_categories,
     validate_accounts,
@@ -99,20 +100,32 @@ def _accounts(settings: Settings, cfg: CategoriesConfig, only: str | None) -> li
     except ConfigError as exc:
         typer.echo(f"{settings.accounts_file}: {exc}", err=True)
         raise typer.Exit(2) from exc
-    if only:
-        accounts = [a for a in accounts if a.email.lower() == only.lower()]
-        if not accounts:
-            raise typer.BadParameter(f"{only} is not in {settings.accounts_file}")
-    return accounts
+    if not only:
+        return accounts
+    found = find_account(accounts, only)
+    if found is None:
+        raise typer.BadParameter(f"{only} is not in {settings.accounts_file}")
+    return [found]
 
 
-def _each_account(accounts: list[Account], what: str, work: Callable[[Account], None]) -> None:
+def _each_account(
+    accounts: list[Account],
+    what: str,
+    work: Callable[[Account], None],
+    expected: tuple[type[Exception], ...] = (),
+) -> None:
     """Do `work` for each account: one failing (token, Gmail, Slack, Jev, DB) doesn't stop the
-    others. Each failure is logged and printed; the command exits 1 if any account failed."""
+    others. Each failure is logged and printed; the command exits 1 if any account failed.
+
+    An `expected` exception (the command refusing, e.g. `labels.LabelRenameRefused`) is printed
+    as `refused`, without logging a traceback."""
     failed = False
     for acc in accounts:
         try:
             work(acc)
+        except expected as exc:
+            failed = True
+            typer.echo(f"{acc.email}: refused: {exc}", err=True)
         except Exception as exc:
             failed = True
             log.exception(f"{what} failed", extra={"account": acc.email})
@@ -425,26 +438,15 @@ def labels_rename(old: str, new: str, account: AccountOpt = None) -> None:
     accounts = _accounts(s, cfg, account)
     if new not in cfg.all_labels():
         typer.echo(f"warning: {new!r} is not a label in {s.categories_file}", err=True)
-    failed = False
     with open_sessions(s.database_url) as sessions:
-        for acc in accounts:
-            # One account failing (refusal, missing token, Gmail error) doesn't stop the others.
-            try:
-                gmail = gmail_mod.connect(s.google_tokens_dir, acc.email)
-                with sessions() as session:
-                    outcome = labels.rename(gmail, session, acc.email, old, new)
-            except labels.LabelRenameRefused as exc:
-                failed = True
-                typer.echo(f"{acc.email}: refused: {exc}", err=True)
-                continue
-            except Exception as exc:
-                failed = True
-                log.exception("label rename failed", extra={"account": acc.email})
-                typer.echo(f"{acc.email}: failed: {exc}", err=True)
-                continue
+
+        def rename(acc: Account) -> None:
+            gmail = gmail_mod.connect(s.google_tokens_dir, acc.email)
+            with sessions() as session:
+                outcome = labels.rename(gmail, session, acc.email, old, new)
             typer.echo(f"{acc.email}: {old} -> {new}: {outcome}")
-    if failed:
-        raise typer.Exit(1)
+
+        _each_account(accounts, "label rename", rename, expected=(labels.LabelRenameRefused,))
 
 
 if __name__ == "__main__":

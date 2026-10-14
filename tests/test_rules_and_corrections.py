@@ -366,6 +366,25 @@ def test_match_reads_address_and_domain_rules_in_one_query(cfg, session):
     assert len(queries) == 1
 
 
+def test_sender_rules_keep_the_inactive_exact_row_for_record_auto(cfg, session):
+    """`rules.load` reads every rule of the sender at once: `match` only uses the active ones,
+    and `record_auto` counts on the exact-address row it got (`known`) without reading it
+    again, pending or not."""
+    note = make_classification("notification", 0.97)
+    d = Decision(category="notification", confidence=0.97, source=DecisionSource.JEV)
+    rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", note, d)  # pending, 1 hit
+    rules.set_rule(session, "me@acme.com", "@sub.com", "newsletter", RuleSource.MANUAL)
+    session.commit()
+    known = rules.load(session, "me@acme.com", "n@sub.com")
+    assert [r.sender_key for r in known.rows] == ["n@sub.com", "@sub.com"]
+    assert known.exact is not None and not known.exact.active
+    assert known.match(cfg.by_key)[0].sender_key == "@sub.com"
+    with selects_from(session.get_bind(), "sender_rules") as queries:
+        rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", note, d, known=known)
+    assert queries == []
+    assert known.exact.hits == 2
+
+
 def test_an_answer_not_counted_still_resets_a_pending_rule(cfg, session):
     """`count=False` (an email already learned from): no hit, no new rule, but the reset holds."""
     note = make_classification("notification", 0.97)

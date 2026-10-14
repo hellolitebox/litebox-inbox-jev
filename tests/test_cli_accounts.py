@@ -97,7 +97,7 @@ def test_run_without_jev_key_fails_every_account_before_gmail(env, monkeypatch):
         ]
 
 
-def test_labels_rename_tells_refusals_from_failures(env, monkeypatch):
+def test_labels_rename_tells_refusals_from_failures(env, monkeypatch, caplog):
     """Only `LabelRenameRefused` is reported as refused; any other error (even a ValueError from
     a library) is a failure, logged with its traceback."""
     monkeypatch.setattr(cli.gmail_mod, "connect", lambda tokens_dir, email: object())
@@ -110,8 +110,10 @@ def test_labels_rename_tells_refusals_from_failures(env, monkeypatch):
     monkeypatch.setattr(labels, "rename", rename)
     result = CliRunner().invoke(cli.app, ["labels", "rename", "INBOX", "Jev/Inbox"])
     assert "a@acme.com: refused: 'INBOX' is a system label" in result.output
-    assert "b@acme.com: failed: unparseable Gmail answer" in result.output
+    assert "b@acme.com: label rename failed: ValueError: unparseable Gmail answer" in result.output
     assert result.exit_code == 1
+    # A refusal is expected: printed, never logged as a failure with a traceback.
+    assert [r.account for r in caplog.records if r.exc_info] == ["b@acme.com"]
 
 
 @pytest.mark.parametrize(

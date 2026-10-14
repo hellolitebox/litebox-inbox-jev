@@ -14,6 +14,7 @@ from inbox_jev.config import (
     DigestLanguage,
     LogLevel,
     Settings,
+    find_account,
     validate_accounts,
 )
 
@@ -190,6 +191,30 @@ def test_env_example_lists_every_setting():
     text = (ROOT / ".env.example").read_text()
     listed = set(re.findall(r"^#?([A-Z][A-Z0-9_]*)=", text, re.MULTILINE))
     assert {name.upper() for name in Settings.model_fields} - listed == set()
+
+
+def test_allowlist_is_normalised_once_and_matched_ignoring_case():
+    acc = account("allow_senders: [' VIP@Partner.com ']\nallow_domains: ['ACME.org ']\n")
+    assert acc.allow_senders == ["vip@partner.com"]
+    assert acc.allow_domains == ["acme.org"]
+    assert acc.matches_allowlist("Vip@partner.COM")
+    assert acc.matches_allowlist("ann@eu.Acme.org")  # subdomains included
+    assert not acc.matches_allowlist("ann@notacme.org")
+    assert not acc.matches_allowlist("other@partner.com")
+
+
+def test_find_account_ignores_case():
+    a, b = account(""), Account(email="Ops@Acme.com")
+    assert find_account([a, b], "ops@ACME.com") is b
+    assert find_account([a, b], "ME@acme.com") is a
+    assert find_account([a, b], "nobody@acme.com") is None
+
+
+def test_label_maps(cfg):
+    assert all(cfg.by_label[c.label] == c.key for c in cfg.categories)
+    assert len(cfg.by_label) == len(cfg.categories)
+    assert cfg.managed_labels == frozenset(cfg.all_labels()) - {cfg.processed_label}
+    assert cfg.review_label in cfg.managed_labels and cfg.needs_reply.label in cfg.managed_labels
 
 
 def test_settings_defaults_are_unchanged():

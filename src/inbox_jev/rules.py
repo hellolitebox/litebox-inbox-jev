@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Collection
+from dataclasses import dataclass
 from enum import StrEnum
 
 from sqlalchemy import select
@@ -20,6 +21,45 @@ class RuleSource(StrEnum):
     MANUAL = "manual"  # `inbox-jev rules set`
     CORRECTION = "correction"  # learned from a label the user changed in Gmail
     AUTO = "auto"  # learned from consistent, confident Jev answers (record_auto)
+
+
+@dataclass(frozen=True)
+class SenderRules:
+    """Every rule keyed on one sender (exact address, then @domain), active or not.
+
+    Read once per email (`load`): `match` decides with the active ones, and `record_auto` gets
+    the exact-address row (`exact`) it may update, active or not, without reading it again.
+    """
+
+    sender: str
+    rows: tuple[SenderRule, ...]  # in lookup order: exact address, then @domain
+
+    @property
+    def active(self) -> list[SenderRule]:
+        """The active rules, in lookup order."""
+        return [r for r in self.rows if r.active]
+
+    @property
+    def exact(self) -> SenderRule | None:
+        """The rule keyed on the exact address, active or not (auto rules are keyed so)."""
+        return next((r for r in self.rows if r.sender_key == self.sender), None)
+
+    def match(self, categories: Collection[str]) -> tuple[SenderRule | None, SenderRule | None]:
+        """The rule that decides for the sender, as `(rule, stale)` (see the module's `match`)."""
+        found = self.active
+        first = found[0] if found else None
+        if first is None or first.category in categories:
+            return first, None
+        return None, first
+
+
+def load(session: Session, account: str, sender: str) -> SenderRules:
+    """Every rule matching `sender` (`SenderRules`), in one query."""
+    keys = rule_keys(sender)
+    found = session.scalars(
+        select(SenderRule).where(SenderRule.account == account, SenderRule.sender_key.in_(keys))
+    ).all()
+    return SenderRules(sender, tuple(sorted(found, key=lambda r: keys.index(r.sender_key))))
 
 
 def lookup(session: Session, account: str, sender: str) -> SenderRule | None:
@@ -41,23 +81,12 @@ def match(
     sender has no rule and Jev decides. It never falls through to the @domain rule: an exact rule
     is the user's exception to it, so applying the domain rule would undo that exception.
     """
-    first = lookup(session, account, sender)
-    if first is None or first.category in categories:
-        return first, None
-    return None, first
+    return load(session, account, sender).match(categories)
 
 
 def active(session: Session, account: str, sender: str) -> list[SenderRule]:
     """Active rules matching `sender`, in lookup order (exact address, then @domain)."""
-    keys = rule_keys(sender)
-    found = session.scalars(
-        select(SenderRule).where(
-            SenderRule.account == account,
-            SenderRule.sender_key.in_(keys),
-            SenderRule.active.is_(True),
-        )
-    ).all()
-    return sorted(found, key=lambda r: keys.index(r.sender_key))
+    return load(session, account, sender).active
 
 
 def set_rule(
@@ -82,6 +111,7 @@ def record_auto(
     previous_contact: PreviousContact | None = None,
     *,
     count: bool = True,
+    known: SenderRules | None = None,
 ) -> None:
     """Count consistent high-confidence answers; activate after cfg.auto_rule.hits.
 
@@ -94,13 +124,13 @@ def record_auto(
     auto rule whose category was removed from categories.yaml is replaced like a pending one
     (`match` sends its sender to Jev: auto rules are keyed on the exact address, so they come
     first).
+    `known` is the sender's rules already read for this email (`load`); without it they are
+    read here.
     """
     is_keep = _is_keep(cfg, decision.category)
     other_keep = cfg.keep_probability(classification.probabilities, exclude=decision.category)
     keep_signal = other_keep >= cfg.auto_rule.max_keep_probability
-    rule = session.scalar(
-        select(SenderRule).where(SenderRule.account == account, SenderRule.sender_key == sender)
-    )
+    rule = (known if known is not None else load(session, account, sender)).exact
     # The sender sends mail that may need to stay in the inbox (e.g. a "payment failed" from a
     # notifications address): restart a pending rule that would archive it.
     if (

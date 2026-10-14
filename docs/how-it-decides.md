@@ -198,10 +198,10 @@ flowchart TD
 C, D and E are one pure function, `policy.unsubscribe_gate`, which every path that can unsubscribe
 calls: the Jev path and the rule path of `run` (through `policy._check_unsubscribe`, only on a
 decision that would otherwise unsubscribe), the rule path's sent-mail search
-(`triage.rule_needs_contact`) and `unsubscribe-retry`. It also refuses a category that doesn't
+(`triage._rule_needs_contact`) and `unsubscribe-retry`. It also refuses a category that doesn't
 unsubscribe and an allowlisted sender (on `run` the allowlist has already decided `important`).
 F is `policy.acts_on`, the one mode / `act_categories` check, used by `policy.plan`,
-`triage.rule_needs_contact` and `unsubscribe-retry`. The list's state (G) is I/O and stays in
+`triage._rule_needs_contact` and `unsubscribe-retry`. The list's state (G) is I/O and stays in
 `triage` ([ADR 0026](decisions/0026-one-unsubscribe-gate-for-every-path.md)).
 
 The gate reports the first check that refused (`Veto`), and `_check_unsubscribe` sets a flag only
@@ -308,7 +308,7 @@ An unsubscribe is irreversible. During `run` it happens only when **all** of the
 The same checks run on the **rule path**, in the same order: a sender rule skips Jev, not the
 sender checks. For a
 rule to a category that spares known contacts, `triage` runs the sent-mail search only when the
-answer could change the outcome (`triage.rule_needs_contact`: `acts_on`, `unsubscribe_gate`
+answer could change the outcome (`triage._rule_needs_contact`: `acts_on`, `unsubscribe_gate`
 passes with only the unknown contact left to decide, list not settled).
 
 A `failed` row is retried by `run` the next time an email from the same list passes all the
@@ -621,7 +621,7 @@ machine address in code needs `SCAN_RULES_VERSION` bumped; a Public Suffix List 
 the scans by itself.
 
 When it runs: on the Jev path for every email (in every mode, including `dry_run`), and on the
-rule path only when `triage.rule_needs_contact` says it can change an unsubscribe. Never for
+rule path only when `triage._rule_needs_contact` says it can change an unsubscribe. Never for
 allowlisted senders or keep rules (their flags-only Jev call goes without it).
 
 Consequences of each value:

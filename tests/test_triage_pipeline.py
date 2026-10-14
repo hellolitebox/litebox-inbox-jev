@@ -184,6 +184,14 @@ def test_process_looks_up_the_stored_row_once_per_email(setup):
     assert len([q for q in again if by_id.search(q)]) == 4
 
 
+def test_process_reads_the_sender_rules_once_per_email(setup):
+    """The rule lookup and the auto rule learned from Jev's answer share one read."""
+    ctx, gmail, account = setup
+    with selects_from(ctx.sessions.kw["bind"], "sender_rules") as queries:
+        triage.run_account(ctx, account, Mode.LABEL)
+    assert len(queries) == len(gmail.emails) == 4
+
+
 @pytest.mark.parametrize("via_rule", [False, True], ids=["jev", "rule"])
 def test_email_row_is_flushed_before_the_unsubscribe_request(setup, monkeypatch, via_rule):
     # The unsubscribe is irreversible: the email's row is written (taking SQLite's write lock)

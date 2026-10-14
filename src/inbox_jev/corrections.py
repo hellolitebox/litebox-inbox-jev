@@ -31,8 +31,7 @@ class LabelReader(Protocol):
 
 def detect(msg: Message, current_labels: set[str], cfg: CategoriesConfig) -> str | None:
     """Return the category the user corrected this email to, or None if untouched."""
-    by_label = {c.label: c.key for c in cfg.categories}
-    current = [by_label[name] for name in current_labels if name in by_label]
+    current = [cfg.by_label[name] for name in current_labels if name in cfg.by_label]
     if len(current) == 1:
         if current[0] != msg.category:
             return current[0]

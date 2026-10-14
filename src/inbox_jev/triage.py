@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import cached_property
 from types import TracebackType
 from typing import Any, Literal, Protocol, Self, cast, get_args
 
@@ -657,6 +658,20 @@ class AccountPass:
     # The email `process` is on, once read from Gmail: what its error row stores if it fails.
     fetched: Email | None = None
 
+    @cached_property
+    def sources(self) -> InputSources:
+        """Where `gather_inputs` reads this pass's emails' inputs: Jev through the pass's guard."""
+        return InputSources(
+            self.ctx.cfg,
+            self.session,
+            self.gmail,
+            self.jev,
+            self.account,
+            self.mode,
+            self.ctx.settings.body_chars,
+            self.scans,
+        )
+
 
 # The stages of `process` timed on the "message processed" log line, in milliseconds: reading
 # the email from Gmail; the sender rule and the sent-mail search; Jev (state included); applying
@@ -687,11 +702,12 @@ def process(p: AccountPass, message_id: str) -> Message:
     """Decide one inbox email, apply the decision in Gmail and store it (committed).
 
     The steps: learn a correction the user made in Gmail since an earlier pass
-    (`_learn_correction`) and hand off an email the user edited (`_user_edited`); gather the
-    sender rule, Jev's answer and the sent-mail search (`_gather_inputs`); decide and plan
-    (`policy`, pure); apply the labels in Gmail and store the outcome; learn an auto rule;
-    unsubscribe within the run cap. Raises `_JevStopped`, before changing anything, when the
-    email needs Jev's decision and `p.jev` has stopped.
+    (`_learn_correction`) and hand off an email the user edited (`_user_edited`); read the
+    sender's rules once (`rules.load`: the rule that decides, `rule_for`, and the row an auto
+    rule is learned on); gather Jev's answer and the sent-mail search (`gather_inputs`);
+    decide and plan (`policy`, pure); apply the labels in Gmail and store the outcome; learn an
+    auto rule; unsubscribe within the run cap. Raises `_JevStopped`, before changing anything,
+    when the email needs Jev's decision and `p.jev` has stopped.
     """
     ctx, session, account, mode = p.ctx, p.session, p.account, p.mode
     timer = _StageTimer()
@@ -711,8 +727,11 @@ def process(p: AccountPass, message_id: str) -> Message:
             if _user_edited(ctx.cfg, account, prev, current):
                 return _leave_alone(session, prev, mode)
 
+    with timer.stage("lookup"):
+        known = rules.load(session, account.email, sig.sender)
+        rule = rule_for(ctx, account, known)
     list_row = _ListRow(session, account.email, sig.list_key)
-    inputs = _gather_inputs(p, email, sig, list_row, timer)
+    inputs = gather_inputs(p.sources, email, sig, rule, list_row=list_row, timer=timer)
     decision = decide(
         ctx.cfg,
         account,
@@ -727,7 +746,7 @@ def process(p: AccountPass, message_id: str) -> Message:
         msg = _upsert_message(session, account.email, email, sig, prev)
         _apply_labels(p.gmail, message_id, msg, p.label_ids, actions)
         _store_outcome(msg, mode, inputs.classification, decision, actions)
-        _learn_auto_rule(p, sig, inputs, decision, counted_before)
+        _learn_auto_rule(p, sig, inputs, decision, counted_before, known)
         if (
             actions.unsubscribe
             and not p.unsub_budget.exhausted
@@ -740,8 +759,27 @@ def process(p: AccountPass, message_id: str) -> Message:
 
 
 @dataclass(frozen=True)
-class _Inputs:
-    """What `policy.decide` gets for one email besides its signals."""
+class InputSources:
+    """What `gather_inputs` reads one account's inputs from.
+
+    `run` builds it from its pass (`AccountPass.sources`: Jev through the pass's `JevGuard`, the
+    sent-mail scans in the DB); `scripts/dry_classify.py` from its read-only clients (the bare
+    `Classifier`, no `scans`: the domain search's progress lasts as long as `gmail`).
+    """
+
+    cfg: CategoriesConfig
+    session: Session
+    gmail: GmailApi
+    classifier: Classifies
+    account: Account
+    mode: Mode  # the rule path's sent-mail search depends on it
+    body_chars: int
+    scans: DomainScans | None = None
+
+
+@dataclass(frozen=True)
+class Inputs:
+    """What `policy.decide` gets for one email besides its signals (`gather_inputs`)."""
 
     rule: SenderRule | None
     classification: Classification | None  # None: Jev not asked, or its flags-only call failed
@@ -783,38 +821,49 @@ def _leave_alone(session: Session, msg: Message, mode: Mode) -> Message:
     return msg
 
 
-def _gather_inputs(
-    p: AccountPass, email: Email, sig: Signals, list_row: _ListRow, timer: _StageTimer
-) -> _Inputs:
-    """The sender rule, Jev's answer and the sent-mail search, each only where it can matter.
+def gather_inputs(
+    src: InputSources,
+    email: Email,
+    sig: Signals,
+    rule: SenderRule | None,
+    *,
+    list_row: _ListRow | None = None,
+    timer: _StageTimer | None = None,
+) -> Inputs:
+    """Jev's answer and the sent-mail search for an email with sender rule `rule`, each only
+    where it can matter. `run` and `scripts/dry_classify.py` both call it, so the script makes
+    the same calls as a pass.
 
     No allowlist entry and no rule: Jev decides, told whether I wrote to the sender (neither is
-    asked once `p.jev` has stopped: `_JevStopped`). The allowlist or a rule to a keep category
-    (`policy.flags_only`): Jev only for the flags, no search. Any other rule: the search only if
-    it could stop an unsubscribe (`_rule_needs_contact`).
+    asked once a pass's `JevGuard` has stopped: `_JevStopped`). The allowlist or a rule to a
+    keep category (`policy.flags_only`): Jev only for the flags, no search. Any other rule: the
+    search only if it could stop an unsubscribe (`_rule_needs_contact`, on `list_row`, which
+    `process` reuses to unsubscribe; read here when not given). `timer` times the stages.
+    Raises `JevError` when Jev decides the email and the call fails.
     """
-    ctx, account, body_chars = p.ctx, p.account, p.ctx.settings.body_chars
-    with timer.stage("lookup"):
-        rule = rule_for(ctx, p.session, account, sig.sender)
+    account, gmail = src.account, src.gmail
+    timer = timer or _StageTimer()
     if not is_allowed(account, sig) and rule is None:
-        p.jev.check()
+        if isinstance(src.classifier, JevGuard):
+            src.classifier.check()  # no sent-mail search for an email Jev won't decide
         with timer.stage("lookup"):
-            contact = previous_contact(p.gmail, account.email, sig.sender, p.scans)
+            contact = previous_contact(gmail, account.email, sig.sender, src.scans)
         with timer.stage("jev"):
-            classification = p.jev.classify(
-                build_state(email, account.email, body_chars, contact, sig)
+            classification = src.classifier.classify(
+                build_state(email, account.email, src.body_chars, contact, sig)
             )
-        return _Inputs(rule, classification, contact)
-    if flags_only(ctx.cfg, account, sig, rule.category if rule else None):
+        return Inputs(rule, classification, contact)
+    if flags_only(src.cfg, account, sig, rule.category if rule else None):
         with timer.stage("jev"):
-            flags = flags_classification(p.jev, email, account, body_chars, sig)
-        return _Inputs(rule, flags, None)
+            flags = flags_classification(src.classifier, email, account, src.body_chars, sig)
+        return Inputs(rule, flags, None)
     if rule is not None:
+        list_row = list_row or _ListRow(src.session, account.email, sig.list_key)
         with timer.stage("lookup"):
-            if _rule_needs_contact(ctx.cfg, account, sig, rule.category, p.mode, list_row):
-                contact = previous_contact(p.gmail, account.email, sig.sender, p.scans)
-                return _Inputs(rule, None, contact)
-    return _Inputs(rule, None, None)
+            if _rule_needs_contact(src.cfg, account, sig, rule.category, src.mode, list_row):
+                contact = previous_contact(gmail, account.email, sig.sender, src.scans)
+                return Inputs(rule, None, contact)
+    return Inputs(rule, None, None)
 
 
 def _apply_labels(
@@ -864,7 +913,12 @@ def _store_outcome(
 
 
 def _learn_auto_rule(
-    p: AccountPass, sig: Signals, inputs: _Inputs, decision: Decision, counted_before: bool
+    p: AccountPass,
+    sig: Signals,
+    inputs: Inputs,
+    decision: Decision,
+    counted_before: bool,
+    known: rules.SenderRules,
 ) -> None:
     """Count Jev's decision toward an auto rule for the sender (`rules.record_auto`).
 
@@ -872,7 +926,7 @@ def _learn_auto_rule(
     without Jev (and act) as soon as the mode is label or act. An email Jev's answer was already
     learned from (`counted_before`: processed again in a stronger mode, or after `reprocess`)
     adds no hit: an auto rule needs that many different emails. Its new answer can still reset a
-    pending rule.
+    pending rule. `known` is the sender's rules `process` read for this email.
     """
     classification = inputs.classification
     if classification and decision.source == DecisionSource.JEV and p.mode != Mode.DRY_RUN:
@@ -885,6 +939,7 @@ def _learn_auto_rule(
             decision,
             inputs.contact,
             count=not counted_before,
+            known=known,
         )
 
 
@@ -899,7 +954,7 @@ def _log_processed(
     account: Account,
     message_id: str,
     sig: Signals,
-    inputs: _Inputs,
+    inputs: Inputs,
     decision: Decision,
     actions: Plan,
     timer: _StageTimer,
@@ -957,14 +1012,15 @@ def flags_classification(
     return None
 
 
-def rule_for(ctx: Context, session: Session, account: Account, sender: str) -> SenderRule | None:
-    """The sender's rule (`rules.match`): None when its first rule points to a removed category.
+def rule_for(ctx: Context, account: Account, known: rules.SenderRules) -> SenderRule | None:
+    """The sender's rule (`rules.SenderRules.match`), from their rules `known` (`rules.load`):
+    None when its first rule points to a removed category.
 
     Such a rule makes Jev decide (never the @domain rule behind it) and is logged once per
     invocation, so the user can `rules delete` it or restore the category. It stays in the DB:
     the category may come back, and a manual or correction rule can't be relearned.
     """
-    rule, stale = rules.match(session, account.email, sender, ctx.cfg.by_key)
+    rule, stale = known.match(ctx.cfg.by_key)
     if stale is not None and (account.email, stale.sender_key) not in ctx.stale_rules_logged:
         ctx.stale_rules_logged.add((account.email, stale.sender_key))
         log.warning(
@@ -1207,29 +1263,9 @@ def _user_edit(
     labels_added = msg.labels_added or []
     if removed := [n for n in labels_added if n != cfg.processed_label and n not in current]:
         return "removed", removed
-    managed = set(cfg.all_labels()) - {cfg.processed_label}
-    if added := sorted((current & managed) - set(labels_added)):
+    if added := sorted((current & cfg.managed_labels) - set(labels_added)):
         return "added", added
     return None
-
-
-def rule_needs_contact(
-    cfg: CategoriesConfig,
-    session: Session,
-    account: Account,
-    sig: Signals,
-    category: str,
-    mode: Mode,
-) -> bool:
-    """A rule hit that would unsubscribe unless I wrote to the sender: worth the Gmail searches.
-
-    Only when the category is acted on (`policy.acts_on`), `policy.unsubscribe_gate` lets it
-    through with only the sent-mail search left to decide (a category that spares known
-    contacts, a verified non-group sender), and the list isn't already settled in the
-    Unsubscribe table. Read-only: `scripts/dry_classify.py` asks it too.
-    """
-    list_row = _ListRow(session, account.email, sig.list_key)
-    return _rule_needs_contact(cfg, account, sig, category, mode, list_row)
 
 
 def _rule_needs_contact(
@@ -1240,7 +1276,13 @@ def _rule_needs_contact(
     mode: Mode,
     list_row: _ListRow,
 ) -> bool:
-    """`rule_needs_contact` on the email's `list_row`, which `process` reuses to unsubscribe."""
+    """A rule hit that would unsubscribe unless I wrote to the sender: worth the Gmail searches.
+
+    Only when the category is acted on (`policy.acts_on`), `policy.unsubscribe_gate` lets it
+    through with only the sent-mail search left to decide (a category that spares known
+    contacts, a verified non-group sender), and the list isn't already settled in the
+    Unsubscribe table (`list_row`). Read-only.
+    """
     if not acts_on(mode, account.act_categories, category):
         return False
     gate = unsubscribe_gate(cfg, account, sig, category, previous_contact=None)
@@ -1321,7 +1363,7 @@ def _retry_one(
         raise
     current = _current_label_names(email, gmail.labels())
     sig = signals_for(email, account)
-    rule = rule_for(ctx, session, account, sig.sender)
+    rule = rule_for(ctx, account, rules.load(session, account.email, sig.sender))
     rule_category = rule.category if rule else None
     if reason := _live_user_decision(ctx.cfg, msg, current, rule_category):
         return _skip(session, row, reason)
@@ -1341,7 +1383,7 @@ def _retry_one(
             return row.list_key, "held: sent-mail search failed"
         gate = unsubscribe_gate(ctx.cfg, account, sig, category, contact)
     if gate.veto is not None:
-        return _skip(session, row, _RETRY_SKIP_REASONS[gate.veto])
+        return _skip(session, row, _retry_skip_reason(gate.veto))
     # Take SQLite's write lock before the irreversible request, so a locked DB (e.g. `run`
     # holding it) fails this row before it unsubscribes rather than rolling back the attempt's
     # row after. The flush needs a write to take the lock: the row may have nothing pending
@@ -1403,15 +1445,17 @@ def _stale_decision(
     return None
 
 
-# The `skipped: …` reasons unsubscribe-retry stores for each gate veto. NOT_UNSUBSCRIBING never
-# gets here: the category is checked (and held) first.
-_RETRY_SKIP_REASONS = {
-    Veto.NOT_UNSUBSCRIBING: "category doesn't unsubscribe",
-    Veto.ALLOWLISTED: "allowlisted sender",
+# The `skipped: …` reason unsubscribe-retry stores for a gate veto is the veto's own text, except
+# the unverified and group vetoes, which share one. NOT_UNSUBSCRIBING never gets here: the
+# category is checked (and held) first.
+_RETRY_SKIP_REASON_OVERRIDES = {
     Veto.UNVERIFIED: "unverified sender, group or own list",
     Veto.GROUP: "unverified sender, group or own list",
-    Veto.KNOWN_CONTACT: "known contact",
 }
+
+
+def _retry_skip_reason(veto: Veto) -> str:
+    return _RETRY_SKIP_REASON_OVERRIDES.get(veto, veto.value)
 
 
 def _skip(session: Session, row: Unsubscribe, reason: str) -> tuple[str, str]:

@@ -248,9 +248,7 @@ def is_allowed(account: Account, sig: Signals) -> bool:
     colleagues) must not also trust every stranger who writes to hello@yourdomain.
     """
     relay = (sig.relayed_by or "").lower()
-    return account.is_allowed(sig.sender) or bool(
-        relay and relay in (s.lower() for s in account.allow_senders)
-    )
+    return account.matches_allowlist(sig.sender) or bool(relay and relay in account.allow_senders)
 
 
 def _verified(sig: Signals) -> bool:

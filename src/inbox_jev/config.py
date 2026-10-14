@@ -281,6 +281,16 @@ class CategoriesConfig(BaseModel):
     def by_key(self) -> dict[str, Category]:
         return {c.key: c for c in self.categories}
 
+    @cached_property
+    def by_label(self) -> dict[str, str]:
+        """Category key by its Gmail label."""
+        return {c.label: c.key for c in self.categories}
+
+    @cached_property
+    def managed_labels(self) -> frozenset[str]:
+        """Every label we set (`all_labels`) except the processed label."""
+        return frozenset(self.all_labels()) - {self.processed_label}
+
     def keep_probability(
         self, probabilities: dict[str, float], exclude: str | None = None
     ) -> float:
@@ -330,12 +340,22 @@ class Account(BaseModel):
     def _check_group_domains(cls, value: list[str]) -> list[str]:
         return [normalize_group_domain(d) for d in value]
 
-    def is_allowed(self, sender: str) -> bool:
+    @field_validator("allow_senders", "allow_domains")
+    @classmethod
+    def _normalize_allowlist(cls, value: list[str]) -> list[str]:
+        """Matched case-insensitively: stored lowercased (and stripped) once, not per email."""
+        return [entry.strip().lower() for entry in value]
+
+    def matches_allowlist(self, sender: str) -> bool:
+        """`sender` is in allow_senders or on a domain in allow_domains (subdomains included).
+
+        The author only: `policy.is_allowed` also counts a group listed in allow_senders.
+        """
         sender = sender.lower()
-        if sender in (s.lower() for s in self.allow_senders):
+        if sender in self.allow_senders:
             return True
         domain = domain_of(sender)
-        return any(on_domain(domain, d.lower()) for d in self.allow_domains)
+        return any(on_domain(domain, d) for d in self.allow_domains)
 
 
 class AccountsConfig(BaseModel):
@@ -372,6 +392,12 @@ def validate_accounts(accounts: list[Account], cfg: CategoriesConfig) -> None:
 
 def load_categories(path: Path) -> CategoriesConfig:
     return CategoriesConfig.model_validate(yaml.safe_load(path.read_text()))
+
+
+def find_account(accounts: list[Account], email: str) -> Account | None:
+    """The account whose address is `email`, ignoring case, or None."""
+    email = email.lower()
+    return next((a for a in accounts if a.email.lower() == email), None)
 
 
 def load_accounts(path: Path) -> list[Account]:
