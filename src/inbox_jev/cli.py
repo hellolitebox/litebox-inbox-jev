@@ -121,7 +121,7 @@ def _each_account(
     """Do `work` for each account: one failing (token, Gmail, Slack, Jev, DB) doesn't stop the
     others. Each failure is logged and printed; the command exits 1 if any account failed.
 
-    An `expected` exception (the command refusing, e.g. `labels.LabelRenameRefused`) is printed
+    An `expected` exception (the command refusing, e.g. `labels.LabelRenameRefusedError`) is printed
     as `refused`, without logging a traceback. `logs_its_failures`: `work` has already logged
     its failure's traceback (`triage.run_account`, tagged with its `run_id`), so it is only
     printed here."""
@@ -292,7 +292,9 @@ def reprocess(
     cfg = load_categories(s.categories_file)
     _category(cfg, category, "--category")
     with open_sessions(s.database_url) as sessions, sessions() as session:
-        count = triage.mark_for_reprocess(session, cfg, account, category, low_confidence_only)
+        count = triage.mark_for_reprocess(
+            session, cfg, account, category, low_confidence_only=low_confidence_only
+        )
     typer.echo(
         f"Marked {count} emails for reprocessing. The next `run` in act mode redoes them, but "
         "only those inside its window: use `run --lookback` wide enough to reach the oldest one."
@@ -381,7 +383,9 @@ def stats(account: AccountOpt = None, days: int = 7) -> None:
 
 
 @rules_app.command("list")
-def rules_list(account: AccountOpt = None, all_rules: bool = typer.Option(False, "--all")) -> None:
+def rules_list(
+    account: AccountOpt = None, all_rules: Annotated[bool, typer.Option("--all")] = False
+) -> None:
     """Show active rules (--all includes auto rules still learning)."""
     s = _settings()
     with open_sessions(s.database_url) as sessions, sessions() as session:
@@ -456,7 +460,7 @@ def labels_rename(old: str, new: str, account: AccountOpt = None) -> None:
                 outcome = labels.rename(gmail, session, acc.email, old, new)
             typer.echo(f"{acc.email}: {old} -> {new}: {outcome}")
 
-        _each_account(accounts, "label rename", rename, expected=(labels.LabelRenameRefused,))
+        _each_account(accounts, "label rename", rename, expected=(labels.LabelRenameRefusedError,))
 
 
 if __name__ == "__main__":

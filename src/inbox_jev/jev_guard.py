@@ -30,11 +30,11 @@ class Classifies(Protocol):
     def classify(self, state: JevState) -> Classification: ...
 
 
-class JevUnavailable(Exception):
+class JevUnavailableError(Exception):
     """A pass stopped asking Jev (`JevGuard`); the message is the run's `runs.error`."""
 
 
-class JevStopped(Exception):
+class JevStoppedError(Exception):
     """Raised instead of asking Jev once the pass stopped doing so: the email isn't to blame and
     is left as it is for the next pass.
 
@@ -67,13 +67,13 @@ class JevGuard:
     """The Jev client of one account's pass: stops calling Jev once it is clearly unusable.
 
     A failure Jev will repeat for every email (`JevFailure.CONFIG`: key revoked, no access,
-    unknown model) stops it at once, and the email that hit it is not blamed (`JevStopped`).
+    unknown model) stops it at once, and the email that hit it is not blamed (`JevStoppedError`).
     So do MAX_IDENTICAL_REJECTIONS refusals in a row with the same error type and HTTP status
     (`JevFailure.REJECTED`, e.g. two 422s): Jev refuses whatever it is sent, and the refused
-    emails count an ordinary failure rather than giving up (`JevStopped.refusal`).
+    emails count an ordinary failure rather than giving up (`JevStoppedError.refusal`).
     Otherwise MAX_CONSECUTIVE_JEV_FAILURES failed calls in a row stop it; those failures are the
     emails' own (stored as `error`). A successful call resets both counts. Once stopped, every
-    call raises `JevStopped` without reaching Jev; `stopped` says why.
+    call raises `JevStoppedError` without reaching Jev; `stopped` says why.
 
     It also says, after each email, what the pass stores for a failure (`blame`): an email Jev
     refused is held back until the next call shows whether Jev refuses everything
@@ -95,9 +95,9 @@ class JevGuard:
         self.skipped = 0  # emails left untouched for the next pass: they needed Jev once stopped
 
     def check(self) -> None:
-        """Raise `JevStopped` if the pass no longer asks Jev (before work only Jev needs)."""
+        """Raise `JevStoppedError` if the pass no longer asks Jev (before work only Jev needs)."""
         if self.stopped is not None:
-            raise JevStopped
+            raise JevStoppedError
 
     def classify(self, state: JevState) -> Classification:
         self.check()
@@ -120,14 +120,14 @@ class JevGuard:
                 f"Jev rejected the API key or model ({what}): check TYPESAFE_API_KEY and "
                 "TYPESAFE_MODEL; emails that need Jev wait for the next run"
             )
-            raise JevStopped
+            raise JevStoppedError
         if self._identical_rejections >= MAX_IDENTICAL_REJECTIONS:
             self._stop(
                 f"Jev refused {self._identical_rejections} requests in a row the same way "
                 f"({what}): likely a change on Jev's side; emails that need Jev wait for the "
                 "next run"
             )
-            raise JevStopped(refusal=failure)
+            raise JevStoppedError(refusal=failure)
         if self.consecutive_failures >= self._limit:
             self._stop(
                 f"Jev unavailable: {self.consecutive_failures} calls in a row failed (last: "
@@ -146,10 +146,10 @@ class JevGuard:
         None when the email needed Jev after the guard stopped (left untouched, counted in
         `skipped`) or when it is this call's refusal (`_last_rejection`): held until the next
         call, or the pass's end, says whose fault it was (`settle_held`, `finish`). The call
-        that stopped the guard by being refused like the one before it (`JevStopped.refusal`)
+        that stopped the guard by being refused like the one before it (`JevStoppedError.refusal`)
         is an ordinary failure. Anything else is the email's own failure.
         """
-        if isinstance(failure, JevStopped):
+        if isinstance(failure, JevStoppedError):
             if failure.refusal is None:
                 self.skipped += 1
                 return None

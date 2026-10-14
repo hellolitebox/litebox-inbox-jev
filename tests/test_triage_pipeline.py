@@ -68,7 +68,7 @@ def test_dry_run_touches_nothing_then_label_reprocesses(setup):
 
 
 def test_classifier_error_is_recorded_and_retried(setup):
-    ctx, gmail, account = setup
+    ctx, _gmail, account = setup
     answers = ctx.classifier.answers
     good = answers.pop("Proposal")
     triage.run_account(ctx, account, Mode.ACT)
@@ -173,7 +173,7 @@ def test_unsubscribe_budget_counts_down_to_exhausted():
 
 
 def test_process_looks_up_the_stored_row_once_per_email(setup):
-    ctx, gmail, account = setup
+    ctx, _gmail, account = setup
     engine = ctx.sessions.kw["bind"]
     by_id = re.compile(r"WHERE messages\.account = \S+ AND messages\.gmail_id = \S+$")
     with selects_from(engine, "messages") as first:
@@ -236,7 +236,7 @@ def test_corrections_check_reads_labels_in_one_gmail_call(setup):
 
 
 def test_processed_log_line_times_each_stage(setup, caplog):
-    ctx, gmail, account = setup
+    ctx, _gmail, account = setup
     with caplog.at_level(logging.INFO, logger="inbox_jev.triage"):
         triage.run_account(ctx, account, Mode.ACT)
     lines = [r for r in caplog.records if r.getMessage() == "message processed"]

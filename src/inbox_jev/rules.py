@@ -132,7 +132,9 @@ def record_auto(
     rule = (known if known is not None else load(session, account, sender)).exact
     if rule is not None and (_is_keep(cfg, decision.category) or keep_signal):
         _reset_pending_archive_rule(cfg, rule)
-    if not _counts_toward_rule(cfg, classification, decision, previous_contact, keep_signal):
+    if not _counts_toward_rule(
+        cfg, classification, decision, previous_contact, keep_signal=keep_signal
+    ):
         return
     if rule is None:
         if count:
@@ -154,6 +156,7 @@ def _counts_toward_rule(
     classification: Classification,
     decision: Decision,
     previous_contact: PreviousContact | None,
+    *,
     keep_signal: bool,
 ) -> bool:
     """Whether Jev's answer can count toward an auto rule: confident (not low-confidence, at

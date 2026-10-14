@@ -235,7 +235,7 @@ def test_extract_body_url_only_plain_beats_empty_or_trivial_html():
 
 def test_extract_body_normalize_is_linear_on_long_whitespace_runs():
     # U+2007 figure space isn't collapsed by the first pass; `\s+\n` used to be quadratic on it.
-    html = "<p>pre</p>" + " " * 200_000 + "\n<p>" + NEWSLETTER + "</p>"
+    html = "<p>pre</p>" + "\u2007" * 200_000 + "\n<p>" + NEWSLETTER + "</p>"
     start = time.perf_counter()
     body = extract_body(_alternative("undefined", html))
     assert time.perf_counter() - start < 2

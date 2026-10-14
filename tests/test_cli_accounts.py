@@ -71,6 +71,16 @@ def test_digest_needs_no_jev_key(env, monkeypatch):
     assert (result.exit_code, sent) == (0, ["UA", "UB"])
 
 
+def test_account_option_picks_one_account_and_refuses_one_not_in_the_file(env, monkeypatch):
+    sent = []
+    monkeypatch.setattr(cli.digest_mod, "send_slack", lambda t, u, text: sent.append(u))
+    result = CliRunner().invoke(cli.app, ["digest", "--account", "B@acme.com"])
+    assert (result.exit_code, sent) == (0, ["UB"])
+    unknown = CliRunner().invoke(cli.app, ["digest", "--account", "c@acme.com"])
+    assert unknown.exit_code == 2 and "c@acme.com is not in" in unknown.output
+    assert sent == ["UB"]
+
+
 def test_unsubscribe_retry_goes_on_after_a_failed_account_and_closes_jev(env, monkeypatch, opened):
     monkeypatch.setattr(
         unsubscribe_retry, "retry_unsubscribes", lambda ctx, s, g, acc: [("news.x", "ok")]
@@ -110,13 +120,13 @@ def test_run_without_jev_key_fails_every_account_before_gmail(env, monkeypatch):
 
 
 def test_labels_rename_tells_refusals_from_failures(env, monkeypatch, caplog):
-    """Only `LabelRenameRefused` is reported as refused; any other error (even a ValueError from
-    a library) is a failure, logged with its traceback."""
+    """Only `LabelRenameRefusedError` is reported as refused; any other error (even a ValueError
+    from a library) is a failure, logged with its traceback."""
     monkeypatch.setattr(cli.gmail_mod, "connect", lambda tokens_dir, email: FakeGmail([]))
 
     def rename(gmail, session, account, old, new):
         if account == "a@acme.com":
-            raise labels.LabelRenameRefused("'INBOX' is a system label and can't be renamed")
+            raise labels.LabelRenameRefusedError("'INBOX' is a system label and can't be renamed")
         raise ValueError("unparseable Gmail answer")
 
     monkeypatch.setattr(labels, "rename", rename)

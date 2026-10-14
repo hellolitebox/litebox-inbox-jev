@@ -51,7 +51,7 @@ def test_rule_to_removed_category_goes_through_jev_and_warns_once(setup, caplog)
 def test_stale_exact_rule_sends_sender_to_jev_not_to_the_domain_rule(setup, caplog):
     # promo@shop.com's own rule is the user's exception to @shop.com: with its category gone,
     # Jev decides (and relearns the auto rule); the @shop.com rule doesn't apply.
-    ctx, gmail, account = setup
+    ctx, _gmail, account = setup
     with ctx.sessions() as s:
         rules.set_rule(s, account.email, "promo@shop.com", "promotions", RuleSource.AUTO)
         rules.set_rule(s, account.email, "@shop.com", "newsletter", RuleSource.MANUAL)
@@ -79,7 +79,7 @@ def test_flags_only_jev_failure_still_labels_allowlist_and_keep_rule(setup, capl
     with ctx.sessions() as s:
         rules.set_rule(s, account.email, "promo@shop.com", "important", RuleSource.CORRECTION)
         s.commit()
-    with pytest.raises(jev_guard.JevUnavailable):  # 3 failed calls in a row (1, 2, 3) stop Jev
+    with pytest.raises(jev_guard.JevUnavailableError):  # 3 failed calls in a row (1, 2, 3) stop Jev
         triage.run_account(ctx, account, Mode.ACT)
     with ctx.sessions() as s:
         run = s.query(Run).one()
@@ -139,7 +139,7 @@ def test_keep_rule_and_allowlist_ask_jev_for_flags_only(setup):
 
 
 def test_dry_run_learns_no_auto_rules(setup):
-    ctx, gmail, account = setup
+    ctx, _gmail, account = setup
     for _ in range(3):  # "50% off" (marketing 0.97) would earn a rule in three passes
         with ctx.sessions() as s:
             s.query(Message).delete()

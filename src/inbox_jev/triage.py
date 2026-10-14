@@ -24,7 +24,7 @@ from .classifier import (
     Classifier,
     JevError,
     JevFailure,
-    JevNotConfigured,
+    JevNotConfiguredError,
     build_state,
     describe_jev_error,
     failure_kind,
@@ -45,7 +45,7 @@ from .gmail import (
     is_token_refresh_error,
     token_error_detail,
 )
-from .jev_guard import Classifies, FailedEmail, JevGuard, JevStopped, JevUnavailable
+from .jev_guard import Classifies, FailedEmail, JevGuard, JevStoppedError, JevUnavailableError
 from .policy import (
     Decision,
     DecisionSource,
@@ -129,7 +129,7 @@ class Context:
 
     `gmail` opens an account's Gmail client (`gmail.connect` in the CLI, a fake in tests).
     `classifier` injects the Jev client (tests pass a fake). Without one, a `Classifier` is
-    created from the settings when a `run` pass starts, which fails it (`JevNotConfigured`)
+    created from the settings when a `run` pass starts, which fails it (`JevNotConfiguredError`)
     when TYPESAFE_API_KEY is missing; commands that never ask Jev don't need the key.
     `unsubscriber` makes the unsubscribe requests of `run` and `unsubscribe-retry`, and
     `scan_dialects` are the databases the sent-mail scans are stored in (`DomainScanRows`);
@@ -285,7 +285,7 @@ def _run_pass(
         finally:
             counts.jev_skipped = jev.skipped
         if jev.stopped is not None:
-            raise JevUnavailable(jev.stopped)
+            raise JevUnavailableError(jev.stopped)
 
 
 def _process_all(p: AccountPass, ids: list[str], counts: RunCounts) -> None:
@@ -400,9 +400,9 @@ def describe_run_error(exc: BaseException, account: str) -> str:
     a transient one can carry the token endpoint's raw response body. Nor a Jev error's text,
     which can echo the email (`describe_jev_error`).
     """
-    if isinstance(exc, JevUnavailable):
+    if isinstance(exc, JevUnavailableError):
         return str(exc)
-    if isinstance(exc, JevNotConfigured):
+    if isinstance(exc, JevNotConfiguredError):
         return f"{exc}; nothing was processed"
     if isinstance(exc, JevError):
         return describe_jev_error(exc, request_id=False)
@@ -426,6 +426,7 @@ def mark_for_reprocess(
     cfg: CategoriesConfig,
     account: str,
     category: str,
+    *,
     low_confidence_only: bool = False,
 ) -> int:
     """Mark act-mode rows still in the inbox as `label`, so the next `act` run redoes them.
@@ -591,7 +592,7 @@ def process(p: AccountPass, message_id: str) -> Message:
     sender's rules once (`rules.load`: the rule that decides, `rule_for`, and the row an auto
     rule is learned on); gather Jev's answer and the sent-mail search (`gather_inputs`);
     decide and plan (`policy`, pure); apply the labels in Gmail and store the outcome; learn an
-    auto rule; unsubscribe within the run cap. Raises `JevStopped`, before changing anything,
+    auto rule; unsubscribe within the run cap. Raises `JevStoppedError`, before changing anything,
     when the email needs Jev's decision and `p.jev` has stopped.
     """
     ctx, session, account, mode = p.ctx, p.session, p.account, p.mode
@@ -631,7 +632,7 @@ def process(p: AccountPass, message_id: str) -> Message:
         msg = _upsert_message(session, account.email, email, sig, prev)
         _apply_labels(p.gmail, message_id, msg, p.label_ids, actions)
         _store_outcome(msg, mode, inputs.classification, decision, actions)
-        _learn_auto_rule(p, sig, inputs, decision, counted_before, known)
+        _learn_auto_rule(p, sig, inputs, decision, known, counted_before=counted_before)
         if (
             actions.unsubscribe
             and not p.unsub_budget.exhausted
@@ -662,7 +663,7 @@ class InputSources:
     body_chars: int
     scans: DomainScans | None = None
     # The pass's guard when `classifier` is one: once it has stopped asking Jev, an email Jev
-    # would decide gets no sent-mail search either (`JevStopped`).
+    # would decide gets no sent-mail search either (`JevStoppedError`).
     guard: JevGuard | None = None
 
 
@@ -724,7 +725,7 @@ def gather_inputs(
     the same calls as a pass.
 
     No allowlist entry and no rule: Jev decides, told whether I wrote to the sender (neither is
-    asked once a pass's `JevGuard` has stopped: `JevStopped`). The allowlist or a rule to a
+    asked once a pass's `JevGuard` has stopped: `JevStoppedError`). The allowlist or a rule to a
     keep category (`policy.flags_only`): Jev only for the flags, no search. Any other rule: the
     search only if it could stop an unsubscribe (`_rule_needs_contact`, on `list_row`, which
     `process` reuses to unsubscribe; read here when not given). `timer` times the stages.
@@ -806,8 +807,9 @@ def _learn_auto_rule(
     sig: Signals,
     inputs: Inputs,
     decision: Decision,
-    counted_before: bool,
     known: rules.SenderRules,
+    *,
+    counted_before: bool,
 ) -> None:
     """Count Jev's decision toward an auto rule for the sender (`rules.record_auto`).
 
@@ -884,7 +886,7 @@ def flags_classification(
     """
     try:
         return classifier.classify(build_state(email, account.email, body_chars, None, sig))
-    except JevStopped:
+    except JevStoppedError:
         return None  # the run's error and the "stopped asking Jev" log line say why
     except JevError as exc:
         failure = exc

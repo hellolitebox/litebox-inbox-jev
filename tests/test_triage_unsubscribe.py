@@ -83,7 +83,7 @@ def test_retry_skips_allowlisted_and_group_relayed(setup):
     with ctx.sessions() as s:
         failed_unsub(s, account, "7", "partner.com", "marketing", sender="vip@partner.com")
         failed_unsub(s, account, "8", "pitchco.io", "cold_outreach", sender="dana@pitchco.io")
-    out, rows = _retry(ctx, gmail, account)
+    out, _rows = _retry(ctx, gmail, account)
     assert out == {
         "partner.com": "skipped: allowlisted sender",
         "pitchco.io": "skipped: unverified sender, group or own list",

@@ -208,9 +208,12 @@ def failed_unsub(
     **msg: Any,
 ) -> None:
     """Store an act-mode row and its `failed` unsubscribe (1 attempt), as `run` leaves them."""
-    fields: dict[str, Any] = dict(
-        source=DecisionSource.JEV, confidence=0.95, archived=True, labels_added=[]
-    )
+    fields: dict[str, Any] = {
+        "source": DecisionSource.JEV,
+        "confidence": 0.95,
+        "archived": True,
+        "labels_added": [],
+    }
     fields.update(msg)
     s.add(
         Message(
@@ -295,6 +298,7 @@ class SentMailService:
         sent: dict[str, dict[str, str]],
         get_errors: Mapping[str, Exception] | None = None,
         dates: Mapping[str, int] | None = None,
+        *,
         ordered: bool = True,
     ) -> None:
         self.sent = sent

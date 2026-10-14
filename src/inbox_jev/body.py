@@ -18,7 +18,8 @@ class _TextExtractor(HTMLParser):
         self.parts: list[str] = []
         self._skip = 0
 
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+    # `attrs` is unused but part of HTMLParser's signature.
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:  # noqa: ARG002
         if tag in _SKIPPED_TAGS:
             self._skip += 1
 

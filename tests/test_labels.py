@@ -75,7 +75,7 @@ def test_rename_without_gmail_label_still_updates_db(session, rows):
 
 def test_rename_refuses_when_both_exist_and_new_has_emails(session, rows):
     gmail = FakeLabels(["Jev/Revisar", "Jev/Review"], counts={"Jev/Review": 3})
-    with pytest.raises(labels.LabelRenameRefused, match="has emails"):
+    with pytest.raises(labels.LabelRenameRefusedError, match="has emails"):
         labels.rename(gmail, session, "me@x.com", "Jev/Revisar", "Jev/Review")
     assert gmail.renamed == [] and gmail.deleted == []
     assert rows()["1"].labels_added[0] == "Jev/Revisar"
@@ -103,7 +103,7 @@ def test_rename_replaces_empty_new_label(session, rows):
 )
 def test_rename_refuses_conflicts(session, rows, existing, old, new, match):
     gmail = FakeLabels(existing)
-    with pytest.raises(labels.LabelRenameRefused, match=match):
+    with pytest.raises(labels.LabelRenameRefusedError, match=match):
         labels.rename(gmail, session, "me@x.com", old, new)
     assert gmail.renamed == [] and gmail.deleted == []
     assert rows()["1"].labels_added[0] == "Jev/Revisar"
@@ -116,7 +116,7 @@ def test_rename_allows_case_only_change(session):
 
 
 def test_rename_refuses_same_name(session):
-    with pytest.raises(labels.LabelRenameRefused):
+    with pytest.raises(labels.LabelRenameRefusedError):
         labels.rename(FakeLabels([]), session, "me@x.com", "Jev/Spam", "Jev/Spam")
 
 

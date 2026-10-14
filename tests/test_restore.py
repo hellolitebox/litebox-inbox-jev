@@ -104,7 +104,7 @@ def test_restore_skips_dry_run_rows(setup):
 
 
 def test_restore_only_touches_the_given_account(acted):
-    ctx, gmail, account = acted
+    ctx, gmail, _account = acted
     with ctx.sessions() as s:
         assert triage.restore(s, gmail, "other@acme.com", DAY).restored == 0
     assert not any(restored for restored, _, _ in _rows(ctx).values())

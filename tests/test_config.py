@@ -280,7 +280,7 @@ def _with(cfg, path, value):
 )
 @pytest.mark.parametrize("value", [-0.1, 1.5])
 def test_probabilities_must_be_between_0_and_1(cfg, path, value):
-    with pytest.raises(ValidationError, match="less than or equal to 1|greater than or equal"):
+    with pytest.raises(ValidationError, match=r"less than or equal to 1|greater than or equal"):
         CategoriesConfig.model_validate(_with(cfg, path, value))
 
 

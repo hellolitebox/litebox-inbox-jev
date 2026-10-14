@@ -781,7 +781,7 @@ def test_ex21_revoked_jev_key_stops_jev_but_not_rules(spec):
     with ctx.sessions() as s:
         rules.set_rule(s, account.email, "news@weekly.example", "newsletter", RuleSource.MANUAL)
         s.commit()
-    with pytest.raises(jev_guard.JevUnavailable):
+    with pytest.raises(jev_guard.JevUnavailableError):
         triage.run_account(ctx, account, Mode.ACT)
 
     assert jev.calls == 1  # Sam's email; nothing more is sent to Jev in this pass
@@ -821,7 +821,7 @@ def test_ex22_jev_down_stops_after_three_failures(spec):
     }
     jev = JevFails(TypeSafeAPITimeoutError(30.0))
     ctx = triage.Context(ctx.settings, ctx.cfg, ctx.sessions, ctx.gmail, classifier=jev)
-    with pytest.raises(jev_guard.JevUnavailable):
+    with pytest.raises(jev_guard.JevUnavailableError):
         triage.run_account(ctx, account, Mode.ACT)
 
     assert jev.calls == 3
@@ -1015,9 +1015,9 @@ def test_ex26_writing_to_a_friend_on_country_free_mail_makes_no_known_contact(sp
 
 def test_ex27_a_public_suffix_in_group_domains_is_refused():
     """EX-27 (docs/how-it-decides.md §5, §3.4 group_domains, ADR 0033)."""
-    with pytest.raises(ValidationError, match="'gouv.fr' is a public suffix"):
+    with pytest.raises(ValidationError, match=r"'gouv\.fr' is a public suffix"):
         Account(email="me@exemple.gouv.fr", group_domains=["gouv.fr"])
-    with pytest.raises(ValidationError, match="'com.ai' is a public suffix"):
+    with pytest.raises(ValidationError, match=r"'com\.ai' is a public suffix"):
         Account(email="me@acme.com", group_domains=["com.ai"])
     # .ai is sold as a generic name: only its Public Suffix List names are suffixes there.
     assert Account(email="me@adv.ai", group_domains=["adv.ai"]).group_domains == ["adv.ai"]
@@ -1051,7 +1051,7 @@ def test_ex28_jev_refusing_everything_gives_no_email_up(spec):
     }
     jev = JevFails(jev_http_error(TypeSafeUnprocessableEntityError, 422))
     ctx = triage.Context(ctx.settings, ctx.cfg, ctx.sessions, ctx.gmail, classifier=jev)
-    with pytest.raises(jev_guard.JevUnavailable):
+    with pytest.raises(jev_guard.JevUnavailableError):
         triage.run_account(ctx, account, Mode.ACT)
 
     assert jev.calls == 2  # Invoice 7 and Sam's pitch; nothing more is sent
@@ -1138,7 +1138,7 @@ def test_ex30_two_emails_jev_refuses_dont_hold_up_the_rest(spec):
     for passes in (1, 2, 3):  # every 10 minutes: both copies are due again and stop the pass
         if passes > 1:
             age_errors(ctx, 10)
-        with pytest.raises(jev_guard.JevUnavailable, match="refused 2 requests in a row"):
+        with pytest.raises(jev_guard.JevUnavailableError, match="refused 2 requests in a row"):
             triage.run_account(ctx, account, Mode.ACT)
         assert attempts() == [passes, passes]
     with ctx.sessions() as s:

@@ -27,6 +27,11 @@ def triage_setup(setup):
     return setup
 
 
+def _with_gmail(ctx, gmail):
+    """`ctx` with the Gmail factory `gmail` injected instead."""
+    return triage.Context(ctx.settings, ctx.cfg, ctx.sessions, gmail, classifier=ctx.classifier)
+
+
 def _runs(ctx):
     with ctx.sessions() as s:
         rows = s.query(Run).order_by(Run.id).all()
@@ -40,7 +45,7 @@ def _digest(ctx, account, hours=24):
 
 
 def test_expired_token_is_recorded_on_the_run_and_raised(triage_setup, monkeypatch):
-    ctx, gmail, account = triage_setup
+    ctx, _gmail, account = triage_setup
 
     def expired(email):
         raise RefreshError(
@@ -48,7 +53,7 @@ def test_expired_token_is_recorded_on_the_run_and_raised(triage_setup, monkeypat
             {"error": "invalid_grant", "error_description": "Token has been expired or revoked."},
         )
 
-    monkeypatch.setattr(ctx, "gmail", expired)
+    ctx = _with_gmail(ctx, expired)
     with pytest.raises(RefreshError):
         triage.run_account(ctx, account, Mode.ACT)
     [run] = _runs(ctx)
@@ -121,7 +126,7 @@ def test_token_refresh_failure_outcomes_from_google_auth(
     triage_setup, monkeypatch, tmp_path, status, body, expected
 ):
     """The three outcomes of spec §1 / ADR 0017, through the real `Credentials.refresh`."""
-    ctx, gmail, account = triage_setup
+    ctx, _gmail, account = triage_setup
     token = tmp_path / "me@acme.com.json"
     token.write_text(
         json.dumps(
@@ -135,7 +140,7 @@ def test_token_refresh_failure_outcomes_from_google_auth(
     )
     monkeypatch.setattr(google.auth._exponential_backoff.time, "sleep", lambda s: None)
     monkeypatch.setattr(inbox_gmail, "Request", lambda: _TokenEndpoint(status, body))
-    monkeypatch.setattr(ctx, "gmail", lambda e: inbox_gmail.connect(tmp_path, e))
+    ctx = _with_gmail(ctx, lambda e: inbox_gmail.connect(tmp_path, e))
     with pytest.raises(RefreshError):
         triage.run_account(ctx, account, Mode.ACT)
     [run] = _runs(ctx)
@@ -199,12 +204,12 @@ def test_transient_token_failure_mid_run_still_fails_the_run(triage_setup, monke
 
 
 def test_digest_groups_identical_run_failures(triage_setup, monkeypatch):
-    ctx, gmail, account = triage_setup
+    ctx, _gmail, account = triage_setup
 
     def broken(email):
         raise OSError("disk <full> & co")
 
-    monkeypatch.setattr(ctx, "gmail", broken)
+    ctx = _with_gmail(ctx, broken)
     for _ in range(3):
         with pytest.raises(OSError):
             triage.run_account(ctx, account, Mode.ACT)
@@ -234,7 +239,7 @@ def test_token_dying_mid_run_fails_the_run_without_counting_against_emails(
 
 
 def test_run_counts_survive_a_failed_email(triage_setup):
-    ctx, gmail, account = triage_setup
+    ctx, _gmail, account = triage_setup
     ctx.classifier.answers.pop("50% off")  # email 2 fails between successful ones
     run = triage.run_account(ctx, account, Mode.ACT)
     [stored] = _runs(ctx)
@@ -247,7 +252,7 @@ def _attempts(ctx, gmail_id="1"):
 
 
 def test_failed_email_backs_off_then_gives_up_and_shows_in_digest(triage_setup):
-    ctx, gmail, account = triage_setup
+    ctx, _gmail, account = triage_setup
     ctx.classifier.answers.pop("Proposal")
 
     triage.run_account(ctx, account, Mode.ACT)
@@ -274,7 +279,7 @@ def test_failed_email_backs_off_then_gives_up_and_shows_in_digest(triage_setup):
 
 
 def test_success_resets_the_error_count(triage_setup):
-    ctx, gmail, account = triage_setup
+    ctx, _gmail, account = triage_setup
     answers = ctx.classifier.answers
     good = answers.pop("Proposal")
     triage.run_account(ctx, account, Mode.ACT)
@@ -288,7 +293,7 @@ def test_success_resets_the_error_count(triage_setup):
 
 
 def test_retry_errors_resets_given_up_emails(triage_setup):
-    ctx, gmail, account = triage_setup
+    ctx, _gmail, account = triage_setup
     answers = ctx.classifier.answers
     good = answers.pop("Proposal")
     triage.run_account(ctx, account, Mode.ACT)
@@ -365,7 +370,7 @@ def _row(ctx, gmail_id):
 
 def test_failed_email_row_keeps_what_was_read(triage_setup):
     """A failure after the email was read (here Jev has no answer) stores its metadata."""
-    ctx, gmail, account = triage_setup
+    ctx, _gmail, account = triage_setup
     ctx.classifier.answers.pop("Proposal")
     triage.run_account(ctx, account, Mode.ACT)
     row = _row(ctx, "1")

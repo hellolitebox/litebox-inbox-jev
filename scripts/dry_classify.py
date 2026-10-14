@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -203,10 +204,12 @@ def main() -> None:
         if args.query:
             ids += [i for i in gmail.list_ids(args.query, args.limit) if i not in ids]
 
-        classifier = Classifier(s.typesafe_api_key, s.typesafe_model, cfg)
         engine = _read_only_engine(s.database_url)
         try:
-            with Session(engine) as session:
+            with (
+                closing(Classifier(s.typesafe_api_key, s.typesafe_model, cfg)) as classifier,
+                Session(engine) as session,
+            ):
                 Checker(
                     session,
                     gmail,
@@ -220,7 +223,6 @@ def main() -> None:
                 session.rollback()
         finally:
             engine.dispose()
-            classifier.close()
 
 
 if __name__ == "__main__":

@@ -40,7 +40,7 @@ def test_a_newer_list_is_written(tmp_path, capsys):
 
 
 def test_the_same_list_is_left_alone(tmp_path, capsys):
-    code, dest, out, _ = run(tmp_path, LIST, capsys)
+    code, _dest, out, _ = run(tmp_path, LIST, capsys)
     assert code == 0 and out == f"unchanged: VERSION {VERSION} COMMIT {COMMIT}\n"
 
 

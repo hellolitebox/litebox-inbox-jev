@@ -390,18 +390,22 @@ GROUP_UNSUB = ("mailto:googlegroups-manage+1+unsubscribe@googlegroups.com",)
     "signals_kw",
     [
         # A pitch relayed by my own Google Group (hello@acme.com): unsubscribing leaves the group.
-        dict(
-            sender="hello@acme.com",
-            sender_domain="acme.com",
-            list_id="hello.acme.com",
-            unsubscribe_https=("https://groups.google.com/a/acme.com/group/hello/subscribe",),
-            unsubscribe_mailto=GROUP_UNSUB,
-            one_click=False,
-        ),
+        {
+            "sender": "hello@acme.com",
+            "sender_domain": "acme.com",
+            "list_id": "hello.acme.com",
+            "unsubscribe_https": ("https://groups.google.com/a/acme.com/group/hello/subscribe",),
+            "unsubscribe_mailto": GROUP_UNSUB,
+            "one_click": False,
+        },
         # An external Google Group I belong to.
-        dict(list_id="founders.example.org", unsubscribe_https=(), unsubscribe_mailto=GROUP_UNSUB),
+        {
+            "list_id": "founders.example.org",
+            "unsubscribe_https": (),
+            "unsubscribe_mailto": GROUP_UNSUB,
+        },
         # A list on my own domain with a regular ESP unsubscribe.
-        dict(list_id="news.acme.com"),
+        {"list_id": "news.acme.com"},
     ],
 )
 @pytest.mark.parametrize("category", ["cold_outreach", "marketing"])
@@ -529,15 +533,15 @@ def test_rule_path_still_unsubscribes_strangers(cfg, account, contact):
 
 
 def _relayed(**kw):
-    base = dict(
-        sender="david.cohen@techstars.com",
-        sender_domain="techstars.com",
-        list_id="hello.acme.com",
-        relayed_by="hello@acme.com",
-        unsubscribe_https=(),
-        unsubscribe_mailto=GROUP_UNSUB,
-        one_click=False,
-    )
+    base = {
+        "sender": "david.cohen@techstars.com",
+        "sender_domain": "techstars.com",
+        "list_id": "hello.acme.com",
+        "relayed_by": "hello@acme.com",
+        "unsubscribe_https": (),
+        "unsubscribe_mailto": GROUP_UNSUB,
+        "one_click": False,
+    }
     base.update(kw)
     return make_signals(**base)
 

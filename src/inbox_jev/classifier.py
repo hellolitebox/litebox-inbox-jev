@@ -36,7 +36,7 @@ JevState: TypeAlias = dict[str, str | bool | None]
 JevError = TypeSafeError
 
 
-class JevNotConfigured(RuntimeError):
+class JevNotConfiguredError(RuntimeError):
     """TYPESAFE_API_KEY is missing or malformed: no Jev call can work, so `run` doesn't start."""
 
 
@@ -183,11 +183,11 @@ def _request_id(result: SystemOneResponse) -> str | None:
 class Classifier:
     def __init__(self, api_key: str, model: str, cfg: CategoriesConfig) -> None:
         if not api_key:
-            raise JevNotConfigured("TYPESAFE_API_KEY is not set: add it to .env")
+            raise JevNotConfiguredError("TYPESAFE_API_KEY is not set: add it to .env")
         try:
             self._client = TypeSafeClient(api_key=api_key, model=model)
         except TypeSafeError as exc:  # a malformed key; the SDK's message never quotes it
-            raise JevNotConfigured(
+            raise JevNotConfiguredError(
                 f"TYPESAFE_API_KEY or TYPESAFE_MODEL is invalid: {exc}"
             ) from None
         self._cfg = cfg

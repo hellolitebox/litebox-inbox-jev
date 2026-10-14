@@ -31,7 +31,7 @@ from inbox_jev import jev_guard, logs, rules, triage
 from inbox_jev.classifier import (
     Classifier,
     JevFailure,
-    JevNotConfigured,
+    JevNotConfiguredError,
     describe_jev_error,
     failure_kind,
 )
@@ -238,7 +238,7 @@ def test_422_echoing_the_email_is_never_stored_or_logged(setup, cfg, caplog):
 
     # 2 and 3 (flags only) are refused the same way: Jev's problem, so 2 gets an ordinary failure
     gmail.emails = everything
-    with pytest.raises(jev_guard.JevUnavailable):
+    with pytest.raises(jev_guard.JevUnavailableError):
         triage.run_account(ctx, account, Mode.ACT)
     run = _run(ctx)
     assert run.error == (
@@ -274,7 +274,7 @@ def test_auth_failure_stops_jev_without_blaming_the_email(setup, cfg, caplog):
             )
         )
         s.commit()
-    with pytest.raises(jev_guard.JevUnavailable):
+    with pytest.raises(jev_guard.JevUnavailableError):
         triage.run_account(ctx, account, Mode.ACT)
 
     assert jev.calls == 1  # email 1; 2 needs Jev too but isn't sent, 3's flags call is skipped
@@ -303,7 +303,7 @@ def test_transient_failures_stop_jev_after_three_in_a_row(setup, cfg):
     gmail.emails.update({e.id: e for e in [email("5", "Ann <ann@other.org>", "Lunch?")]})
     jev = JevFails(TypeSafeAPITimeoutError(30.0))
     ctx = triage.Context(ctx.settings, cfg, ctx.sessions, ctx.gmail, classifier=jev)
-    with pytest.raises(jev_guard.JevUnavailable):
+    with pytest.raises(jev_guard.JevUnavailableError):
         triage.run_account(ctx, account, Mode.ACT)
 
     assert jev.calls == 3  # 1, 2 and 3's flags call; then 4 and 5 aren't sent
@@ -315,7 +315,7 @@ def test_transient_failures_stop_jev_after_three_in_a_row(setup, cfg):
 
 
 def test_a_success_resets_the_count(setup, cfg):
-    ctx, gmail, account = setup
+    ctx, _gmail, account = setup
     answers = ctx.classifier.answers
 
     class Flaky(JevFails):
@@ -330,14 +330,14 @@ def test_a_success_resets_the_count(setup, cfg):
 
 
 def test_missing_api_key_fails_the_run_before_gmail(setup):
-    ctx, gmail, account = setup
+    ctx, _gmail, account = setup
     settings = Settings(_env_file=None, typesafe_api_key="", database_url="sqlite:///:memory:")
 
     def no_gmail(email):
         raise AssertionError("Gmail must not be touched")
 
     ctx = triage.Context(settings, ctx.cfg, ctx.sessions, no_gmail)  # Jev built from settings
-    with pytest.raises(JevNotConfigured):
+    with pytest.raises(JevNotConfiguredError):
         triage.run_account(ctx, account, Mode.ACT)
     run = _run(ctx)
     assert run.error == "TYPESAFE_API_KEY is not set: add it to .env; nothing was processed"
@@ -345,7 +345,9 @@ def test_missing_api_key_fails_the_run_before_gmail(setup):
 
 
 def test_malformed_api_key_is_not_configured(cfg):
-    with pytest.raises(JevNotConfigured, match="TYPESAFE_API_KEY or TYPESAFE_MODEL is invalid"):
+    with pytest.raises(
+        JevNotConfiguredError, match="TYPESAFE_API_KEY or TYPESAFE_MODEL is invalid"
+    ):
         Classifier("two words", "jev-latest", cfg)
 
 
@@ -404,7 +406,7 @@ def test_identical_refusals_around_a_rule_give_neither_email_up(setup, cfg):
             )
         )
         s.commit()
-    with pytest.raises(jev_guard.JevUnavailable, match="Jev refused 2 requests in a row"):
+    with pytest.raises(jev_guard.JevUnavailableError, match="Jev refused 2 requests in a row"):
         triage.run_account(ctx, account, Mode.ACT)
 
     rows = _rows(ctx)
@@ -452,7 +454,7 @@ def test_a_refused_flags_only_call_counts_as_the_next_call(setup, cfg):
     gmail.emails = {e: gmail.emails[e] for e in ("1", "3")}
     jev = FakeClassifier({"Proposal": _refused(), "Internal": _refused()})
     ctx = triage.Context(ctx.settings, cfg, ctx.sessions, ctx.gmail, classifier=jev)
-    with pytest.raises(jev_guard.JevUnavailable, match="likely a change on Jev's side"):
+    with pytest.raises(jev_guard.JevUnavailableError, match="likely a change on Jev's side"):
         triage.run_account(ctx, account, Mode.ACT)
     rows = _rows(ctx)
     assert (rows["1"].status, rows["1"].error_attempts) == ("error", 1)
@@ -490,7 +492,7 @@ def test_guard_settles_held_refusals_as_ordinary_failures_when_jev_refuses_every
     with pytest.raises(TypeSafeUnprocessableEntityError) as first:
         guard.classify({})
     assert guard.blame("1", first.value, None) is None
-    with pytest.raises(jev_guard.JevStopped) as stop:  # refused the same way: stops the guard
+    with pytest.raises(jev_guard.JevStoppedError) as stop:  # refused the same way: stops the guard
         guard.classify({})
     refusal = stop.value.refusal
     assert refusal is not None
@@ -498,7 +500,7 @@ def test_guard_settles_held_refusals_as_ordinary_failures_when_jev_refuses_every
     assert guard.blame("2", stop.value, None) == jev_guard.FailedEmail(
         "2", refusal, None, alone=False
     )
-    with pytest.raises(jev_guard.JevStopped) as later:  # no call: the email waits
+    with pytest.raises(jev_guard.JevStoppedError) as later:  # no call: the email waits
         guard.classify({})
     assert guard.blame("3", later.value, None) is None and guard.skipped == 1
     assert guard.finish() is None

@@ -225,14 +225,16 @@ def test_mark_for_reprocess_redoes_rows_after_widening_act_categories(setup):
 
 
 def test_mark_for_reprocess_filters(setup):
-    ctx, gmail, account = setup
+    ctx, _gmail, account = setup
     _act_with_only(ctx, account, ["notification"])
     with ctx.sessions() as s:
         rows = {m.gmail_id: m for m in s.query(Message)}
         rows["2"].restored = True
         s.commit()
         # "4" is low confidence, "2" is restored
-        n = triage.mark_for_reprocess(s, ctx.cfg, account.email, "marketing", True)
+        n = triage.mark_for_reprocess(
+            s, ctx.cfg, account.email, "marketing", low_confidence_only=True
+        )
         assert n == 1
         assert triage.mark_for_reprocess(s, ctx.cfg, "other@x.com", "marketing") == 0
         assert triage.mark_for_reprocess(s, ctx.cfg, account.email, "important") == 2  # "1", "3"
@@ -243,7 +245,7 @@ def test_mark_for_reprocess_filters(setup):
 
 
 def test_mark_for_reprocess_skips_label_mode_and_error_rows(setup):
-    ctx, gmail, account = setup
+    ctx, _gmail, account = setup
     triage.run_account(ctx, account, Mode.LABEL)
     with ctx.sessions() as s:
         assert triage.mark_for_reprocess(s, ctx.cfg, account.email, "marketing") == 0

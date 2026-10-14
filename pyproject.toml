@@ -47,7 +47,20 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "SIM", "C901"]
+select = [
+    "E", "F", "I", "B", "UP", "SIM", "C901",
+    "C4", "PIE", "PERF", "RUF", "PTH",
+    "FBT",   # boolean positional parameters: make them keyword-only (`*,`)
+    "N818",  # exception classes end in `Error`
+    "ARG",   # unused arguments
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Typer reads a command's options from its parameters, so a boolean flag is a positional
+# parameter with a default there by design.
+"src/inbox_jev/cli.py" = ["FBT001", "FBT002"]
+# Fakes, stubs and monkeypatched lambdas take the arguments of what they stand in for, used or not.
+"tests/**" = ["ARG"]
 
 [tool.ruff.lint.mccabe]
 # Keeps the pass loop, the digest and the unsubscribe-retry checklist from regrowing.
@@ -85,4 +98,4 @@ branch = true
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
-fail_under = 90  # total was 90.8% when set; raise it as coverage grows, never lower it
+fail_under = 96  # total was 96.43% when set; raise it as coverage grows, never lower it

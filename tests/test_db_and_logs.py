@@ -133,7 +133,7 @@ def test_make_engine_rejects_not_null_column_without_default(tmp_path, monkeypat
     # Simulate a NOT NULL column whose default isn't a scalar (e.g. a callable).
     col = Base.metadata.tables["messages"].c.restored
     monkeypatch.setattr(col, "default", None)
-    with pytest.raises(RuntimeError, match="messages.restored is NOT NULL"):
+    with pytest.raises(RuntimeError, match=r"messages\.restored is NOT NULL"):
         make_engine(url)
 
 

@@ -33,15 +33,15 @@ def account():
 
 
 def make_signals(**kw) -> Signals:
-    base = dict(
-        sender="promo@news.shop.com",
-        sender_domain="news.shop.com",
-        list_id="news.shop.com",
-        unsubscribe_https=("https://shop.com/u/123",),
-        unsubscribe_mailto=("mailto:unsub@shop.com?subject=unsubscribe",),
-        one_click=True,
-        dmarc_pass=True,
-    )
+    base = {
+        "sender": "promo@news.shop.com",
+        "sender_domain": "news.shop.com",
+        "list_id": "news.shop.com",
+        "unsubscribe_https": ("https://shop.com/u/123",),
+        "unsubscribe_mailto": ("mailto:unsub@shop.com?subject=unsubscribe",),
+        "one_click": True,
+        "dmarc_pass": True,
+    }
     base.update(kw)
     return Signals(**base)
 

@@ -214,7 +214,9 @@ def sender_address(from_header: str | None) -> str:
 _MAILING_LIST = re.compile(r"^\s*list\s+([^;\s]+)", re.IGNORECASE)
 
 
-def original_sender(headers: dict[str, list[str]], from_addr: str, dmarc_pass: bool) -> str | None:
+def original_sender(
+    headers: dict[str, list[str]], from_addr: str, *, dmarc_pass: bool
+) -> str | None:
     """The claimed author of an email relayed by a Google Group, or None.
 
     Google Groups rewrites From to the group ("'Jane' via Hello <hello@co.com>") and keeps the
@@ -251,7 +253,7 @@ def extract(headers: dict[str, list[str]]) -> Signals:
         one_click="list-unsubscribe=one-click" in post and bool(https),
         dmarc_pass=dmarc_pass,
         is_discussion_list=bool((first_header(headers, "list-post") or "").strip()),
-        group_author=original_sender(headers, sender, dmarc_pass),
+        group_author=original_sender(headers, sender, dmarc_pass=dmarc_pass),
         reply_to=tuple(
             a.strip().lower() for _, a in getaddresses(headers.get("reply-to", [])) if a.strip()
         ),

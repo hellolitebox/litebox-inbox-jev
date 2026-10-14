@@ -3,6 +3,7 @@ email) and doesn't stop the check of the next emails; an accounts file that does
 categories.yaml stops it with the CLI's one-line message."""
 
 import sys
+from types import SimpleNamespace
 
 import dry_classify
 import pytest
@@ -13,6 +14,7 @@ from typesafe_sdk import TypeSafeUnprocessableEntityError
 
 from inbox_jev import rules, triage
 from inbox_jev.config import Mode, Settings
+from inbox_jev.db import Message
 from inbox_jev.rules import RuleSource
 
 SECRET = "Dear Ann, the merger closes on Friday"
@@ -117,3 +119,131 @@ def test_accounts_not_matching_categories_exit_with_a_message(monkeypatch, tmp_p
     message = str(exc.value.code)
     assert message.startswith(f"{accounts}: accounts use categories")
     assert "a@acme.com: unknown act_categories ['markting']" in message
+
+
+class _ScriptGmail(FakeGmail):
+    """`FakeGmail` as `main` uses it: opened as a context manager, searched with `list_ids`."""
+
+    def __init__(self, emails, matches):
+        super().__init__(emails)
+        self.matches, self.searches = matches, []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
+
+    def list_ids(self, query, limit):
+        self.searches.append((query, limit))
+        return self.matches[:limit]
+
+
+class _ClosedClassifier(FakeClassifier):
+    """`FakeClassifier` counting `close` calls: `main` opens the client, so it closes it."""
+
+    closes = 0
+
+    def close(self):
+        self.closes += 1
+
+
+@pytest.fixture
+def script_env(monkeypatch, tmp_path, make_sessions):
+    """An accounts file with me@acme.com, a file DB holding one stored decision, the script's
+    Gmail (`connect`) and Jev (`Classifier`) replaced by fakes; returns them, with the Gmail
+    addresses opened (`opened`) and the Jev clients built (`built`)."""
+    accounts = tmp_path / "accounts.yaml"
+    accounts.write_text("accounts:\n  - email: me@acme.com\n")
+    url = f"sqlite:///{tmp_path / 'db.sqlite'}"
+    sessions = make_sessions(url)
+    with sessions() as session:
+        session.add(
+            Message(
+                account="me@acme.com",
+                gmail_id="1",
+                thread_id="t1",
+                sender="ann@other.org",
+                category="marketing",
+                confidence=0.5,
+                mode="act",
+            )
+        )
+        session.commit()
+    monkeypatch.setenv("ACCOUNTS_FILE", str(accounts))
+    monkeypatch.setenv("CATEGORIES_FILE", str(ROOT / "categories.yaml"))
+    monkeypatch.setenv("DATABASE_URL", url)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "x")
+    gmail = _ScriptGmail(
+        [email("1", "Ann <ann@other.org>", "Lunch"), email("2", "Bob <bob@else.org>", "Report")],
+        matches=["2", "1"],
+    )
+    jev = _ClosedClassifier(
+        {
+            "Lunch": make_classification("important", 0.9),
+            "Report": make_classification("important", 0.8),
+        }
+    )
+    opened, built = [], []
+
+    def connect(tokens_dir, address):
+        opened.append(address)
+        return gmail
+
+    def classifier(key, model, cfg):
+        built.append(jev)
+        return jev
+
+    monkeypatch.setattr(dry_classify, "connect", connect)
+    monkeypatch.setattr(dry_classify, "Classifier", classifier)
+    return SimpleNamespace(
+        gmail=gmail, jev=jev, opened=opened, built=built, sessions=sessions, tmp_path=tmp_path
+    )
+
+
+def _main(monkeypatch, *args):
+    monkeypatch.setattr(sys, "argv", ["dry_classify.py", *args])
+    dry_classify.main()
+
+
+def test_main_checks_the_ids_then_the_query_matches_once_each(script_env, monkeypatch, capsys):
+    _main(
+        monkeypatch, "--account", "me@acme.com", "--ids", "1", "--query", "in:inbox", "--limit", "5"
+    )
+    out = capsys.readouterr().out.splitlines()
+    assert script_env.opened == ["me@acme.com"]
+    assert script_env.gmail.searches == [("in:inbox", 5)]
+    assert out[0].startswith("1  was=marketing@0.50  now=important@0.90  KEEP")
+    assert out[2].startswith("2  was=-  now=important@0.80  KEEP")
+    assert out[-1] == "emails=2 jev_calls=2"
+    assert script_env.gmail.closes == 1  # the client is closed when the check ends
+    assert script_env.gmail.modified == [] and script_env.gmail.sent == []
+    assert script_env.built == [script_env.jev] and script_env.jev.closes == 1
+    with script_env.sessions() as session:  # nothing was written
+        assert [m.gmail_id for m in session.query(Message)] == ["1"]
+
+
+def test_main_needs_ids_or_a_query(script_env, monkeypatch, capsys):
+    with pytest.raises(SystemExit) as exc:
+        _main(monkeypatch, "--account", "me@acme.com")
+    assert exc.value.code == 2
+    assert "give --query and/or --ids" in capsys.readouterr().err
+    assert script_env.opened == []
+
+
+def test_main_refuses_an_account_not_in_the_file(script_env, monkeypatch):
+    with pytest.raises(SystemExit) as exc:
+        _main(monkeypatch, "--account", "you@acme.com", "--ids", "1")
+    assert str(exc.value.code).startswith("you@acme.com is not in ")
+    assert script_env.opened == []
+
+
+def test_main_refuses_a_missing_sqlite_db(script_env, monkeypatch):
+    missing = script_env.tmp_path / "nope.sqlite"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{missing}")
+    with pytest.raises(SystemExit) as exc:
+        _main(monkeypatch, "--account", "me@acme.com", "--ids", "1")
+    assert exc.value.code == f"DB not found: {missing.resolve()}"
+    assert not missing.exists()  # the read-only check never creates the file
+    assert script_env.gmail.closes == 1
+    assert script_env.built == []  # the DB is checked before a Jev client exists to leak

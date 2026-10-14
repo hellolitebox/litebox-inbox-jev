@@ -250,7 +250,9 @@ def _cert_files(tmp_path, hostname):
         .not_valid_before(start)
         .not_valid_after(start + timedelta(days=2))
         .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-        .add_extension(x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), False)
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), critical=False
+        )
         .add_extension(
             x509.KeyUsage(
                 digital_signature=False,
@@ -275,7 +277,7 @@ def _cert_files(tmp_path, hostname):
         .not_valid_after(start + timedelta(days=2))
         .add_extension(x509.SubjectAlternativeName([x509.DNSName(hostname)]), critical=False)
         .add_extension(  # required by Python 3.13+'s strict verification
-            x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), False
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False
         )
         .sign(ca_key, hashes.SHA256())
     )

@@ -54,7 +54,7 @@ def test_known_contact_reply_blocks_group_archive_end_to_end(setup):
 
 
 class ContactGmail:
-    def __init__(self, written=(), fail=False):
+    def __init__(self, written=(), *, fail=False):
         self.written, self.fail, self.queries, self.scans = set(written), fail, [], []
 
     def has_written_to(self, query, scans=None):

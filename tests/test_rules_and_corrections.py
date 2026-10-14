@@ -20,7 +20,7 @@ def session():
 
 
 def msg(**kw) -> Message:
-    base = dict(category="marketing", low_confidence=False, archived=True, spammed=False)
+    base = {"category": "marketing", "low_confidence": False, "archived": True, "spammed": False}
     base.update(kw)
     return Message(**base)
 
