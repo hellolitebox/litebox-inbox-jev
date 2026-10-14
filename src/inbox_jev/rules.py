@@ -80,10 +80,16 @@ def record_auto(
     classification: Classification,
     decision: Decision,
     previous_contact: str | None = None,
+    *,
+    count: bool = True,
 ) -> None:
     """Count consistent high-confidence answers; activate after cfg.auto_rule.hits.
 
     Only for Jev decisions (`DecisionSource.JEV`) outside dry_run: the caller checks.
+    `count=False` (an email whose answer was already learned from) adds no hit, creates no rule
+    and switches no category: each email adds at most one hit. It still applies the resets: the
+    keep one below, and a confident answer in another category than a pending auto rule's
+    (Jev disagreeing with itself about one email: the sender isn't consistent).
     Only touches automatic rules: manual and correction rules are never changed here. An active
     auto rule whose category was removed from categories.yaml is replaced like a pending one
     (`match` sends its sender to Jev: auto rules are keyed on the exact address, so they come
@@ -124,6 +130,8 @@ def record_auto(
     ):
         return
     if rule is None:
+        if not count:
+            return
         session.add(
             SenderRule(
                 account=account,
@@ -136,6 +144,10 @@ def record_auto(
         )
         return
     if rule.source != RuleSource.AUTO or (rule.active and rule.category in cfg.by_key):
+        return
+    if not count:
+        if not rule.active and rule.category != decision.category:
+            rule.hits = 0
         return
     if rule.category == decision.category:
         rule.hits += 1

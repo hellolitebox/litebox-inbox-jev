@@ -58,6 +58,10 @@ ERROR_RETRY_BACKOFF = timedelta(minutes=5)
 # SDK): Jev is down, and the rest of the emails that need it wait for the next pass instead of
 # each spending a call, its retries and one of its own error attempts.
 MAX_CONSECUTIVE_JEV_FAILURES = 3
+# Jev refusing this many calls in a row the same way (same error type and HTTP status) is taken as
+# a change on its side, not as bad emails: the pass stops asking Jev, and each refused email
+# counts an ordinary failure (backoff) instead of giving up at once (ADR 0035).
+MAX_IDENTICAL_REJECTIONS = 2
 
 
 @dataclass
@@ -119,7 +123,16 @@ class JevUnavailable(Exception):
 
 class _JevStopped(Exception):
     """Raised instead of asking Jev once the pass stopped doing so: the email isn't to blame and
-    is left as it is for the next pass."""
+    is left as it is for the next pass.
+
+    Except on the call that stopped the pass by being refused like the one before it
+    (`MAX_IDENTICAL_REJECTIONS`): `refusal` is that refusal, and its email counts an ordinary
+    failure for it (see _run_pass).
+    """
+
+    def __init__(self, refusal: JevError | None = None) -> None:
+        super().__init__()  # no args: the refusal's text can echo the email
+        self.refusal = refusal
 
 
 class JevGuard:
@@ -127,8 +140,12 @@ class JevGuard:
 
     A failure Jev will repeat for every email (`JevFailure.CONFIG`: key revoked, no access,
     unknown model) stops it at once, and the email that hit it is not blamed (`_JevStopped`).
+    So do MAX_IDENTICAL_REJECTIONS refusals in a row with the same error type and HTTP status
+    (`JevFailure.REJECTED`, e.g. two 422s): Jev refuses whatever it is sent, and the refused
+    emails count an ordinary failure rather than giving up (`_JevStopped.refusal`). `_run_pass`
+    holds an email's refusal back until the next call shows which case it is (`last_rejection`).
     Otherwise MAX_CONSECUTIVE_JEV_FAILURES failed calls in a row stop it; those failures are the
-    emails' own (stored as `error`). A successful call resets the count. Once stopped, every
+    emails' own (stored as `error`). A successful call resets both counts. Once stopped, every
     call raises `_JevStopped` without reaching Jev; `stopped` says why.
     """
 
@@ -138,6 +155,10 @@ class JevGuard:
         self._client, self._account, self._limit = client, account, limit
         self.consecutive_failures = 0
         self.stopped: str | None = None
+        # The latest call's error when Jev refused it (REJECTED), else None; with the number of
+        # identical refusals in a row it ends.
+        self.last_rejection: JevError | None = None
+        self._identical_rejections = 0
 
     def check(self) -> None:
         """Raise `_JevStopped` if the pass no longer asks Jev (before work only Jev needs)."""
@@ -152,16 +173,26 @@ class JevGuard:
             failure = exc
         else:
             self.consecutive_failures = 0
+            self.last_rejection, self._identical_rejections = None, 0
             return result
         # Outside the `except`, so nothing raised here chains the Jev error's text (see _run_pass).
         self.consecutive_failures += 1
+        kind = failure_kind(failure)
+        self._track_rejection(failure if kind is JevFailure.REJECTED else None)
         what = describe_jev_error(failure, request_id=False)
-        if failure_kind(failure) is JevFailure.CONFIG:
+        if kind is JevFailure.CONFIG:
             self._stop(
                 f"Jev rejected the API key or model ({what}): check TYPESAFE_API_KEY and "
                 "TYPESAFE_MODEL; emails that need Jev wait for the next run"
             )
             raise _JevStopped
+        if self._identical_rejections >= MAX_IDENTICAL_REJECTIONS:
+            self._stop(
+                f"Jev refused {self._identical_rejections} requests in a row the same way "
+                f"({what}): likely a change on Jev's side; emails that need Jev wait for the "
+                "next run"
+            )
+            raise _JevStopped(refusal=failure)
         if self.consecutive_failures >= self._limit:
             self._stop(
                 f"Jev unavailable: {self.consecutive_failures} calls in a row failed (last: "
@@ -169,9 +200,32 @@ class JevGuard:
             )
         raise failure
 
+    @property
+    def refusing_everything(self) -> bool:
+        """Stopped because Jev refused MAX_IDENTICAL_REJECTIONS calls in a row the same way."""
+        return self._identical_rejections >= MAX_IDENTICAL_REJECTIONS
+
+    def _track_rejection(self, rejection: JevError | None) -> None:
+        """Count `rejection` (None: the call failed another way) toward identical refusals."""
+        if rejection is None:
+            self._identical_rejections = 0
+        elif self.last_rejection is not None and _rejection_key(rejection) == _rejection_key(
+            self.last_rejection
+        ):
+            self._identical_rejections += 1
+        else:
+            self._identical_rejections = 1
+        self.last_rejection = rejection
+
     def _stop(self, reason: str) -> None:
         self.stopped = reason
+        self.last_rejection = None
         log.error("stopped asking Jev", extra={"account": self._account, "reason": reason})
+
+
+def _rejection_key(exc: JevError) -> tuple[type, int | None]:
+    """What makes two refusals "the same way": the SDK error type and the HTTP status."""
+    return type(exc), getattr(exc, "status", None)
 
 
 class Context:
@@ -296,44 +350,88 @@ def _run_pass(
     skip = _not_due(session, account.email, mode, ids)
     budget = UnsubscribeBudget(ctx.settings.max_unsubscribes_per_run)
     account_pass = AccountPass(ctx, session, gmail, account, mode, label_ids, budget, jev)
+    held: _HeldRejection | None = None  # an email Jev refused, until the next call says why
     for message_id in ids:
         if message_id in skip:
             continue
         # The failure is handled after the `try`, not in its `except`: an error raised while
         # handling it (the rollback, `_record_error`'s commit) would otherwise chain a Jev error,
         # whose text can echo the email, into the traceback the caller logs.
+        failure: Exception | None = None
         try:
             process(account_pass, message_id)
         except Exception as exc:
             failure = exc
         else:
             counts.processed += 1
+        if failure is not None:
+            session.rollback()
+        if held is not None and jev.last_rejection is not held.failure:
+            _settle_rejection(account_pass, held, counts)  # a later Jev call says whose fault
+            held = None
+        if failure is None:
             continue
-        session.rollback()
-        if isinstance(failure, _JevStopped):  # needed Jev after the pass stopped asking it
-            counts.jev_skipped += 1  # untouched
+        if isinstance(failure, _JevStopped):
+            if failure.refusal is None:  # needed Jev after the pass stopped asking it
+                counts.jev_skipped += 1  # untouched
+            else:  # refused like the email before it, which stopped the pass
+                refusal = failure.refusal
+                _fail(account_pass, message_id, refusal, account_pass.fetched, counts, alone=False)
             continue
         if is_token_refresh_error(failure):
             raise failure  # token refresh failed: fail the run, don't count it against the email
-        counts.errors += 1
-        _record_error(session, account.email, mode, message_id, failure)
-        if isinstance(failure, JevError):  # its text can echo the email: type and status only
-            log.warning(
-                "message failed",
-                extra={
-                    "account": account.email,
-                    "id": message_id,
-                    "error": describe_jev_error(failure),
-                },
-            )
-        else:
-            log.error(
-                "message failed",
-                extra={"account": account.email, "id": message_id},
-                exc_info=failure,
-            )
+        rejection = jev.last_rejection
+        if rejection is not None and failure is rejection:  # this email, or Jev refusing all?
+            held = _HeldRejection(message_id, rejection, account_pass.fetched)
+            continue
+        _fail(account_pass, message_id, failure, account_pass.fetched, counts)
+    if held is not None:  # no later call: Jev refused only this email as far as anyone knows
+        _settle_rejection(account_pass, held, counts)
     if jev.stopped is not None:
         raise JevUnavailable(jev.stopped)
+
+
+@dataclass(frozen=True)
+class _HeldRejection:
+    """An email whose Jev call was refused (`JevFailure.REJECTED`), not stored yet: if the next
+    Jev call is refused the same way, Jev refuses everything and the email doesn't give up."""
+
+    message_id: str
+    failure: JevError
+    email: Email | None  # as `process` read it, for the error row
+
+
+def _settle_rejection(p: AccountPass, held: _HeldRejection, counts: RunCounts) -> None:
+    """Store a held refusal once the next Jev call (or the pass's end) says whose fault it was.
+
+    Jev refusing every call the same way (`JevGuard.refusing_everything`): an ordinary failure,
+    retried after the backoff like a timeout, so two emails Jev really refuses can't stop every
+    pass before the emails behind them. Otherwise it was this email: it gives up at once.
+    """
+    alone = not p.jev.refusing_everything
+    _fail(p, held.message_id, held.failure, held.email, counts, alone=alone)
+
+
+def _fail(
+    p: AccountPass,
+    message_id: str,
+    failure: Exception,
+    email: Email | None,
+    counts: RunCounts,
+    *,
+    alone: bool = True,
+) -> None:
+    """Store `message_id` as failed (`_record_error`, committed) and log it."""
+    counts.errors += 1
+    _record_error(p, message_id, failure, email, alone=alone)
+    account = p.account.email
+    if isinstance(failure, JevError):  # its text can echo the email: type and status only
+        log.warning(
+            "message failed",
+            extra={"account": account, "id": message_id, "error": describe_jev_error(failure)},
+        )
+    else:
+        log.error("message failed", extra={"account": account, "id": message_id}, exc_info=failure)
 
 
 # The modes a pass in each mode redoes: an email still in the inbox that was seen in a weaker mode
@@ -532,6 +630,8 @@ class AccountPass:
     label_ids: dict[str, str]  # Gmail label name -> id; empty in dry_run
     unsub_budget: UnsubscribeBudget
     jev: JevGuard
+    # The email `process` is on, once read from Gmail: what its error row stores if it fails.
+    fetched: Email | None = None
 
 
 # The stages of `process` timed on the "message processed" log line, in milliseconds: reading
@@ -571,10 +671,13 @@ def process(p: AccountPass, message_id: str) -> Message:
     """
     ctx, session, account, mode = p.ctx, p.session, p.account, p.mode
     timer = _StageTimer()
+    p.fetched = None
     with timer.stage("fetch"):
         email = p.gmail.get(message_id)
+    p.fetched = email
     sig = signals_for(email, account)
     prev = _find_message(session, account.email, message_id)
+    counted_before = _counted_toward_auto_rule(prev)
     if prev is not None:
         prev.sender = sig.sender  # rows stored before group authors were recovered
         # In dry_run, or before any label of ours is in Gmail (labels_added), nothing to compare.
@@ -600,7 +703,7 @@ def process(p: AccountPass, message_id: str) -> Message:
         msg = _upsert_message(session, account.email, email, sig, prev)
         _apply_labels(p.gmail, message_id, msg, p.label_ids, actions)
         _store_outcome(msg, mode, inputs.classification, decision, actions)
-        _learn_auto_rule(p, sig, inputs, decision)
+        _learn_auto_rule(p, sig, inputs, decision, counted_before)
         if (
             actions.unsubscribe
             and not p.unsub_budget.exhausted
@@ -734,11 +837,16 @@ def _store_outcome(
     msg.processed_at = now()
 
 
-def _learn_auto_rule(p: AccountPass, sig: Signals, inputs: _Inputs, decision: Decision) -> None:
+def _learn_auto_rule(
+    p: AccountPass, sig: Signals, inputs: _Inputs, decision: Decision, counted_before: bool
+) -> None:
     """Count Jev's decision toward an auto rule for the sender (`rules.record_auto`).
 
     Only Jev's own decisions count, and not in dry_run: a rule learned there would apply
-    without Jev (and act) as soon as the mode is label or act.
+    without Jev (and act) as soon as the mode is label or act. An email Jev's answer was already
+    learned from (`counted_before`: processed again in a stronger mode, or after `reprocess`)
+    adds no hit: an auto rule needs that many different emails. Its new answer can still reset a
+    pending rule.
     """
     classification = inputs.classification
     if classification and decision.source == DecisionSource.JEV and p.mode != Mode.DRY_RUN:
@@ -750,7 +858,15 @@ def _learn_auto_rule(p: AccountPass, sig: Signals, inputs: _Inputs, decision: De
             classification,
             decision,
             inputs.contact,
+            count=not counted_before,
         )
+
+
+def _counted_toward_auto_rule(row: Message | None) -> bool:
+    """Whether an earlier pass already offered Jev's answer on this email to `rules.record_auto`:
+    a Jev decision stored in label or act (dry_run learns nothing). Read before this pass
+    overwrites the row."""
+    return row is not None and row.source == DecisionSource.JEV and row.mode != Mode.DRY_RUN
 
 
 def _log_processed(
@@ -1240,26 +1356,41 @@ def _upsert_message(
     if msg is None:
         msg = Message(account=account, gmail_id=email.id)
         session.add(msg)
+    _store_metadata(msg, email, sig)
+    return msg
+
+
+def _store_metadata(msg: Message, email: Email, sig: Signals) -> None:
+    """The email's thread, sender (resolved: `signals_for`), From, Subject and date on `msg`."""
     msg.thread_id = email.thread_id
     msg.sender = sig.sender
     msg.from_header = email.header("From")
     msg.subject = email.header("Subject")
     msg.received_at = datetime.fromtimestamp(email.internal_date_ms / 1000, UTC)
-    return msg
 
 
 def _record_error(
-    session: Session, account: str, mode: Mode, message_id: str, exc: Exception
+    p: AccountPass, message_id: str, exc: Exception, email: Email | None, *, alone: bool = True
 ) -> None:
-    msg = _find_message(session, account, message_id)
+    """Store a failed pass over `message_id` on its row (`status = error`, one more attempt).
+
+    `email` is the email as `process` read it, or None when reading it failed. The row then gets
+    its From, Subject, sender, date and thread (`_failed_email_metadata`), so the digest can name
+    it; failing to get them never stops the failure from being stored.
+    A Jev refusal (`JevFailure.REJECTED`) gives up at once when Jev refused this email `alone`;
+    when it refused every call the same way (ADR 0035) it is an ordinary failure, with backoff.
+    """
+    session, account, mode = p.session, p.account, p.mode
+    msg = _find_message(session, account.email, message_id)
     if msg is None:
-        msg = Message(account=account, gmail_id=message_id, thread_id="", sender="")
+        msg = Message(account=account.email, gmail_id=message_id, thread_id="", sender="")
         session.add(msg)
+    _failed_email_metadata(p, msg, email, exc)
     msg.status, msg.mode = MessageStatus.ERROR, mode
     msg.error_attempts = (msg.error_attempts or 0) + 1
     if isinstance(exc, JevError):
         msg.error = describe_jev_error(exc)  # never the SDK's text: it can echo the email
-        if failure_kind(exc) is JevFailure.REJECTED:
+        if alone and failure_kind(exc) is JevFailure.REJECTED:
             msg.error_attempts = MAX_ERROR_ATTEMPTS  # Jev refuses this email: retrying won't help
     else:
         msg.error = f"{type(exc).__name__}: {exc}"[:2000]
@@ -1268,5 +1399,38 @@ def _record_error(
     if msg.error_attempts >= MAX_ERROR_ATTEMPTS:
         log.warning(
             "message gave up",
-            extra={"account": account, "id": message_id, "attempts": msg.error_attempts},
+            extra={"account": account.email, "id": message_id, "attempts": msg.error_attempts},
+        )
+
+
+# What a failed email's row needs when reading the email failed: From and Subject for the digest,
+# and the headers `signals_for` resolves the sender from. No body (format=metadata).
+_ERROR_ROW_HEADERS = ["Subject", *_SENDER_HEADERS]
+
+
+def _failed_email_metadata(
+    p: AccountPass, msg: Message, email: Email | None, failure: Exception
+) -> None:
+    """Store a failed email's metadata on its row `msg` (not committed), best effort.
+
+    From the email `process` read; when reading it failed (`failure`), from one metadata-only
+    read (`gmail.get_headers`, headers only, no retries), unless the row already has its From or
+    Subject from an earlier pass or Gmail said the email is gone (404: that read would fail too).
+    Any error doing so is logged (type only) and the row is left without them: it must never
+    stop the failure from being stored.
+    """
+    try:
+        if email is None:
+            if msg.from_header or msg.subject or is_not_found(failure):
+                return
+            email = p.gmail.get_headers(msg.gmail_id, _ERROR_ROW_HEADERS)
+        _store_metadata(msg, email, signals_for(email, p.account))
+    except Exception as exc:
+        log.warning(
+            "failed email: metadata unavailable",
+            extra={
+                "account": p.account.email,
+                "id": msg.gmail_id,
+                "error_type": type(exc).__name__,
+            },
         )

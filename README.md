@@ -277,7 +277,9 @@ low-confidence emails; corrections learned; and errors. Errors are failed runs (
 grouped, e.g. an expired Gmail token, with the fix: `run inbox-jev auth add EMAIL`, or "Jev
 unavailable") and emails that stopped being retried. An email that fails is retried with a
 backoff (5, 10, 20 … minutes) and given up after 8 failures, about 10.5 hours (at once when Jev
-refuses that email with a 4xx); `inbox-jev retry-errors` retries them again
+refuses that email with a 4xx; when Jev refuses two emails in a row the same way, the run fails
+and each counts an ordinary failure); `inbox-jev retry-errors` retries them again. Failed
+emails are listed by subject and sender
 (details: [docs/how-it-decides.md §1](docs/how-it-decides.md#1-the-pass-over-an-inbox)).
 Everything taken from an email is escaped for Slack, so a subject can't mention `@channel` or
 fake a link. Preview it with `inbox-jev digest --dry-print`.

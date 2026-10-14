@@ -7,7 +7,8 @@ import logging
 
 import httpx2
 import pytest
-from fakes import JevFails, email, jev_http_error
+from conftest import make_classification
+from fakes import FakeClassifier, JevFails, email, jev_http_error
 from sqlalchemy.exc import OperationalError
 from typesafe_sdk import (
     Choice,
@@ -164,8 +165,8 @@ def test_failing_to_record_a_jev_error_does_not_chain_its_text(setup, cfg, monke
     """If storing a refused email fails (database locked…), the error that escapes the run
     carries no Jev error as context: `cli` logs its whole traceback."""
     ctx, gmail, account = setup
-    for e in gmail.emails.values():
-        e.body = BODY
+    gmail.emails = {"1": gmail.emails["1"]}  # one refusal: this email's, stored at the pass's end
+    gmail.emails["1"].body = BODY
     ctx = triage.Context(
         ctx.settings, cfg, ctx.sessions, ctx.gmail, classifier=_sdk_classifier(cfg, _echoing(422))
     )
@@ -218,21 +219,27 @@ def test_422_echoing_the_email_is_never_stored_or_logged(setup, cfg, caplog):
     caplog.set_level(logging.DEBUG)
     # logs.setup keeps the SDK at INFO (its DEBUG lines are the raw request: see the test below).
     caplog.set_level(logging.INFO, logger="typesafe_sdk")
-    with pytest.raises(triage.JevUnavailable):  # 1, 2 and 3 (flags only) refused in a row
-        triage.run_account(ctx, account, Mode.ACT)
+    only_one = {"1": gmail.emails["1"]}
+    everything = gmail.emails
+    gmail.emails = only_one  # Jev refuses this one email: it is stored, and gives up at once
+    triage.run_account(ctx, account, Mode.ACT)
+    row = _rows(ctx)["1"]
+    assert row.error == "TypeSafeUnprocessableEntityError (HTTP 422, request_id=req-422)"
+    assert row.error_attempts == MAX_ERROR_ATTEMPTS
+    assert (row.subject, row.sender) == ("Proposal", "c@client.com")
 
-    rows = _rows(ctx)
-    for gmail_id in ("1", "2"):
-        assert rows[gmail_id].error == (
-            "TypeSafeUnprocessableEntityError (HTTP 422, request_id=req-422)"
-        )
-        # Jev refuses this email: retrying it every pass won't help, it gives up at once.
-        assert rows[gmail_id].error_attempts == MAX_ERROR_ATTEMPTS
+    # 2 and 3 (flags only) are refused the same way: Jev's problem, so 2 gets an ordinary failure
+    gmail.emails = everything
+    with pytest.raises(triage.JevUnavailable):
+        triage.run_account(ctx, account, Mode.ACT)
     run = _run(ctx)
     assert run.error == (
-        "Jev unavailable: 3 calls in a row failed (last: TypeSafeUnprocessableEntityError "
-        "(HTTP 422)); emails that need Jev wait for the next run"
+        "Jev refused 2 requests in a row the same way (TypeSafeUnprocessableEntityError "
+        "(HTTP 422)): likely a change on Jev's side; emails that need Jev wait for the next run"
     )
+    rows = _rows(ctx)
+    assert rows["2"].error == "TypeSafeUnprocessableEntityError (HTTP 422, request_id=req-422)"
+    assert rows["2"].error_attempts == 1 and rows["3"].status == "done"
     stored = [r.error or "" for r in rows.values()] + [run.error]
     logged = [JsonFormatter().format(r) for r in caplog.records]
     assert caplog.records and not [t for t in stored + logged if "SECRET" in t]
@@ -359,4 +366,90 @@ def test_gmail_http_error_text_has_no_message_content():
     assert str(err) == (
         "<HttpError 400 when requesting https://gmail.googleapis.com/gmail/v1/users/me/messages/1 "
         'returned "Invalid label: Label_9". Details: "Invalid label: Label_9">'
+    )
+
+
+def _refused(status=422, error_type=TypeSafeUnprocessableEntityError):
+    return jev_http_error(error_type, status)
+
+
+def test_identical_refusals_around_a_rule_give_neither_email_up(setup, cfg):
+    """A refusal is settled by the next Jev call, not the next email: a rule decision in between
+    (no call) changes nothing. Both refused emails count one ordinary failure (backoff)."""
+    ctx, gmail, account = setup
+    gmail.emails = {e: gmail.emails[e] for e in ("1", "4", "2")}  # 4 is decided by a rule
+    jev = FakeClassifier({"Proposal": _refused(), "50% off": _refused()})
+    ctx = triage.Context(ctx.settings, cfg, ctx.sessions, ctx.gmail, classifier=jev)
+    with ctx.sessions() as s:
+        rules.set_rule(s, account.email, "w@weird.biz", "marketing", RuleSource.MANUAL)
+        s.add(  # failed twice before (a timeout), due again now
+            Message(
+                account=account.email,
+                gmail_id="1",
+                thread_id="t1",
+                sender="c@client.com",
+                status=MessageStatus.ERROR,
+                mode=Mode.ACT,
+                error="TypeSafeAPITimeoutError: Request timed out (timeout=30.0).",
+                error_attempts=2,
+                processed_at=now().replace(year=2000),
+            )
+        )
+        s.commit()
+    with pytest.raises(triage.JevUnavailable, match="Jev refused 2 requests in a row"):
+        triage.run_account(ctx, account, Mode.ACT)
+
+    rows = _rows(ctx)
+    refused = "TypeSafeUnprocessableEntityError (HTTP 422, request_id=req-1)"
+    assert (rows["1"].error_attempts, rows["1"].error) == (3, refused)
+    assert (rows["2"].error_attempts, rows["2"].error) == (1, refused)
+    assert rows["4"].source == "rule"
+    run = _run(ctx)
+    assert (run.processed, run.errors) == (1, 2)
+
+
+@pytest.mark.parametrize(
+    "second",
+    [
+        _refused(400, TypeSafeBadRequestError),  # refused another way
+        TypeSafeAPITimeoutError(30.0),  # failed another way
+        make_classification("marketing", 0.97),  # answered
+    ],
+    ids=["other-status", "timeout", "answer"],
+)
+def test_a_refusal_not_repeated_the_same_way_is_the_emails_own(setup, cfg, second):
+    ctx, gmail, account = setup
+    gmail.emails = {e: gmail.emails[e] for e in ("1", "2")}
+    jev = FakeClassifier({"Proposal": _refused(), "50% off": second})
+    ctx = triage.Context(ctx.settings, cfg, ctx.sessions, ctx.gmail, classifier=jev)
+    run = triage.run_account(ctx, account, Mode.ACT)
+
+    rows = _rows(ctx)
+    assert (rows["1"].status, rows["1"].error_attempts) == ("error", MAX_ERROR_ATTEMPTS)
+    assert rows["1"].subject == "Proposal"
+    assert run.error is None and jev.calls == 2
+    if isinstance(second, TypeSafeBadRequestError):
+        assert rows["2"].error_attempts == MAX_ERROR_ATTEMPTS
+    elif isinstance(second, Exception):
+        assert rows["2"].error_attempts == 1
+    else:
+        assert rows["2"].status == "done"
+
+
+def test_a_refused_flags_only_call_counts_as_the_next_call(setup, cfg):
+    """Jev refusing the allowlisted email's flags call the same way shows it refuses everything:
+    the email refused before it counts an ordinary failure, and the allowlisted one is labeled
+    without flags."""
+    ctx, gmail, account = setup
+    gmail.emails = {e: gmail.emails[e] for e in ("1", "3")}
+    jev = FakeClassifier({"Proposal": _refused(), "Internal": _refused()})
+    ctx = triage.Context(ctx.settings, cfg, ctx.sessions, ctx.gmail, classifier=jev)
+    with pytest.raises(triage.JevUnavailable, match="likely a change on Jev's side"):
+        triage.run_account(ctx, account, Mode.ACT)
+    rows = _rows(ctx)
+    assert (rows["1"].status, rows["1"].error_attempts) == ("error", 1)
+    assert (rows["3"].status, rows["3"].source, rows["3"].needs_reply) == (
+        "done",
+        "allowlist",
+        None,
     )

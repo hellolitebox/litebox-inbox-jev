@@ -123,10 +123,12 @@ review_label: Jev/Review
 processed_label: Jev/Processed
 
 # A sender becomes an automatic rule (skips Jev, or for keep categories asks it for the flags
-# only) after this many consistent classifications at or above this confidence, in label or act
-# mode (never in dry_run). An answer doesn't count when the keep categories
-# (other than the decided one) add up to max_keep_probability or more, and a keep answer restarts
-# a pending archive rule: senders that mix routine and action-needed mail keep going through Jev.
+# only) after this many consistent classifications of different emails at or above this
+# confidence, in label or act mode (never in dry_run). An email classified again adds no hit,
+# but an answer in another category restarts a pending rule. An answer doesn't count when the
+# keep categories (other than the decided one) add up to max_keep_probability or more, and a
+# keep answer restarts a pending archive rule: senders that mix routine and action-needed mail
+# keep going through Jev.
 auto_rule:
   hits: 3
   min_confidence: 0.95

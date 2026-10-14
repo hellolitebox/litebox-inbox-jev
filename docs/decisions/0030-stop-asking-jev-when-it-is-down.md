@@ -1,6 +1,6 @@
 # 0030. Stop asking Jev in a pass when it rejects the key or keeps failing
 
-- Status: Accepted
+- Status: Accepted; repeated refusals: superseded by [0035](0035-identical-refusals-stop-the-pass.md)
 - Date: 2026-10-13
 - PR: #32
 
@@ -63,6 +63,8 @@ or above, since its DEBUG lines (which `TYPESAFE_LOG_LEVEL` can turn on) are the
   tags, and isn't revisited (the same trade-off as a failed flags-only call).
 - If Jev starts refusing every request with 400/422 (a change on its side), 3 emails per pass
   give up before the pass stops; after the fix, `retry-errors` plus `run --lookback` recovers
-  them (a known gap in the spec).
+  them (a known gap in the spec). Superseded by
+  [0035](0035-identical-refusals-stop-the-pass.md): two identical refusals in a row now stop
+  the pass, and neither email gives up at once.
 - `messages.error` for a Jev failure no longer carries Jev's message, only type, status and
   request id: the request id is what TypeSafe support needs.

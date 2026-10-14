@@ -6,7 +6,7 @@ from unittest import mock
 import google.auth._exponential_backoff
 import google.auth.transport
 import pytest
-from fakes import age_errors
+from fakes import HttpError, age_errors
 from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
 from typer.testing import CliRunner
@@ -362,3 +362,94 @@ def test_digest_escapes_email_text_for_slack(triage_setup):
 def test_digest_escape_truncates_before_escaping():
     assert digest.esc("a&b<c>", 3) == "a&amp;b"
     assert digest.esc(None) == "None" and digest.esc(503) == "503"
+
+
+def _row(ctx, gmail_id):
+    with ctx.sessions() as s:
+        row = s.query(Message).filter_by(gmail_id=gmail_id).one()
+        s.expunge(row)
+        return row
+
+
+def test_failed_email_row_keeps_what_was_read(triage_setup):
+    """A failure after the email was read (here Jev has no answer) stores its metadata."""
+    ctx, gmail, account = triage_setup
+    ctx.classifier.answers.pop("Proposal")
+    triage.run_account(ctx, account, Mode.ACT)
+    row = _row(ctx, "1")
+    assert (row.status, row.from_header, row.subject, row.sender, row.thread_id) == (
+        "error",
+        "Client <c@client.com>",
+        "Proposal",
+        "c@client.com",
+        "t1",
+    )
+    assert row.received_at is not None
+
+
+def test_gmail_read_failure_stores_metadata_from_a_headers_only_read(triage_setup, monkeypatch):
+    ctx, gmail, account = triage_setup
+    real_get, real_headers = gmail.get, gmail.get_headers
+    header_reads = []
+
+    def get(message_id):
+        if message_id == "1":
+            raise HttpError(500)
+        return real_get(message_id)
+
+    def get_headers(message_id, names):
+        header_reads.append((message_id, names))
+        return real_headers(message_id, names)
+
+    monkeypatch.setattr(gmail, "get", get)
+    monkeypatch.setattr(gmail, "get_headers", get_headers)
+    triage.run_account(ctx, account, Mode.ACT)
+    row = _row(ctx, "1")
+    assert (row.status, row.error, row.subject, row.from_header, row.sender) == (
+        "error",
+        "HttpError: HTTP 500",
+        "Proposal",
+        "Client <c@client.com>",
+        "c@client.com",
+    )
+    [(read_id, names)] = header_reads  # one metadata read, only for the failed email
+    assert read_id == "1" and "Subject" in names and "From" in names
+
+    age_errors(ctx, 5)
+    triage.run_account(ctx, account, Mode.ACT)  # fails again: the row already names it
+    assert len(header_reads) == 1 and _row(ctx, "1").error_attempts == 2
+
+
+def test_metadata_read_failure_still_stores_the_error(triage_setup, monkeypatch, caplog):
+    ctx, gmail, account = triage_setup
+
+    def get(message_id):
+        raise HttpError(500)
+
+    monkeypatch.setattr(gmail, "get", get)
+    gmail.header_errors = {i: HttpError(404) for i in gmail.emails}
+    run = triage.run_account(ctx, account, Mode.ACT)
+    assert run.errors == 4
+    row = _row(ctx, "1")
+    assert (row.status, row.error_attempts, row.subject, row.sender) == ("error", 1, "", "")
+    warnings = [r for r in caplog.records if r.getMessage() == "failed email: metadata unavailable"]
+    assert len(warnings) == 4 and warnings[0].error_type == "HttpError"
+
+
+def test_email_gmail_no_longer_has_gets_no_metadata_read(triage_setup, monkeypatch):
+    """A 404 on the full read means the email is gone: a metadata read would fail too."""
+    ctx, gmail, account = triage_setup
+    real_get = gmail.get
+    header_reads = []
+
+    def get(message_id):
+        if message_id == "1":
+            raise HttpError(404)
+        return real_get(message_id)
+
+    monkeypatch.setattr(gmail, "get", get)
+    monkeypatch.setattr(gmail, "get_headers", lambda *args: header_reads.append(args))
+    triage.run_account(ctx, account, Mode.ACT)
+    row = _row(ctx, "1")
+    assert (row.status, row.error, row.subject) == ("error", "HttpError: HTTP 404", "")
+    assert header_reads == []

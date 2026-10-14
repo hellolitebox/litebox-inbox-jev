@@ -45,3 +45,5 @@ record when the decision changes: add a new one and mark the old one `Superseded
 | [0032](0032-machine-addresses-make-no-known-contact.md) | Machine addresses make no known contact; no-reply emails' reply signal is judged like a stranger's | Accepted | #33 |
 | [0033](0033-free-mail-country-domains-and-named-public-suffixes.md) | Free mail includes country domains; `group_domains` refuses public suffixes by name | Accepted | #35 |
 | [0034](0034-cli-refuses-keys-and-categories-it-cant-use.md) | The CLI refuses rule keys and categories it can't use | Accepted | #35 |
+| [0035](0035-identical-refusals-stop-the-pass.md) | Two identical Jev refusals in a row stop the pass; neither email gives up at once | Accepted | #36 |
+| [0036](0036-auto-rule-hits-count-emails.md) | Auto-rule hits count emails, not answers | Accepted | #36 |

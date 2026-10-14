@@ -81,7 +81,8 @@ def gmail_factory(gmail: FakeGmail) -> GmailFactory:
 
 
 class FakeClassifier:
-    """Jev answering from `answers` by subject; records each call's state."""
+    """Jev answering from `answers` by subject (an exception there is raised, as an SDK error
+    would be); records each call's state."""
 
     def __init__(self, answers):
         self.answers = answers
@@ -91,7 +92,10 @@ class FakeClassifier:
     def classify(self, state):
         self.calls += 1
         self.states.append(state)
-        return self.answers[state["subject"]]
+        answer = self.answers[state["subject"]]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
 
     def close(self):
         pass

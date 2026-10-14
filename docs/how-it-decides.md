@@ -62,7 +62,14 @@ Contents:
    of the account, so the next run retries those still inside its `--lookback`.
 6. Each remaining email goes through the [pipeline](#2-the-per-email-pipeline). An exception
    rolls back that email, stores it as `status = error` (counting one failure) and the run
-   continues. A Gmail token refresh that fails mid-run (permanent or transient) is the
+   continues. The error row keeps the email's From, Subject, sender, date and thread whenever
+   they were read, so the digest names it. When reading the email itself failed, one
+   metadata-only read (`gmail.get_headers`: From, Subject and the sender headers, no body, no
+   retries) fills them in, unless the row already has them from an earlier pass or the failed
+   read was a 404 (Gmail no longer has the email: that read would fail too); if that read
+   fails too, the row is stored without them (logged `failed email: metadata unavailable`, error
+   type only) and the digest shows "(no subject)" with the Gmail link. A Gmail token refresh that
+   fails mid-run (permanent or transient) is the
    exception: it fails the whole run instead and isn't counted against the email.
    A failed Jev call (after the SDK's own retries of timeouts, connection errors, 408, 429 and
    5xx) is sorted by `classifier.failure_kind`
@@ -70,10 +77,23 @@ Contents:
    - **config** (401, 403, 404: key revoked, no access, unknown model): every call would fail
      the same way. The pass stops asking Jev at once, and the email that hit it is left as it
      was (not stored, no failure counted).
-   - **rejected** (any other 4xx but 408 and 429, e.g. 400, 422): Jev refuses this email's
-     request. The email is stored as `error` and gives up at once (`error_attempts` = 8), since
-     retrying sends the same request; `retry-errors` makes the next run try it again
-     ([EX-23](#ex-23--jev-refuses-one-email)).
+   - **rejected** (any other 4xx but 408 and 429, e.g. 400, 422): Jev refuses the request. The
+     email is held, not stored yet, until the pass's next Jev call (flags-only calls count; an
+     email decided by a rule makes none) says whose fault it is
+     ([ADR 0035](decisions/0035-identical-refusals-stop-the-pass.md)):
+     - the next call is refused **the same way** (same SDK error type and HTTP status,
+       `triage.MAX_IDENTICAL_REJECTIONS` = 2 in a row): Jev may refuse everything, e.g. a change
+       on its side. The pass stops asking Jev, and neither email gives up: each is stored as
+       `error` with one **ordinary** failure, retried after the usual backoff like a timeout
+       ([EX-28](#ex-28--jev-refuses-every-request-the-same-way)). The emails after them are left
+       as they were. Two emails Jev really refuses (e.g. one message delivered to two aliases)
+       stop only the passes where both are due again, so the emails behind them are decided in
+       between, and they give up after 8 failures
+       ([EX-30](#ex-30--two-emails-jev-refuses-dont-hold-up-the-rest));
+     - anything else (an answer, a refusal with another status, another failure), or no other
+       call before the pass ends: it was this email. It is stored as `error` and gives up at
+       once (`error_attempts` = 8), since retrying sends the same request; `retry-errors` makes
+       the next run try it again ([EX-23](#ex-23--jev-refuses-one-email)).
    - **transient** (anything else): the email is stored as `error` with the usual backoff.
 
    After **3** failed Jev calls in a row (`triage.MAX_CONSECUTIVE_JEV_FAILURES`; flags-only calls
@@ -81,12 +101,14 @@ Contents:
    the rest of the pass: an email that needs Jev's decision is left as it is (no sent-mail
    search, not stored, no failure counted) for the next run; an allowlisted email or one with a
    keep rule is decided without the flags, as when its flags-only call fails; other rule
-   decisions go on as usual. The run then fails, logs `stopped asking Jev` and stores one of two
-   `runs.error` texts: "Jev rejected the API key or model (…): check TYPESAFE_API_KEY and
-   TYPESAFE_MODEL; …" or "Jev unavailable: 3 calls in a row failed (last: …); emails that need
-   Jev wait for the next run" ([EX-21](#ex-21--jevs-api-key-is-revoked),
-   [EX-22](#ex-22--jev-is-down-for-a-whole-pass)). `inbox-jev run` exits 1 when any account's
-   run failed; the other accounts still run.
+   decisions go on as usual. The run then fails, logs `stopped asking Jev` and stores one of
+   three `runs.error` texts: "Jev rejected the API key or model (…): check TYPESAFE_API_KEY and
+   TYPESAFE_MODEL; …", "Jev refused 2 requests in a row the same way (…): likely a change on
+   Jev's side; emails that need Jev wait for the next run" or "Jev unavailable: 3 calls in a row
+   failed (last: …); emails that need Jev wait for the next run"
+   ([EX-21](#ex-21--jevs-api-key-is-revoked), [EX-22](#ex-22--jev-is-down-for-a-whole-pass),
+   [EX-28](#ex-28--jev-refuses-every-request-the-same-way)). `inbox-jev run` exits 1 when any
+   account's run failed; the other accounts still run.
 
    A Jev error is stored (`messages.error`, `runs.error`) and logged as its type, HTTP status
    and request id only (`classifier.describe_jev_error`): the SDK's own message comes from the
@@ -130,7 +152,7 @@ flowchart TD
     PL --> AP["Gmail modify: add labels, remove INBOX (archive/spam),<br/>add SPAM, drop stale labels from an earlier pass"]
     AP --> DB["Store the row (category, confidence, probabilities, labels...)"]
     DB --> AR{"Jev decided (not allowlist or rule)<br/>and mode is not dry_run?"}
-    AR -- yes --> AR2["rules.record_auto<br/>(count toward / reset an auto rule)"]
+    AR -- yes --> AR2["rules.record_auto<br/>(count toward / reset an auto rule;<br/>each email counts once)"]
     AR -- no --> U
     AR2 --> U{"plan.unsubscribe and run budget left?"}
     U -- yes --> U2["Unsubscribe once per list<br/>(see the unsubscribe flow)"]
@@ -377,12 +399,19 @@ Held rows stay `failed`.
 
 **Automatic rules** (`rules.record_auto`): only decisions Jev made (source `jev`, not allowlist
 or rule, so never a flags-only answer), and only in `label` and `act`. Nothing is learned in
-`dry_run` ([EX-18](#ex-18--a-dry-run-trial-learns-no-rules)):
+`dry_run` ([EX-18](#ex-18--a-dry-run-trial-learns-no-rules)). Hits count **emails**, not
+answers: an email processed again (`label` then `act`, or after `reprocess`) is sent to Jev
+again, but when its stored row already holds a Jev decision from `label` or `act`, the new
+answer adds no hit; it can still reset a pending rule, and a counting answer in another category
+than the pending rule's restarts it at 0 hits without switching its category
+([EX-29](#ex-29--an-email-answered-again-counts-once-toward-an-auto-rule),
+[ADR 0036](decisions/0036-auto-rule-hits-count-emails.md)):
 
 | Step | Condition | Effect |
 |---|---|---|
 | Reset | The decision is a keep category, **or** the keep categories other than the decided one hold ≥ `auto_rule.max_keep_probability` (0.02) — even on a low-confidence answer — **and** the sender has a pending (inactive) `auto` rule to a non-keep category | `hits = 0` |
 | Doesn't count | `low_confidence`, `archive_group`, a known contact (`previous_contact` is `wrote_to_sender` / `wrote_to_their_domain`) in a category that spares known contacts, the keep signal above, or Jev's confidence < `auto_rule.min_confidence` (0.95) | nothing more |
+| Already learned from | The answer would count, but the email's row held a Jev decision from `label` or `act` | a pending `auto` rule to another category: `hits = 0`, category unchanged; otherwise nothing |
 | Counts, no rule yet | | new `auto` rule, `hits = 1`, active if `auto_rule.hits` ≤ 1 |
 | Counts, rule is manual/correction, or an active auto rule to an existing category | | unchanged |
 | Counts, same category | | `hits += 1`; active at `auto_rule.hits` (3) |
@@ -947,11 +976,13 @@ the probabilities that matter are shown; the rest are ~0.
 
 - **Test**: `test_ex23_jev_refuses_one_email`
 - **Input**: in act mode, Jev answers 422 to `billing@vendor.example`'s "Invoice 7" (its error
-  message quotes part of the email), and normally to the other email.
-- **Outcome**: "Invoice 7" is stored as `error` with `TypeSafeUnprocessableEntityError (HTTP 422,
-  request_id=…)`, never Jev's message, and gives up at once (8 failures): later runs don't send
-  it again, and the digest lists it under "Sin más reintentos". The other email is processed and
-  the run doesn't fail. `inbox-jev retry-errors` makes the next run try it again.
+  message quotes part of the email), and normally to the other email, which comes next.
+- **Outcome**: Jev's answer to the next email shows the refusal was this email's. "Invoice 7" is
+  stored as `error` with `TypeSafeUnprocessableEntityError (HTTP 422, request_id=…)`, never
+  Jev's message, and gives up at once (8 failures): later runs don't send it again, and the
+  digest lists it under "Sin más reintentos" by its subject and sender ("Invoice 7 —
+  billing@vendor.example"). The other email is processed and the run doesn't fail.
+  `inbox-jev retry-errors` makes the next run try it again.
 - **Why**: Jev would refuse the same request on every retry, so the backoff only adds calls; and
   its message can echo the email, which must never be stored or logged
   ([ADR 0030](decisions/0030-stop-asking-jev-when-it-is-down.md)).
@@ -1023,6 +1054,71 @@ the probabilities that matter are shown; the rest are ~0.
   `.ai`, `.co`, `.io`, `.me` and `.tv` only the Public Suffix List's own names are suffixes, so a
   real company there isn't refused.
 
+### EX-28 — Jev refuses every request the same way
+
+- **Test**: `test_ex28_jev_refusing_everything_gives_no_email_up`
+- **Input**: in act mode, a change on Jev's side makes it answer 422 to every request. The inbox
+  has, in this order: `billing@vendor.example`'s "Invoice 7" and Sam's pitch (no rule), Lea's
+  "Budget review" from the allowlisted `acme.example` and `news@weekly.example`'s issue (no rule).
+- **Outcome**: Jev is called twice, for "Invoice 7" and Sam's pitch, and refuses both the same
+  way (`TypeSafeUnprocessableEntityError`, HTTP 422). The pass stops asking Jev: both emails are
+  stored as `error` with one ordinary failure each (`error_attempts` = 1, retried after 5
+  minutes), the issue isn't sent and isn't stored, and Lea's email gets `Jev/Important` without
+  flags. The run fails with "Jev refused 2 requests in a row the same way
+  (TypeSafeUnprocessableEntityError (HTTP 422)): likely a change on Jev's side; emails that need
+  Jev wait for the next run". Once Jev is fixed, the next run (10 minutes later, past the
+  backoff) decides the three that waited, with no `retry-errors`.
+- **Why**: before, each pass gave up on up to 3 emails that hit the refusal before it stopped (8
+  failures each at once), so every 10-minute pass buried 3 more emails until someone ran
+  `retry-errors`. One refused email still gives up at once (EX-23): the next call tells the two
+  cases apart ([ADR 0035](decisions/0035-identical-refusals-stop-the-pass.md)).
+
+### EX-29 — An email answered again counts once toward an auto rule
+
+- **Test**: `test_ex29_an_email_answered_again_counts_once_toward_an_auto_rule`
+- **Input**: `news@weekly.example`'s issues 1 and 2 arrive while the account is in `label`
+  (newsletter 0.97 each). The account switches to `act`; then issue 3 arrives (newsletter 0.97).
+- **Outcome**: after `label` the pending `auto` rule has 2 hits. The first `act` pass asks Jev
+  again for issues 1 and 2 (their rows are from a weaker mode) and archives them, but the rule
+  stays at 2 hits, inactive. Issue 3 brings it to 3 and activates it.
+- **Why**: an auto rule means "3 different emails from this sender were the same category".
+  Before, the re-answer counted again, so 2 emails seen in `label` and again in `act` made an
+  active rule: half the evidence it asks for
+  ([ADR 0036](decisions/0036-auto-rule-hits-count-emails.md)).
+
+### EX-30 — Two emails Jev refuses don't hold up the rest
+
+- **Test**: `test_ex30_two_emails_jev_refuses_dont_hold_up_the_rest`
+- **Input**: in act mode, passes every 10 minutes. The inbox has, newest first, two copies of
+  `forms@survey.example`'s "Your response" (one message delivered to two of your aliases), which
+  Jev refuses with a 422 every time, then `news@weekly.example`'s "Issue 41" (newsletter 0.97).
+  Jev answers everything else.
+- **Outcome**: the first pass asks Jev about both copies, is refused the same way twice and
+  stops: each copy gets one ordinary failure, the issue waits and the run fails. The next two
+  passes do the same (both copies are due again after 5, then 10 minutes): 3 failures each.
+  Their third failure waits 20 minutes, so the fourth pass skips them, asks Jev about the issue
+  and archives it, and the run succeeds. The copies are retried later and give up after 8
+  failures.
+- **Why**: two identical refusals can't tell "Jev refuses everything" from "two bad emails in a
+  row". Leaving both untouched (as before) made every pass stop on them forever, so no email
+  behind them that needs Jev was decided until they left the lookback. An ordinary failure with
+  backoff bounds that: while Jev really refuses everything, each pass charges only the two
+  emails it asked about ([ADR 0035](decisions/0035-identical-refusals-stop-the-pass.md)).
+
+### EX-31 — An email answered differently restarts a pending auto rule
+
+- **Test**: `test_ex31_an_email_answered_differently_restarts_a_pending_auto_rule`
+- **Input**: as EX-29, issues 1 and 2 from `news@weekly.example` are newsletter 0.97 in
+  `label`. When the account switches to `act`, Jev answers issue 1 marketing 0.97 (issue 2 still
+  newsletter 0.97); then issue 3 arrives (newsletter 0.97).
+- **Outcome**: after `label` the pending `auto` rule is newsletter with 2 hits. The `act` pass
+  archives issue 1 as marketing; the re-answer adds no hit and doesn't switch the rule, but
+  restarts it: newsletter, 0 hits. Issue 3 brings it to 1.
+- **Why**: Jev disagreeing with itself about the same email is a sign the sender isn't
+  consistent. Switching the rule to marketing at 1 hit would count the email a second time;
+  leaving the hits as they were would ignore the disagreement
+  ([ADR 0036](decisions/0036-auto-rule-hits-count-emails.md)).
+
 ## 6. Glossary
 
 - **Action**: what a category does: `keep`, `archive`, `archive_unsubscribe`, `spam`.
@@ -1040,9 +1136,11 @@ the probabilities that matter are shown; the rest are ~0.
   them.
 - **Error retry / gave up**: an email whose processing failed (`status = error`) is retried
   with a backoff, and not after 8 failures ("gave up"; `inbox-jev retry-errors` resets that).
-  An email Jev refuses (a 4xx other than 401/403/404/408/429) gives up at once.
-- **Jev stopped**: a pass that got a 401/403/404 from Jev, or 3 failed Jev calls in a row,
-  asks Jev nothing more; emails that need it wait for the next run, and the run fails.
+  An email Jev refuses (a 4xx other than 401/403/404/408/429) gives up at once, unless the next
+  Jev call is refused the same way (then each counts an ordinary failure, with backoff).
+- **Jev stopped**: a pass that got a 401/403/404 from Jev, 2 refusals in a row with the same
+  error type and status, or 3 failed Jev calls in a row, asks Jev nothing more; emails that need
+  it wait for the next run, and the run fails.
 - **Group / discussion list**: mail whose `List-Unsubscribe` would remove you from a list you
   belong to (see `_group_list`).
 - **Group author / relayed_by**: the person who wrote to a Google Group, and the group address,
@@ -1075,11 +1173,19 @@ the probabilities that matter are shown; the rest are ~0.
 
 Behaviour found while writing this spec, documented as it is today:
 
-- An email that fails before its row is written (a Jev error, a Gmail read error) is stored
-  without From or Subject, so the digest lists it as "(no subject)" with its Gmail link.
-- If Jev refuses every request the same way (e.g. a change on its side rejects our state with
-  400/422), each run gives up on the 3 emails that hit it before the pass stops asking Jev.
-  After the fix, `inbox-jev retry-errors` plus `run --lookback` recovers them.
+- An email whose Gmail read fails, and whose metadata-only read fails too, or that Gmail no
+  longer has (404: no metadata read is tried), is stored without From or Subject, so the digest
+  lists it as "(no subject)" with its Gmail link.
+- A refused email that is the pass's only Jev call (or whose next call fails another way) gives
+  up at once even when Jev refuses everything; the next pass's two identical refusals stop it.
+  `inbox-jev retry-errors` recovers it. Refusals with different statuses in a row (400, then
+  422) are each taken as the email's own.
+- Two identical refusals in a row count an ordinary failure for each email, whether Jev refuses
+  everything or both emails are bad. While Jev refuses everything, each pass charges the first
+  two emails due, and one charged on every retry gives up after 8 failures, about 10.5 hours;
+  after the fix, `retry-errors` recovers those. Two bad emails in a row stop the passes where
+  both are due again (fewer as their backoff grows), and those passes decide none of the
+  emails behind them ([EX-30](#ex-30--two-emails-jev-refuses-dont-hold-up-the-rest)).
 - The address search (`to:<sender>`) trusts any hit, so Gmail's loose `to:` matching could
   still count an email to a similar address; only the domain search reads recipients.
 - A domain you wrote to only at machine addresses more than 25 times (e.g. many replies to
@@ -1105,5 +1211,8 @@ Behaviour found while writing this spec, documented as it is today:
   tokens on a normal host, a ticketing system's `support+123@`) are not detected: they still
   make a known contact. Being wrong there keeps more mail, the safe side.
 - An email processed again in a stronger mode (`label`, then `act`, or after `reprocess`) is
-  sent to Jev again, and that answer counts toward an auto rule a second time: one email can
-  give a sender two of the three hits.
+  still sent to Jev again (its stored answer isn't reused). Its new answer adds no auto-rule hit
+  even when the first answer didn't count (e.g. 0.93 then 0.97): the sender just needs another
+  email. And an email seen in `dry_run` whose `label` pass then failed has a row that looks
+  learned from (Jev decision, mode `label`), so its eventual answer adds no hit either. Both err
+  toward fewer rules.

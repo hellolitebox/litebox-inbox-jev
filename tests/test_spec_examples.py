@@ -21,6 +21,7 @@ from fakes import (
     JevDown,
     JevFails,
     SentMailService,
+    age_errors,
     email,
     gmail_factory,
     jev_http_error,
@@ -860,7 +861,8 @@ def test_ex23_jev_refuses_one_email(spec):
     with ctx.sessions() as s:
         text = digest.build(s, ctx.cfg, account.email, language=DigestLanguage.ES)
     gave_up = text.split("Sin más reintentos")[1]
-    assert "#all/1|" in gave_up and "TypeSafeUnprocessableEntityError (HTTP 422" in gave_up
+    assert "#all/1|Invoice 7> — billing@vendor.example" in gave_up  # stored though Jev failed
+    assert "TypeSafeUnprocessableEntityError (HTTP 422" in gave_up
     assert "state.body" not in text
 
 
@@ -1014,3 +1016,150 @@ def test_ex27_a_public_suffix_in_group_domains_is_refused():
     own = {k: [v[0].replace("autre", "exemple")] for k, v in group.items()}
     mine = resolve_relay(extract(own), account.group_domains)
     assert (mine.sender, mine.relayed_by) == ("dana@pitchco.example", "info@exemple.gouv.fr")
+
+
+# --- EX-28 -----------------------------------------------------------------------------------
+
+
+def test_ex28_jev_refusing_everything_gives_no_email_up(spec):
+    """EX-28 (docs/how-it-decides.md §5, §1 the pass over an inbox, ADR 0035)."""
+    ctx, gmail, account = spec
+    account.allow_domains = ["acme.example"]
+    gmail.emails = {
+        "1": email("1", "Vendor <billing@vendor.example>", "Invoice 7"),
+        "2": email("2", "Sam <sam@growthagency.example>", "Quick question"),
+        "3": email("3", "Lea <lea@acme.example>", "Budget review"),
+        "4": email("4", "Weekly <news@weekly.example>", "Issue 41"),
+    }
+    jev = JevFails(jev_http_error(TypeSafeUnprocessableEntityError, 422))
+    ctx = triage.Context(ctx.settings, ctx.cfg, ctx.sessions, ctx.gmail, classifier=jev)
+    with pytest.raises(triage.JevUnavailable):
+        triage.run_account(ctx, account, Mode.ACT)
+
+    assert jev.calls == 2  # Invoice 7 and Sam's pitch; nothing more is sent
+    with ctx.sessions() as s:
+        assert {m.gmail_id for m in s.query(Message)} == {"1", "2", "3"}  # the issue waits
+        run = s.query(Run).one()
+    assert (run.processed, run.errors) == (1, 2)
+    for refused in ("1", "2"):  # an ordinary failure each, retried after the backoff
+        row = _row(ctx, refused)
+        assert (row.status, row.error_attempts) == ("error", 1)
+        assert row.error == "TypeSafeUnprocessableEntityError (HTTP 422, request_id=req-1)"
+    assert run.error == (
+        "Jev refused 2 requests in a row the same way (TypeSafeUnprocessableEntityError "
+        "(HTTP 422)): likely a change on Jev's side; emails that need Jev wait for the next run"
+    )
+    lea = _row(ctx, "3")
+    assert (lea.source, lea.category, lea.needs_reply) == ("allowlist", "important", None)
+
+    jev.error = None  # Jev is fixed: the next run, 10 minutes later, decides the three that waited
+    age_errors(ctx, 10)
+    jev.answers.update(
+        {
+            "Invoice 7": answer("transactional", transactional=0.95),
+            "Quick question": answer("cold_outreach", cold_outreach=0.97),
+            "Issue 41": answer("newsletter", newsletter=0.97),
+        }
+    )
+    run = triage.run_account(ctx, account, Mode.ACT)
+    assert (run.processed, run.errors, run.error) == (3, 0, None)
+    assert _row(ctx, "1").category == "transactional" and _row(ctx, "1").error_attempts == 0
+
+
+# --- EX-29 -----------------------------------------------------------------------------------
+
+
+def test_ex29_an_email_answered_again_counts_once_toward_an_auto_rule(spec):
+    """EX-29 (docs/how-it-decides.md §5, §3.5 automatic rules, ADR 0036)."""
+    ctx, gmail, account = spec
+    gmail.emails = {
+        str(n): email(str(n), "Weekly <news@weekly.example>", f"Issue {n}") for n in (1, 2, 3)
+    }
+    for n in (1, 2, 3):
+        ctx.classifier.answers[f"Issue {n}"] = answer("newsletter", newsletter=0.97)
+
+    def rule():
+        with ctx.sessions() as s:
+            r = s.query(SenderRule).one()
+            return r.hits, r.active
+
+    del gmail.emails["3"]  # issues 1 and 2 arrive while the account is in label
+    triage.run_account(ctx, account, Mode.LABEL)
+    assert rule() == (2, False)
+
+    triage.run_account(ctx, account, Mode.ACT)  # the switch to act asks Jev again for both
+    assert ctx.classifier.calls == 4 and _row(ctx, "1").archived
+    assert rule() == (2, False)  # still two emails
+
+    gmail.emails["3"] = email("3", "Weekly <news@weekly.example>", "Issue 3")
+    triage.run_account(ctx, account, Mode.ACT)
+    assert rule() == (3, True)
+
+
+# --- EX-30 -----------------------------------------------------------------------------------
+
+
+def test_ex30_two_emails_jev_refuses_dont_hold_up_the_rest(spec):
+    """EX-30 (docs/how-it-decides.md §5, §1 the pass over an inbox, ADR 0035)."""
+    ctx, gmail, account = spec
+    gmail.emails = {
+        "1": email("1", "Forms <forms@survey.example>", "Your response"),
+        "2": email("2", "Forms <forms@survey.example>", "Your response"),  # to another alias
+        "3": email("3", "Weekly <news@weekly.example>", "Issue 41"),
+    }
+    ctx.classifier.answers.update(
+        {
+            "Your response": jev_http_error(TypeSafeUnprocessableEntityError, 422),
+            "Issue 41": answer("newsletter", newsletter=0.97),
+        }
+    )
+
+    def attempts():
+        return [_row(ctx, i).error_attempts for i in ("1", "2")]
+
+    for passes in (1, 2, 3):  # every 10 minutes: both copies are due again and stop the pass
+        if passes > 1:
+            age_errors(ctx, 10)
+        with pytest.raises(triage.JevUnavailable, match="refused 2 requests in a row"):
+            triage.run_account(ctx, account, Mode.ACT)
+        assert attempts() == [passes, passes]
+    with ctx.sessions() as s:
+        assert s.query(Message).filter_by(gmail_id="3").count() == 0  # it waited behind them
+
+    age_errors(ctx, 10)  # 10 of the 20 minutes the third failure waits
+    run = triage.run_account(ctx, account, Mode.ACT)
+    assert (run.processed, run.errors, run.error) == (1, 0, None)
+    issue = _row(ctx, "3")
+    assert (issue.status, issue.category, issue.archived) == ("done", "newsletter", True)
+    assert attempts() == [3, 3]  # still retried later, until 8 failures give up
+
+
+# --- EX-31 -----------------------------------------------------------------------------------
+
+
+def test_ex31_an_email_answered_differently_restarts_a_pending_auto_rule(spec):
+    """EX-31 (docs/how-it-decides.md §5, §3.5 automatic rules, ADR 0036)."""
+    ctx, gmail, account = spec
+    gmail.emails = {
+        str(n): email(str(n), "Weekly <news@weekly.example>", f"Issue {n}") for n in (1, 2, 3)
+    }
+    for n in (1, 2, 3):
+        ctx.classifier.answers[f"Issue {n}"] = answer("newsletter", newsletter=0.97)
+
+    def rule():
+        with ctx.sessions() as s:
+            r = s.query(SenderRule).one()
+            return r.category, r.hits, r.active
+
+    del gmail.emails["3"]
+    triage.run_account(ctx, account, Mode.LABEL)
+    assert rule() == ("newsletter", 2, False)
+
+    ctx.classifier.answers["Issue 1"] = answer("marketing", marketing=0.97)
+    triage.run_account(ctx, account, Mode.ACT)  # asked again: issue 1 is now marketing
+    assert _row(ctx, "1").category == "marketing"
+    assert rule() == ("newsletter", 0, False)  # restarted, not switched
+
+    gmail.emails["3"] = email("3", "Weekly <news@weekly.example>", "Issue 3")
+    triage.run_account(ctx, account, Mode.ACT)
+    assert rule() == ("newsletter", 1, False)

@@ -351,3 +351,40 @@ def test_match_reads_address_and_domain_rules_in_one_query(cfg, session):
         rule, stale = rules.match(session, "me@acme.com", "other@shop.com", cfg.by_key)
     assert rule.sender_key == "@shop.com" and stale is None
     assert len(queries) == 1
+
+
+def test_an_answer_not_counted_still_resets_a_pending_rule(cfg, session):
+    """`count=False` (an email already learned from): no hit, no new rule, but the reset holds."""
+    note = make_classification("notification", 0.97)
+    d = Decision(category="notification", confidence=0.97, source=DecisionSource.JEV)
+    rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", note, d, count=False)
+    session.commit()
+    assert session.query(SenderRule).count() == 0
+    rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", note, d)
+    rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", note, d, count=False)
+    session.commit()
+    assert auto_rule(session).hits == 1
+    act = make_classification("action_required", 0.8)
+    act_d = Decision(category="action_required", confidence=0.8, source=DecisionSource.JEV)
+    rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", act, act_d, count=False)
+    session.commit()
+    assert auto_rule(session).hits == 0
+
+
+def test_an_answer_not_counted_in_another_category_restarts_a_pending_rule(cfg, session):
+    """A re-answered email (`count=False`) confidently in another category than the pending
+    auto rule's: Jev disagrees with itself about one email, so the rule restarts at 0 hits and
+    keeps its category (switching it would count the email a second time)."""
+    news = make_classification("newsletter", 0.97)
+    news_d = Decision(category="newsletter", confidence=0.97, source=DecisionSource.JEV)
+    promo = make_classification("marketing", 0.97)
+    promo_d = Decision(category="marketing", confidence=0.97, source=DecisionSource.JEV)
+    for _ in range(2):
+        rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", news, news_d)
+    rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", news, news_d, count=False)
+    session.commit()
+    assert (auto_rule(session).category, auto_rule(session).hits) == ("newsletter", 2)
+    rules.record_auto(session, cfg, "me@acme.com", "n@sub.com", promo, promo_d, count=False)
+    session.commit()
+    rule = auto_rule(session)
+    assert (rule.category, rule.hits, rule.active) == ("newsletter", 0, False)
