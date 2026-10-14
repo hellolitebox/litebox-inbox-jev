@@ -16,6 +16,7 @@ from .policy import (
     GateResult,
     Veto,
     acts_on,
+    category_threshold,
     unsubscribe_gate,
     unsubscribes,
 )
@@ -241,5 +242,5 @@ def _skip(session: Session, row: Unsubscribe, reason: str) -> tuple[str, str]:
 
 def _confident(cfg: CategoriesConfig, account: Account, msg: Message, category: str) -> bool:
     """Jev's stored answer still clears the category's current threshold, as `decide` requires."""
-    threshold = account.min_confidence.get(category, cfg.by_key[category].min_confidence)
+    threshold = category_threshold(cfg, account, category)
     return not msg.low_confidence and msg.confidence is not None and msg.confidence >= threshold

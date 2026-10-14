@@ -101,7 +101,14 @@ classification (`categories.yaml` criteria, the classifier state or questions,
 `body.extract_body`) or a destructive path (archive, spam, unsubscribe, `unsubscribe-retry`),
 the PR body must include the output of `scripts/check_branch.sh` (`dry_classify.py` on real
 mail, read-only) or an explicit reason it isn't needed, borne out by the diff. Missing: **major**.
-Output that contains email bodies: **blocker**.
+Output that contains email bodies: **blocker**. A classification change also needs the reference
+summary (`check_branch.sh <branch> … --reference --quiet`, CLAUDE.md "Validating behaviour
+changes") next to the per-email check: missing, **major**. Read it: the branch's accuracy against
+the corrections must not fall below the stored baseline without an explanation (`broken` pairs
+the PR accepts on purpose; the baseline covers only the corrections Jev decided, the
+`baseline_unknown` ones count for the branch alone), and a change meant to move borderline emails should show it in the
+±0.05 / ±0.10 band counts. A reference set too small to say anything (a handful of corrections)
+is fine if the PR says so.
 
 **Performance & cost**: Gmail API calls per run (quota: per-user units/sec), Jev calls per
 email (avoid repeats; rules should skip Jev), N+1 DB queries, unbounded loops or result sets,

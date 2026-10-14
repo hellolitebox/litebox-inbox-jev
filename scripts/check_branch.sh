@@ -4,6 +4,7 @@
 # Usage, on the server, from the deployment checkout (e.g. /opt/inbox-jev):
 #   scripts/check_branch.sh <branch> --account you@example.com --query 'in:inbox newer_than:7d' --limit 30
 #   scripts/check_branch.sh <branch> --account you@example.com --ids ID… [--ignore-rules]
+#   scripts/check_branch.sh <branch> --account you@example.com --reference --quiet [--accepted 7]
 #
 # The branch is fetched into a throwaway worktree next to the deployment (never over it: the
 # running app uses this checkout) and its src/, categories.yaml and dry_classify.py are mounted

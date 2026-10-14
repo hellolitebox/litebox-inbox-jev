@@ -84,6 +84,12 @@ class Plan:
     unsubscribe: bool
 
 
+def category_threshold(cfg: CategoriesConfig, account: Account, category: str) -> float:
+    """The confidence Jev needs for `category` to be applied: the account's `min_confidence`
+    for it, else the category's own. `category` must be in `cfg`."""
+    return account.min_confidence.get(category, cfg.by_key[category].min_confidence)
+
+
 def decide(
     cfg: CategoriesConfig,
     account: Account,
@@ -128,7 +134,7 @@ def decide(
     decision = Decision(
         category=category, confidence=classification.confidence, source=DecisionSource.JEV
     )
-    threshold = account.min_confidence.get(category, cfg.by_key[category].min_confidence)
+    threshold = category_threshold(cfg, account, category)
     if decision.confidence >= threshold:
         _apply(cfg, decision)
         _check_unsubscribe(cfg, account, sig, decision, previous_contact)
@@ -328,8 +334,7 @@ def _archive_group_confident(
             return False
         if acts is not None and key not in acts:
             return False
-        member = account.min_confidence.get(key, cfg.by_key[key].min_confidence)
-        return key == top or member <= floor
+        return key == top or category_threshold(cfg, account, key) <= floor
 
     total = sum(p for key, p in classification.probabilities.items() if counts(key))
     return total >= floor

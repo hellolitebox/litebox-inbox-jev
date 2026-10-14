@@ -167,6 +167,7 @@ def script_env(monkeypatch, tmp_path, make_sessions):
                 category="marketing",
                 confidence=0.5,
                 mode="act",
+                source="jev",
             )
         )
         session.commit()
@@ -247,3 +248,56 @@ def test_main_refuses_a_missing_sqlite_db(script_env, monkeypatch):
     assert not missing.exists()  # the read-only check never creates the file
     assert script_env.gmail.closes == 1
     assert script_env.built == []  # the DB is checked before a Jev client exists to leak
+
+
+def test_main_reference_quiet_prints_only_the_summary_and_writes_nothing(
+    script_env, monkeypatch, capsys
+):
+    with script_env.sessions() as session:  # the user corrected email 1 to important
+        session.query(Message).update({Message.corrected_category: "important"})
+        session.commit()
+    db = script_env.tmp_path / "db.sqlite"
+    before = db.read_bytes()
+
+    _main(
+        monkeypatch,
+        *("--account", "me@acme.com", "--reference", "--quiet"),
+        *("--since", "30", "--accepted", "7"),
+    )
+    out = capsys.readouterr().out
+    assert out.splitlines() == [
+        "reference: emails=1 corrected=1 accepted=0 jev_calls=1 failed=0 gone=0 edited=0"
+        " unknown_category=0",
+        "corrected: branch=1/1 (100.0%) stored=0/1 (0.0%) fixed=1 broken=0 baseline_unknown=0",
+        "  corrected important -> marketing: branch=0 stored=1",
+        "borderline (Jev's category vs its threshold): within_0.05=0 within_0.10=0"
+        " of jev_decided=1",
+    ]
+    assert "Lunch" not in out and "ann@other.org" not in out
+    assert script_env.gmail.searches == []  # the reference set comes from the DB
+    assert script_env.gmail.modified == [] and script_env.gmail.sent == []
+    assert db.read_bytes() == before  # opened read-only
+
+
+def test_main_quiet_without_reference_prints_only_the_totals(script_env, monkeypatch, capsys):
+    _main(monkeypatch, "--account", "me@acme.com", "--ids", "1", "2", "--quiet")
+    assert capsys.readouterr().out.splitlines() == ["emails=2 jev_calls=2"]
+
+
+@pytest.mark.parametrize(
+    ("args", "error"),
+    [
+        (["--reference", "--ids", "1"], "--reference checks the stored reference set"),
+        (["--reference", "--query", "in:inbox"], "--reference checks the stored reference set"),
+        (["--ids", "1", "--since", "7"], "--since and --accepted go with --reference"),
+        (["--ids", "1", "--accepted", "7"], "--since and --accepted go with --reference"),
+        (["--reference", "--since", "0"], "must be at least 1 day, got 0"),
+        (["--reference", "--accepted", "week"], "not a number of days: 'week'"),
+    ],
+)
+def test_main_rejects_mixed_or_bad_reference_options(script_env, monkeypatch, capsys, args, error):
+    with pytest.raises(SystemExit) as exc:
+        _main(monkeypatch, "--account", "me@acme.com", *args)
+    assert exc.value.code == 2
+    assert error in capsys.readouterr().err
+    assert script_env.opened == []
