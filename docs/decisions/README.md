@@ -64,3 +64,4 @@ decision changes: add a new one and mark the old one `Superseded by NNNN`.
 | [0051](0051-no-learned-rules-on-a-lists-own-address.md) | No learned rule decides mail sent as a mailing list's own address | Accepted | #62 |
 | [0052](0052-each-install-brings-its-own-oauth-client.md) | Each install brings its own Google OAuth client; `init` walks through it | Accepted | #63 |
 | [0053](0053-installable-from-pypi-with-a-home-folder.md) | Installable from PyPI, with a home folder and a schedule on the user's computer | Accepted | #64 |
+| [0054](0054-qa-reviews-count-only-from-people-with-write-access.md) | QA reviews count only from people with write access | Accepted | #3 |

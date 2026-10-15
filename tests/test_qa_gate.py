@@ -2,19 +2,32 @@
 
 import pytest
 import qa_gate
-from qa_gate import Review, evaluate, latest_review, make_is_update_of, parse_review
+from qa_gate import Review, evaluate, make_is_update_of, parse_review
+from qa_gate import latest_review as latest_review_by
 
 HEAD = "a" * 40
 OLD = "b" * 40
 MAIN = "c" * 40
 
 
-def review(verdict="APPROVED", head=HEAD, round_=1):
+MAINTAINER = "maintainer"
+
+
+def review(verdict="APPROVED", head=HEAD, round_=1, author=MAINTAINER):
     body = (
         f"## QA review — round {round_}\n**Verdict: {verdict}**\nHead: {head}\n"
         "Checks: ruff ✅ · format ✅ · pytest ✅ (10 passed) · CI ✅\n"
     )
-    return {"body": body, "html_url": f"https://github.com/x/y/pull/1#issuecomment-{round_}"}
+    return {
+        "body": body,
+        "html_url": f"https://github.com/x/y/pull/1#issuecomment-{round_}",
+        "user": {"login": author},
+    }
+
+
+def latest_review(comments):
+    """`qa_gate.latest_review` with only MAINTAINER trusted."""
+    return latest_review_by(comments, lambda login, association: login == MAINTAINER)
 
 
 def never(head, reviewed):
@@ -47,10 +60,67 @@ def test_latest_review_wins():
 def test_other_comments_are_ignored():
     comments = [
         review("CHANGES_REQUESTED"),
-        {"body": "## Dev reply — round 1\n1. ✅ fixed\n**Verdict: APPROVED** (quoted)\n"},
-        {"body": "Looks good to me, **Verdict: APPROVED**"},
+        {
+            "body": "## Dev reply — round 1\n1. ✅ fixed\n**Verdict: APPROVED** (quoted)\n",
+            "user": {"login": MAINTAINER},
+        },
+        {"body": "Looks good to me, **Verdict: APPROVED**", "user": {"login": MAINTAINER}},
     ]
     assert evaluate(latest_review(comments), HEAD, never).state == "failure"
+
+
+def test_a_review_by_someone_without_write_access_is_ignored():
+    """The repo is public: anyone can post a comment that looks like a review (ADR 0054)."""
+    forged = review("APPROVED", round_=2, author="stranger")
+    assert latest_review([forged]) is None
+    after_changes = [review("CHANGES_REQUESTED"), forged]
+    assert evaluate(latest_review(after_changes), HEAD, never).state == "failure"
+    no_author = {**review(round_=3), "user": None}
+    assert latest_review([no_author]) is None
+
+
+@pytest.mark.parametrize(
+    ("permission", "trusted"),
+    [
+        ("admin", True),
+        ("maintain", True),
+        ("write", True),
+        ("triage", False),
+        ("read", False),
+        ("none", False),
+    ],
+)
+def test_trust_is_write_access_asked_once_per_login(monkeypatch, permission, trusted):
+    asked = []
+
+    def gh_api(path, *args):
+        asked.append(path)
+        return {"permission": permission}
+
+    monkeypatch.setattr(qa_gate, "gh_api", gh_api)
+    is_trusted = qa_gate.make_is_trusted("o/r")
+    assert is_trusted("ana", "NONE") is trusted  # the permission decides, not the association
+    assert is_trusted("ana", "MEMBER") is trusted
+    assert asked == ["repos/o/r/collaborators/ana/permission"]
+
+
+@pytest.mark.parametrize(
+    ("association", "trusted"),
+    [
+        ("OWNER", True),
+        ("MEMBER", True),
+        ("COLLABORATOR", True),
+        ("CONTRIBUTOR", False),
+        ("NONE", False),
+        (None, False),
+    ],
+)
+def test_an_unreadable_permission_falls_back_to_the_association(monkeypatch, association, trusted):
+    def gh_api(path, *args):
+        raise qa_gate.subprocess.CalledProcessError(1, ["gh", "api", path], stderr="HTTP 403")
+
+    monkeypatch.setattr(qa_gate, "gh_api", gh_api)
+    assert qa_gate.make_is_trusted("o/r")("ana", association) is trusted
 
 
 def test_stale_head_is_pending():
@@ -82,7 +152,7 @@ def test_update_branch_merge_keeps_the_verdict():
     ],
 )
 def test_review_without_verdict_or_head_is_failure(body):
-    verdict = evaluate(latest_review([{"body": body}]), HEAD, never)
+    verdict = evaluate(latest_review([{"body": body, "user": {"login": MAINTAINER}}]), HEAD, never)
     assert verdict.state == "failure"
     assert "no Verdict or Head" in verdict.description
 
@@ -171,6 +241,8 @@ def test_main_posts_pending_and_succeeds_for_a_new_head(monkeypatch, capsys):
             return {"head": {"sha": HEAD}, "base": {"ref": "main"}}
         if path == "repos/o/r/issues/7/comments":
             return [[review(head=OLD)]]  # --paginate --slurp: a list of pages
+        if path == f"repos/o/r/collaborators/{MAINTAINER}/permission":
+            return {"permission": "admin"}
         if path.startswith("repos/o/r/commits/"):
             return {"parents": [{"sha": OLD}]}  # a plain commit: new work
         if path == f"repos/o/r/statuses/{HEAD}":

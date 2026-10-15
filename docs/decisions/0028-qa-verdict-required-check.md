@@ -1,6 +1,7 @@
 # 0028. QA's verdict is a required check tied to the head commit
 
-- Status: Accepted
+- Status: Accepted (amended by [0054](0054-qa-reviews-count-only-from-people-with-write-access.md):
+  only reviews by people with write access count)
 - Date: 2026-10-13
 - PR: #23
 
