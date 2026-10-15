@@ -1,8 +1,12 @@
 """Daily digest per account, sent as a Slack DM (or printed).
 
-It lists only what still needs the user: before listing an email it asks Gmail (read-only)
-whether it is still in the inbox, whether the user has replied in its thread since and, for the
-low-confidence count, whether it still has the review label.
+It says first how many emails still need the user and lists them: before listing an email it
+asks Gmail (read-only) whether it is still in the inbox, whether the user has replied in its
+thread since and, for the To review count, whether it still has the review label. Then what Jev
+did (a table of totals), unsubscribes, the corrections learned from the user and errors.
+
+This module decides what the digest says (`build` returns a `slack.Digest`); `slack` lays it
+out as Block Kit blocks or text and posts it.
 """
 
 from __future__ import annotations
@@ -12,23 +16,28 @@ import re
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from email.utils import parseaddr
 from typing import Protocol, TypedDict, TypeVar
 from urllib.parse import quote
 
-import httpx
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .config import Action, CategoriesConfig, DigestLanguage, Mode
+from .config import Account, Action, CategoriesConfig, DigestLanguage, Mode
 from .db import MAX_ERROR_ATTEMPTS, Message, MessageStatus, Run, Unsubscribe, now
 from .gmail import ThreadMessage
+from .slack import Digest, Group, Totals, Wording
 from .system_labels import INBOX, SENT
-from .unsubscribe import UnsubscribeStatus, describe_http_status
+from .unsubscribe import UnsubscribeMethod, UnsubscribeStatus, describe_http_status
 
 log = logging.getLogger(__name__)
 
 MAX_ITEMS = 15
+# The emails listed per "needs you" group: the digest is read on a phone, the rest is a link.
+NEEDS_YOU_ITEMS = 10
+MAX_SUBJECT = 60
+MAX_SENDER = 40
 
 _T = TypeVar("_T")
 
@@ -58,27 +67,53 @@ class DigestMessages(TypedDict):
     """Every user-facing text of the digest, as `str.format` templates.
 
     Slack mrkdwn (`*bold*`, `_italic_`, emoji) is part of the template; values from an email are
-    escaped with `esc` before they are formatted in, never here. Counts that run into the text
-    are `PluralForms`, picked with `plural`.
+    escaped with `esc` before they are formatted in, never here, and category labels shown as
+    inline code with `code`. The digest's own parenthetical asides are italic, `_(…)_` (built
+    with `aside` when their text isn't fixed). Counts that run into the text
+    are `PluralForms`, picked with `plural`. `title`, the table's words and `notification` are
+    plain text (a header, table cells, a push notification): no mrkdwn there.
     """
 
-    header: str
-    processed: PluralForms
-    summary: str
-    handled: PluralForms
+    title: str
+    preview: str
+    date: str
+    weekdays: tuple[str, ...]  # Monday first, as `datetime.weekday`
+    months: tuple[str, ...]  # January first
+    context: str
+    need_you: PluralForms
+    inbox_zero: str
+    processed_count: PluralForms
+    just_now: str
+    minutes_ago: str
+    hours_ago: str
+    days_ago: str
+    totals_title: str
+    table_category: str
+    table_count: str
+    to_review: str
+    already_handled: str
+    processed: str
+    nothing_processed: str
     pending_check_failed: str
-    nothing: str
     no_subject: str
     needs_reply: str
     unsubscribed: str
     unsubscribe_manual: str
+    method_one_click: str
+    method_mailto: str
+    method_manual: str
     link: str
     link_in_body: str
     unsubscribe_failed: str
     low_confidence: str
     low_confidence_dry_run: str
-    see_in_gmail: str
+    review_in_gmail: str
     learned: str
+    correction: str
+    correction_accepted: str
+    this_email_only: str
+    more: str
+    see_all: str
     errors: str
     error_emails: PluralForms
     failed_runs: PluralForms
@@ -87,38 +122,74 @@ class DigestMessages(TypedDict):
     run_times: str
     failed_run: str
     time_format: str
+    footer: str
 
 
 # One table per language; mypy checks that each has every key, and the tests that the
 # placeholders match across languages. Add a language here and in `config.DigestLanguage`.
 MESSAGES: dict[DigestLanguage, DigestMessages] = {
     DigestLanguage.EN: {
-        "header": "*📬 Inbox Jev — {account}* (last {hours}h, mode: {modes})",
-        "processed": {"one": "{n} processed", "other": "{n} processed"},
-        "summary": "{processed} — {summary} · to review: {low}",
-        "handled": {"one": "{n} already handled", "other": "{n} already handled"},
+        "title": "📬 Inbox Jev · {date}",
+        "preview": "[preview] ",
+        "date": "{weekday}, {month} {day}",
+        "weekdays": ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"),
+        "months": (
+            "Jan",
+            "Feb",
+            "Mar",
+            "Apr",
+            "May",
+            "Jun",
+            "Jul",
+            "Aug",
+            "Sep",
+            "Oct",
+            "Nov",
+            "Dec",
+        ),
+        "context": "{account} · last {hours}h · mode: {modes}",
+        "need_you": {"one": "{n} email needs you", "other": "{n} emails need you"},
+        "inbox_zero": "Inbox zero — nothing needs you today",
+        "processed_count": {"one": "{n} processed", "other": "{n} processed"},
+        "just_now": "just now",
+        "minutes_ago": "{n} min ago",
+        "hours_ago": "{n}h ago",
+        "days_ago": "{n}d ago",
+        "totals_title": "*📊 What Jev did · last {hours}h*",
+        "table_category": "Category",
+        "table_count": "Emails",
+        "to_review": "To review",
+        "already_handled": "Already handled",
+        "processed": "Processed",
+        "nothing_processed": "_Nothing processed._",
         "pending_check_failed": (
             "_Couldn't check Gmail for what is already handled, so everything is listed._"
         ),
-        "nothing": "nothing",
         "no_subject": "(no subject)",
-        "needs_reply": "\n*⚡ Needs reply ({n})*",
-        "unsubscribed": "\n*🚫 Unsubscribed ({n})*",
-        "unsubscribe_manual": "\n*🖐 Manual unsubscribe ({n})*",
+        "needs_reply": "*⚡ Needs reply ({n})*",
+        "unsubscribed": "*🚫 Unsubscribed ({n})*",
+        "unsubscribe_manual": "*🖐 Manual unsubscribe ({n})*",
+        "method_one_click": "one-click",
+        "method_mailto": "email",
+        "method_manual": "manual",
         "link": "link",
         "link_in_body": "link in the body",
-        "unsubscribe_failed": "\n*❗ Unsubscribe failed ({n})*",
+        "unsubscribe_failed": "*❗ Unsubscribe failed ({n})*",
         "low_confidence": (
-            "\n*🤔 Low confidence: {n}* from the last {hours}h still in the inbox with {label}"
-            " ({link})"
+            "*🤔 To review: {n}* from the last {hours}h, still in the inbox with {label} · {link}"
         ),
         "low_confidence_dry_run": (
-            "\n*🤔 Low confidence: {n}* from the last {hours}h still in the inbox"
-            " (dry run: not labeled)"
+            "*🤔 To review: {n}* from the last {hours}h, still in the inbox"
+            " _(dry run: not labeled)_"
         ),
-        "see_in_gmail": "see in Gmail",
-        "learned": "\n*🧠 Corrections learned: {n}*",
-        "errors": "\n*⚠️ Errors*: {emails} ({gave_up} not retried again), {failed_runs}",
+        "review_in_gmail": "Review in Gmail",
+        "learned": "*🧠 Corrections learned ({n})*",
+        "correction": "• {sender}: {old} → {new}",
+        "correction_accepted": "• {sender}: {new} _(suggestion accepted)_",
+        "this_email_only": " _(this email only)_",
+        "more": "+{n} more",
+        "see_all": "see all in Gmail",
+        "errors": "*⚠️ Errors*: {emails} _({gave_up} not retried again)_, {failed_runs}",
         "error_emails": {"one": "{n} email", "other": "{n} emails"},
         "failed_runs": {"one": "{n} failed run", "other": "{n} failed runs"},
         "gave_up": (
@@ -126,36 +197,72 @@ MESSAGES: dict[DigestLanguage, DigestMessages] = {
         ),
         "run_time": "{last} UTC",
         "run_times": "{n} runs, last {last} UTC",
-        "failed_run": "• Failed run ({times}): {error}",
+        "failed_run": "• Failed run _({times})_: {error}",
         "time_format": "%m/%d %H:%M",
+        "footer": "💡 Fix a label in Gmail and Inbox Jev learns it within the hour.",
     },
     DigestLanguage.ES: {
-        "header": "*📬 Inbox Jev — {account}* (últimas {hours}h, modo: {modes})",
-        "processed": {"one": "{n} procesado", "other": "{n} procesados"},
-        "summary": "{processed} — {summary} · a revisar: {low}",
-        "handled": {"one": "{n} ya resuelto", "other": "{n} ya resueltos"},
+        "title": "📬 Inbox Jev · {date}",
+        "preview": "[preview] ",
+        "date": "{weekday} {day} {month}",
+        "weekdays": ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"),
+        "months": (
+            "ene",
+            "feb",
+            "mar",
+            "abr",
+            "may",
+            "jun",
+            "jul",
+            "ago",
+            "sep",
+            "oct",
+            "nov",
+            "dic",
+        ),
+        "context": "{account} · últimas {hours}h · modo: {modes}",
+        "need_you": {"one": "{n} mail te necesita", "other": "{n} mails te necesitan"},
+        "inbox_zero": "Inbox en cero — hoy nada te necesita",
+        "processed_count": {"one": "{n} procesado", "other": "{n} procesados"},
+        "just_now": "recién",
+        "minutes_ago": "hace {n} min",
+        "hours_ago": "hace {n} h",
+        "days_ago": "hace {n} d",
+        "totals_title": "*📊 Lo que hizo Jev · últimas {hours}h*",
+        "table_category": "Categoría",
+        "table_count": "Mails",
+        "to_review": "A revisar",
+        "already_handled": "Ya resueltos",
+        "processed": "Procesados",
+        "nothing_processed": "_Nada procesado._",
         "pending_check_failed": (
             "_No se pudo consultar Gmail para ver qué ya está resuelto: se lista todo._"
         ),
-        "nothing": "nada",
         "no_subject": "(sin asunto)",
-        "needs_reply": "\n*⚡ Piden respuesta ({n})*",
-        "unsubscribed": "\n*🚫 Desuscripto ({n})*",
-        "unsubscribe_manual": "\n*🖐 Unsubscribe manual ({n})*",
+        "needs_reply": "*⚡ Piden respuesta ({n})*",
+        "unsubscribed": "*🚫 Desuscripto ({n})*",
+        "unsubscribe_manual": "*🖐 Unsubscribe manual ({n})*",
+        "method_one_click": "un clic",
+        "method_mailto": "por mail",
+        "method_manual": "manual",
         "link": "link",
         "link_in_body": "link en el cuerpo",
-        "unsubscribe_failed": "\n*❗ Unsubscribe fallido ({n})*",
+        "unsubscribe_failed": "*❗ Unsubscribe fallido ({n})*",
         "low_confidence": (
-            "\n*🤔 Baja confianza: {n}* de las últimas {hours}h siguen en el Inbox con {label}"
-            " ({link})"
+            "*🤔 A revisar: {n}* de las últimas {hours}h, siguen en el Inbox con {label} · {link}"
         ),
         "low_confidence_dry_run": (
-            "\n*🤔 Baja confianza: {n}* de las últimas {hours}h siguen en el Inbox"
-            " (dry run: sin etiqueta)"
+            "*🤔 A revisar: {n}* de las últimas {hours}h, siguen en el Inbox"
+            " _(dry run: sin etiqueta)_"
         ),
-        "see_in_gmail": "ver en Gmail",
-        "learned": "\n*🧠 Correcciones aprendidas: {n}*",
-        "errors": "\n*⚠️ Errores*: {emails} ({gave_up} sin más reintentos), {failed_runs}",
+        "review_in_gmail": "Revisar en Gmail",
+        "learned": "*🧠 Correcciones aprendidas ({n})*",
+        "correction": "• {sender}: {old} → {new}",
+        "correction_accepted": "• {sender}: {new} _(sugerencia aceptada)_",
+        "this_email_only": " _(solo este mail)_",
+        "more": "+{n} más",
+        "see_all": "ver todos en Gmail",
+        "errors": "*⚠️ Errores*: {emails} _({gave_up} sin más reintentos)_, {failed_runs}",
         "error_emails": {"one": "{n} mail", "other": "{n} mails"},
         "failed_runs": {"one": "{n} corrida fallida", "other": "{n} corridas fallidas"},
         "gave_up": (
@@ -164,8 +271,9 @@ MESSAGES: dict[DigestLanguage, DigestMessages] = {
         ),
         "run_time": "{last} UTC",
         "run_times": "{n} corridas, última {last} UTC",
-        "failed_run": "• Corrida fallida ({times}): {error}",
+        "failed_run": "• Corrida fallida _({times})_: {error}",
         "time_format": "%d/%m %H:%M",
+        "footer": "💡 Corregí una etiqueta en Gmail e Inbox Jev lo aprende en menos de una hora.",
     },
 }
 
@@ -200,9 +308,30 @@ def esc(text: object, limit: int | None = None) -> str:
     return raw.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def code(text: str) -> str:
+    """`text` as inline code in mrkdwn: escaped, and a backtick in it, which would close the
+    code span, becomes `'`. Nothing inside a code span is formatted, so an underscore or asterisk
+    in it can't open an italic or bold. Used for category labels (from categories.yaml) and for
+    a correction's sender, which comes from an email."""
+    return "`" + esc(text.replace("`", "'")) + "`"
+
+
+def aside(text: str) -> str:
+    """The digest's own parenthetical note in italic mrkdwn, `_(text)_`: escaped, and an
+    underscore in it, which would end the italic early, becomes `-`. Text from an email is never
+    an aside: it stays as it is, escaped."""
+    return "_(" + esc(text.replace("_", "-")) + ")_"
+
+
+def _url(url: str) -> str:
+    """`url` for a Slack link: escaped, and `|`, which ends the URL part of `<url|label>`,
+    percent-encoded."""
+    return esc(url).replace("|", "%7C")
+
+
 def _link(url: str, label: str) -> str:
-    """A Slack link. `|` ends the URL part of `<url|label>`, so it is percent-encoded."""
-    return f"<{esc(url).replace('|', '%7C')}|{label}>"
+    """A Slack link to `url` showing `label` (mrkdwn, already escaped)."""
+    return f"<{_url(url)}|{label}>"
 
 
 def _line(t: DigestMessages, account: str, m: Message, suffix: str = "") -> str:
@@ -227,47 +356,46 @@ def _needs_reply(cfg: CategoriesConfig, m: Message) -> bool:
 def build(
     session: Session,
     cfg: CategoriesConfig,
-    account: str,
+    account: Account,
     hours: int = 24,
     *,
-    language: DigestLanguage,
     gmail: ThreadReader | None,
-) -> str:
-    """The digest text for `account` over the last `hours`, in `language`.
-
-    `language` has no default on purpose: the account's `digest_language` is the only default,
-    so a caller can't silently render a different language than the account's.
+    preview: bool = False,
+) -> Digest:
+    """The digest for `account` over the last `hours`, in its `digest_language`.
 
     `gmail` is read to drop the emails already handled (`check_pending`); None (it couldn't be
-    opened) or a failed read lists them all, with a line saying so. Neither has a default, so
-    a caller can't skip the check by forgetting it.
+    opened) or a failed read lists them all, with a line saying so. It has no default, so a
+    caller can't skip the check by forgetting it. `preview` marks the title, for a test DM.
     """
-    t = MESSAGES[language]
-    since = now() - timedelta(hours=hours)
+    t = MESSAGES[account.digest_language]
+    email = account.email
+    at = now()
+    since = at - timedelta(hours=hours)
     msgs = session.scalars(
         select(Message)
-        .where(Message.account == account, Message.processed_at >= since)
+        .where(Message.account == email, Message.processed_at >= since)
         .order_by(Message.processed_at.desc())
     ).all()
     done = [m for m in msgs if m.status == MessageStatus.DONE]
     errors = [m for m in msgs if m.status == MessageStatus.ERROR]
     unsubs = session.scalars(
-        select(Unsubscribe).where(Unsubscribe.account == account, Unsubscribe.attempted_at >= since)
+        select(Unsubscribe).where(Unsubscribe.account == email, Unsubscribe.attempted_at >= since)
     ).all()
-    runs = session.scalars(select(Run).where(Run.account == account, Run.started_at >= since)).all()
-    learned = session.scalar(
-        select(func.count())
-        .select_from(Message)
+    runs = session.scalars(select(Run).where(Run.account == email, Run.started_at >= since)).all()
+    corrected = session.scalars(
+        select(Message)
         .where(
-            Message.account == account,
+            Message.account == email,
             Message.corrected_category.is_not(None),
             Message.correction_checked_at >= since,
         )
-    )
+        .order_by(Message.correction_checked_at.desc(), Message.id.desc())
+    ).all()
 
     modes = sorted({m.mode for m in done})
     low = [m for m in done if m.low_confidence]
-    # Calendar messages count in the summary's totals but are never listed (ADR 0049).
+    # Calendar messages count in the "What Jev did" table but are never listed (ADR 0049).
     listable = [m for m in done if not _is_calendar(m)]
     low_listed = [m for m in low if not _is_calendar(m)]
     kept = _kept_on_purpose(cfg, listable)
@@ -277,19 +405,84 @@ def build(
         gmail, [*(m for _, msgs in kept for m in msgs), *reply], low_listed, cfg.review_label
     )
 
-    out = [t["header"].format(account=account, hours=hours, modes=", ".join(modes) or "—")]
-    out += _summary(t, cfg, done, low, pending)
-    for label, msgs in kept:
-        shown = pending.keep(msgs)
-        out += _section(f"\n*🔔 {label} ({len(shown)})*", shown, lambda m: _line(t, account, m))
-    reply = pending.keep(reply)
-    out += _section(t["needs_reply"].format(n=len(reply)), reply, lambda m: _line(t, account, m))
-    out += _unsubscribe_sections(t, unsubs)
-    out += _low_confidence(t, cfg, account, hours, pending.keep_for_review(low_listed))
-    if learned:
-        out.append(t["learned"].format(n=learned))
-    out += _errors(t, account, errors, [r for r in runs if r.error])
-    return "\n".join(out)
+    needs_you = []
+    for label, kept_msgs in kept:
+        if shown := pending.keep(kept_msgs):
+            title = f"*🔔 {code(label)} ({len(shown)})*"
+            needs_you.append(_needs_you(t, email, title, label, shown, at))
+    if shown := pending.keep(reply):
+        title = t["needs_reply"].format(n=len(shown))
+        needs_you.append(_needs_you(t, email, title, cfg.needs_reply.label, shown, at))
+    for_review = pending.keep_for_review(low_listed)
+    waiting = sum(len(g.lines) + g.hidden for g in needs_you) + len(for_review)
+    headline = plural(t["need_you"], waiting) if waiting else t["inbox_zero"]
+    date = t["date"].format(
+        weekday=t["weekdays"][at.weekday()], day=at.day, month=t["months"][at.month - 1]
+    )
+    mark = t["preview"] if preview else ""
+    error_lines = _errors(t, email, errors, [r for r in runs if r.error])
+    return Digest(
+        title=mark + t["title"].format(date=date),
+        context=t["context"].format(account=esc(email), hours=hours, modes=", ".join(modes) or "—"),
+        hero=f"*{headline}*" if waiting else f"*{headline}* ✨",
+        notification=f"{mark}{headline} · {plural(t['processed_count'], len(done))}",
+        wording=Wording(more=t["more"], see_all=t["see_all"], nothing=t["nothing_processed"]),
+        needs_you=needs_you,
+        review=_low_confidence(t, cfg, email, hours, for_review),
+        totals_title=t["totals_title"].format(hours=hours),
+        totals=_totals(t, cfg, done, low, pending),
+        notes=[t["pending_check_failed"]] if pending.failed else [],
+        unsubscribes=_unsubscribe_sections(t, unsubs),
+        corrections=_corrections(t, cfg, account, corrected),
+        errors=Group(error_lines[0], error_lines[1:]) if error_lines else None,
+        footer=t["footer"],
+    )
+
+
+def _needs_you(
+    t: DigestMessages,
+    account: str,
+    title: str,
+    label: str,
+    msgs: Sequence[Message],
+    at: datetime,
+) -> Group:
+    """One "needs you" group: its first NEEDS_YOU_ITEMS emails, the rest counted with a link to
+    `label`'s emails still in the inbox."""
+    return Group(
+        title,
+        [_item(t, account, m, at) for m in msgs[:NEEDS_YOU_ITEMS]],
+        hidden=max(0, len(msgs) - NEEDS_YOU_ITEMS),
+        link=_url(gmail_search_link(account, f"{label_query(label)} in:inbox")),
+    )
+
+
+def _item(t: DigestMessages, account: str, m: Message, at: datetime) -> str:
+    """An email to act on: its subject in bold, linking to it; under it who sent it and when."""
+    subject = esc(_shorten(m.subject or t["no_subject"], MAX_SUBJECT))
+    who = esc(_shorten(parseaddr(m.from_header or "")[0].strip() or m.sender, MAX_SENDER))
+    link = _link(gmail_link(account, m.gmail_id), subject)
+    return f"• *{link}*\n      {who} · {_ago(t, m.received_at or m.processed_at, at)}"
+
+
+def _shorten(text: str, limit: int) -> str:
+    """`text` on one line, in at most `limit` characters, "…" last when it had to be cut."""
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _ago(t: DigestMessages, when: datetime, at: datetime) -> str:
+    """How long before `at` `when` was, in minutes, hours (under two days) or days."""
+    if when.tzinfo is None:  # SQLite gives back naive datetimes, stored in UTC
+        when = when.replace(tzinfo=UTC)
+    minutes = max(0, int((at - when).total_seconds() // 60))
+    if minutes < 1:
+        return t["just_now"]
+    if minutes < 60:
+        return t["minutes_ago"].format(n=minutes)
+    if minutes < 48 * 60:
+        return t["hours_ago"].format(n=minutes // 60)
+    return t["days_ago"].format(n=minutes // (24 * 60))
 
 
 @dataclass(frozen=True)
@@ -404,24 +597,31 @@ def _section(title: str, items: Sequence[_T], line: Callable[[_T], str]) -> list
     return [title, *(line(item) for item in items[:MAX_ITEMS])] if items else []
 
 
-def _summary(
+def _label(cfg: CategoriesConfig, key: str | None) -> str:
+    """The category `key`'s label, or the key itself for one no longer in categories.yaml."""
+    category = cfg.by_key.get(key) if key is not None else None
+    return category.label if category is not None else str(key)
+
+
+def _totals(
     t: DigestMessages,
     cfg: CategoriesConfig,
     done: list[Message],
     low: list[Message],
     pending: Pending,
-) -> list[str]:
-    """How many emails were processed, per category (low-confidence ones apart), and how many
-    of the ones the digest would list were already handled (or that the check failed)."""
-    counts = Counter(m.category for m in done if not m.low_confidence)
-    summary = " · ".join(
-        f"{cfg.by_key[k].label if k in cfg.by_key else k}: {n}" for k, n in counts.most_common()
-    )
-    processed = plural(t["processed"], len(done))
-    line = t["summary"].format(processed=processed, summary=summary or t["nothing"], low=len(low))
-    if pending.handled:
-        line += " · " + plural(t["handled"], pending.handled)
-    return [line, t["pending_check_failed"]] if pending.failed else [line]
+) -> Totals | None:
+    """The "what Jev did" table: emails processed per category (most first, ties by label;
+    low-confidence ones apart as To review), how many of the ones the digest would list were
+    already handled (under the total, not part of it). None when nothing was processed."""
+    if not done:
+        return None
+    counts = Counter(_label(cfg, m.category) for m in done if not m.low_confidence)
+    rows = sorted(counts.items(), key=lambda row: (-row[1], row[0]))
+    review = (t["to_review"], len(low)) if low else None
+    # Not part of the total: it counts emails the digest would have listed, not processed ones.
+    after = [(t["already_handled"], pending.handled)] if pending.handled else []
+    header = (t["table_category"], t["table_count"])
+    return Totals(header, rows, (t["processed"], len(done)), after, review=review)
 
 
 def _kept_on_purpose(cfg: CategoriesConfig, done: list[Message]) -> list[tuple[str, list[Message]]]:
@@ -438,29 +638,77 @@ def _kept_on_purpose(cfg: CategoriesConfig, done: list[Message]) -> list[tuple[s
     return kept
 
 
-def _unsubscribe_sections(t: DigestMessages, unsubs: Sequence[Unsubscribe]) -> list[str]:
-    """Unsubscribed lists, the ones waiting for a manual unsubscribe, and the failed ones."""
+def _corrections(
+    t: DigestMessages, cfg: CategoriesConfig, account: Account, corrected: Sequence[Message]
+) -> Group | None:
+    """The corrections picked up in the period, newest first: sender, the category it had and
+    the one the user gave it (or that the user accepted the suggestion). One for a sender the
+    account decides email by email made no sender rule (`corrections.record`), which the line
+    says. At most MAX_ITEMS, then how many more; None when there are none.
+
+    The sender is code, like the labels: an underscore at the start of an address
+    (`_bounce@x.example`) would otherwise open an italic that the line's aside closes."""
+
+    def line(m: Message) -> str:
+        sender = code(m.sender)
+        new = code(_label(cfg, m.corrected_category))
+        if m.corrected_category == m.category:
+            text = t["correction_accepted"].format(sender=sender, new=new)
+        else:
+            old = code(_label(cfg, m.category))
+            text = t["correction"].format(sender=sender, old=old, new=new)
+        return text + (t["this_email_only"] if account.decides_each_email(m.sender) else "")
+
+    return _group(t["learned"], corrected, line)
+
+
+def _unsubscribe_sections(t: DigestMessages, unsubs: Sequence[Unsubscribe]) -> list[Group]:
+    """Unsubscribed lists, the ones waiting for a manual unsubscribe, and the failed ones: a
+    group each, when there are any, of at most MAX_ITEMS lines, then how many more."""
     ok = [u for u in unsubs if u.status == UnsubscribeStatus.OK]
     pending = [u for u in unsubs if u.status == UnsubscribeStatus.MANUAL_PENDING]
     failed = [u for u in unsubs if u.status == UnsubscribeStatus.FAILED]
-    return [
-        *_section(
-            t["unsubscribed"].format(n=len(ok)), ok, lambda u: f"• {esc(u.list_key)} ({u.method})"
-        ),
-        *_section(
-            t["unsubscribe_manual"].format(n=len(pending)),
-            pending,
-            lambda u: (
-                f"• {esc(u.list_key)} — "
-                + (_link(u.target, t["link"]) if u.target else t["link_in_body"])
-            ),
-        ),
-        *_section(
-            t["unsubscribe_failed"].format(n=len(failed)),
+
+    def manual(u: Unsubscribe) -> str:
+        return f"• {esc(u.list_key)} — " + (
+            _link(u.target, t["link"]) if u.target else t["link_in_body"]
+        )
+
+    groups = [
+        _group(t["unsubscribed"], ok, lambda u: f"• {esc(u.list_key)} {aside(_method(t, u))}"),
+        _group(t["unsubscribe_manual"], pending, manual),
+        _group(
+            t["unsubscribe_failed"],
             failed,
             lambda u: f"• {esc(u.list_key)}: {esc(_unsubscribe_error(u), 160)}",
         ),
     ]
+    return [g for g in groups if g is not None]
+
+
+def _method(t: DigestMessages, u: Unsubscribe) -> str:
+    """How `u` unsubscribed, in words (`one-click`, not the stored `one_click`); a method this
+    version doesn't know shows as stored."""
+    match u.method:
+        case UnsubscribeMethod.ONE_CLICK:
+            return t["method_one_click"]
+        case UnsubscribeMethod.MAILTO:
+            return t["method_mailto"]
+        case UnsubscribeMethod.MANUAL:
+            return t["method_manual"]
+    return u.method
+
+
+def _group(title: str, items: Sequence[_T], line: Callable[[_T], str]) -> Group | None:
+    """`title` (with `{n}`, the count) over one `line` per item, at most MAX_ITEMS, then how
+    many more; None when there are none."""
+    if not items:
+        return None
+    return Group(
+        title.format(n=len(items)),
+        [line(item) for item in items[:MAX_ITEMS]],
+        hidden=max(0, len(items) - MAX_ITEMS),
+    )
 
 
 def _unsubscribe_error(u: Unsubscribe) -> str:
@@ -490,10 +738,10 @@ def _low_confidence(
     out = []
     if labeled:
         query = f"{label_query(cfg.review_label)} in:inbox"
-        link = _link(gmail_search_link(account, query), t["see_in_gmail"])
+        link = _link(gmail_search_link(account, query), t["review_in_gmail"])
         out.append(
             t["low_confidence"].format(
-                n=labeled, hours=hours, label=esc(cfg.review_label), link=link
+                n=labeled, hours=hours, label=code(cfg.review_label), link=link
             )
         )
     if unlabeled := len(low) - labeled:
@@ -539,16 +787,3 @@ def _failed_runs(t: DigestMessages, runs: list[Run]) -> list[str]:
         )
         lines.append(t["failed_run"].format(times=times, error=esc(error, 300)))
     return lines[:MAX_ITEMS]
-
-
-def send_slack(token: str, user_id: str, text: str) -> None:
-    resp = httpx.post(
-        "https://slack.com/api/chat.postMessage",
-        headers={"Authorization": f"Bearer {token}"},
-        json={"channel": user_id, "text": text, "unfurl_links": False, "unfurl_media": False},
-        timeout=20,
-    )
-    resp.raise_for_status()
-    body = resp.json()
-    if not body.get("ok"):
-        raise RuntimeError(f"Slack error: {body.get('error')}")

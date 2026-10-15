@@ -50,12 +50,12 @@ def opened(monkeypatch):
 def test_digest_goes_on_after_a_failed_account(env, monkeypatch):
     sent = []
 
-    def send_slack(token, user_id, text):
+    def send_slack(http, token, user_id, digest):
         if user_id == "UA":
             raise RuntimeError("Slack error: channel_not_found")
         sent.append(user_id)
 
-    monkeypatch.setattr(cli.digest_mod, "send_slack", send_slack)
+    monkeypatch.setattr(cli.slack_mod, "send_slack", send_slack)
     result = CliRunner().invoke(cli.app, ["digest"])
     assert sent == ["UB"]
     assert result.exit_code == 1
@@ -66,14 +66,14 @@ def test_digest_goes_on_after_a_failed_account(env, monkeypatch):
 
 def test_digest_needs_no_jev_key(env, monkeypatch):
     sent = []
-    monkeypatch.setattr(cli.digest_mod, "send_slack", lambda t, u, text: sent.append(u))
+    monkeypatch.setattr(cli.slack_mod, "send_slack", lambda h, t, u, d: sent.append(u))
     result = CliRunner().invoke(cli.app, ["digest"])
     assert (result.exit_code, sent) == (0, ["UA", "UB"])
 
 
 def test_account_option_picks_one_account_and_refuses_one_not_in_the_file(env, monkeypatch):
     sent = []
-    monkeypatch.setattr(cli.digest_mod, "send_slack", lambda t, u, text: sent.append(u))
+    monkeypatch.setattr(cli.slack_mod, "send_slack", lambda h, t, u, d: sent.append(u))
     result = CliRunner().invoke(cli.app, ["digest", "--account", "B@acme.com"])
     assert (result.exit_code, sent) == (0, ["UB"])
     unknown = CliRunner().invoke(cli.app, ["digest", "--account", "c@acme.com"])

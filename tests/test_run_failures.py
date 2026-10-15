@@ -7,6 +7,7 @@ from unittest import mock
 import google.auth._exponential_backoff
 import google.auth.transport
 import pytest
+from conftest import in_language
 from fakes import HttpError, age_errors
 from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
@@ -42,8 +43,8 @@ def _runs(ctx):
 def _digest(ctx, account, hours=24):
     with ctx.sessions() as s:
         return digest.build(
-            s, ctx.cfg, account.email, hours, language=DigestLanguage.ES, gmail=None
-        )
+            s, ctx.cfg, in_language(account, DigestLanguage.ES), hours, gmail=None
+        ).text
 
 
 def test_expired_token_is_recorded_on_the_run_and_raised(triage_setup, monkeypatch):
@@ -276,7 +277,7 @@ def test_failed_email_backs_off_then_gives_up_and_shows_in_digest(triage_setup):
     assert (run.processed, run.errors) == (0, 0) and ctx.classifier.calls == calls
 
     text = _digest(ctx, account, hours=48)
-    assert "1 mail (1 sin más reintentos)" in text
+    assert "1 mail _(1 sin más reintentos)_" in text
     assert "Proposal" in text.split("Sin más reintentos")[1]
 
 

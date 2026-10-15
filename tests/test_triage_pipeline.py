@@ -5,7 +5,7 @@ import re
 from dataclasses import replace
 
 import pytest
-from conftest import make_classification, selects_from
+from conftest import in_language, make_classification, selects_from
 from fakes import (
     age_errors,
     email,
@@ -57,7 +57,7 @@ def test_dry_run_touches_nothing_then_label_reprocesses(setup):
         rows = {m.gmail_id: m for m in s.query(Message)}
         assert "Jev/Needs Reply" in rows["1"].decided_labels
         assert all(m.labels_added == [] for m in rows.values())
-        text = digest.build(s, ctx.cfg, account.email, language=DigestLanguage.ES, gmail=gmail)
+        text = digest.build(s, ctx.cfg, in_language(account, DigestLanguage.ES), gmail=gmail).text
     reply_section = text.split("Piden respuesta (1)*", 1)[1].split("\n\n", 1)[0]
     assert "Proposal" in reply_section
     assert not any(subj in reply_section for subj in ("50% off", "Internal", "Maybe promo"))
@@ -144,8 +144,8 @@ def test_digest_lists_kept_action_category(setup):
     triage.run_account(ctx, account, Mode.ACT)
     assert all(m[2] == [] for m in gmail.modified if m[0] == "5")  # stays in the inbox
     with ctx.sessions() as s:
-        text = digest.build(s, ctx.cfg, account.email, language=DigestLanguage.ES, gmail=gmail)
-    assert "Jev/Action (1)" in text and "Approve payment" in text
+        text = digest.build(s, ctx.cfg, in_language(account, DigestLanguage.ES), gmail=gmail).text
+    assert "`Jev/Action` (1)" in text and "Approve payment" in text
 
 
 def test_digest_does_not_repeat_kept_emails_in_needs_reply(setup):
@@ -158,7 +158,7 @@ def test_digest_does_not_repeat_kept_emails_in_needs_reply(setup):
     ctx.classifier.answers["Can we meet?"] = make_classification("important", 0.9, needs_reply=0.9)
     triage.run_account(ctx, account, Mode.ACT)
     with ctx.sessions() as s:
-        text = digest.build(s, ctx.cfg, account.email, language=DigestLanguage.ES, gmail=gmail)
+        text = digest.build(s, ctx.cfg, in_language(account, DigestLanguage.ES), gmail=gmail).text
     assert text.count("Approve payment") == 1
     reply = text.split("Piden respuesta")[1]
     assert "Can we meet?" in reply and "Approve payment" not in reply
@@ -181,8 +181,8 @@ def test_calendar_invitation_stays_in_the_inbox_but_the_digest_leaves_it_out(set
         rows = {m.gmail_id: m for m in s.query(Message)}
         assert (rows["6"].category, rows["6"].calendar_method) == ("action_required", "REQUEST")
         assert rows["5"].calendar_method is None
-        text = digest.build(s, ctx.cfg, account.email, language=DigestLanguage.EN, gmail=gmail)
-    assert "Jev/Action (1)" in text and "Approve payment" in text
+        text = digest.build(s, ctx.cfg, in_language(account, DigestLanguage.EN), gmail=gmail).text
+    assert "`Jev/Action` (1)" in text and "Approve payment" in text
     assert "Vemos Lightspeed" not in text
 
 

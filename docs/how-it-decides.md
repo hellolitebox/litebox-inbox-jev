@@ -423,8 +423,8 @@ Held rows stay `failed`.
   - no `auto` rule is learned or counted (`triage._learn_auto_rule`), and a pending one is left as
     it is;
   - a correction sets `corrected_category` on the email but creates no rule
-    ([3.7](#37-corrections-user-edits-and-restore)); it still counts in the digest's "Corrections
-    learned", which counts the fixes picked up.
+    ([3.7](#37-corrections-user-edits-and-restore)); the digest still lists it under "Corrections
+    learned", marked "(this email only)".
   - it is **never unsubscribed unless a manual rule** to an unsubscribing category decides the email
     ([3.3](#33-unsubscribe-conditions), condition 3; `run` and `unsubscribe-retry` through
     `policy.unsubscribe_gate`): its address also carries the mail that needs you, and one

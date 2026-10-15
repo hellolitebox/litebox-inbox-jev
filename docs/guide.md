@@ -278,23 +278,31 @@ pauses, and after about 10 hours gives up and lists the email in the digest's er
 ## The daily Slack digest
 
 Every morning (08:00 Buenos Aires time by default) you get one Slack message per account, covering
-the last 24 hours, in English or Spanish:
+the last 24 hours, in English or Spanish. It is built to be read on your phone in a few seconds,
+most important first:
 
-- **Totals**: how many emails were processed, how many of each kind, how many are waiting in Review,
-  and how many were "already handled": archived, replied to or sorted out by you since, so they
-  aren't listed.
-- **Action**: the `Jev/Action` emails still in your inbox. Calendar invitations, updates and replies
-  are left out of this and every other list: they stay in your inbox with their label, and your
-  calendar already shows them. They still count in the totals.
-- **Needs reply**: emails waiting for your answer that you haven't replied to yet.
+- **The headline** says how many emails need you, or "Inbox zero" when nothing does.
+- **Action** and **Needs reply**: the `Jev/Action` emails still in your inbox, and the emails
+  waiting for your answer that you haven't replied to yet. Each shows its subject (tap it to open
+  the email in Gmail), who sent it and how long ago. A long list shows the first 10 and a link to
+  see the rest in Gmail. Calendar invitations, updates and replies are left out of these lists and
+  of To review: they stay in your inbox with their label, and your calendar already shows them. They
+  still count in the table below.
+- **To review**: how many emails from the period still have `Jev/Review`, with a link to review them
+  in Gmail.
+- **What Jev did**: a small table with how many emails of each kind it sorted, how many it left for
+  review, the total, and how many were "already handled": archived, replied to or sorted out by you
+  since, so they aren't listed above.
 - **Unsubscribed**: lists you were taken off. **Manual unsubscribe**: lists where it couldn't do it
   automatically, with the link for you to click if you want. **Unsubscribe failed**: attempts that
   didn't work; it may try again later.
-- **Low confidence**: how many emails from the period still have `Jev/Review`, with a link to see
-  them in Gmail.
-- **Corrections learned**: how many of your fixes it picked up.
-- **Errors**: emails it couldn't process, and passes that failed (for example, when Gmail access
-  needs to be renewed).
+- **Corrections learned**: each fix of yours it picked up, with the sender and the change (for
+  example `Jev/Important → Jev/Spam`). "(this email only)" means that sender is one it decides email
+  by email, so the fix applies to that email and not to the sender's next ones.
+- **Errors**, only when something went wrong: emails it couldn't process, and passes that failed
+  (for example, when Gmail access needs to be renewed).
+
+The notification on your phone shows just the headline and how many emails were processed.
 
 ## Privacy
 

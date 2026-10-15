@@ -151,7 +151,7 @@ uv run inbox-jev digest --dry-print
 | -- | -- |
 | `inbox-jev auth add EMAIL` | Authorize a Gmail account (opens the browser; token → `secrets/tokens/`) |
 | `inbox-jev run [-a EMAIL] [--mode M] [--limit N] [--lookback 30d]` | One triage pass (what the timer runs) |
-| `inbox-jev digest [-a EMAIL] [--hours 24] [--dry-print]` | Slack digest |
+| `inbox-jev digest [-a EMAIL] [--hours 24] [--dry-print [--blocks]] [--preview]` | Slack digest |
 | `inbox-jev restore -a EMAIL --since 1d [--category marketing]` | Undo: back to inbox, remove labels (emails deleted in Gmail are skipped) |
 | `inbox-jev reprocess -a EMAIL --category KEY [--low-confidence-only]` | Have the next `act` run redo that category's emails still in the inbox (pair with `run --lookback`) |
 | `inbox-jev rules list [-a EMAIL] [--all]` / `rules set -a EMAIL @domain.com newsletter` / `rules delete -a EMAIL SENDER` | Sender rules (`rules set` and `rules delete` take an address or `@domain`, any case; `rules delete` also removes a rule stored as typed before `rules set` checked its input) |
@@ -169,11 +169,12 @@ staleness watchdog, nightly off-site backups and Slack alerts on failures.
 **[docs/operations.md](docs/operations.md)** has it all: deploy, updating a deployment and rolling
 back, rolling out `act`, changing categories, alerts, backups and the database.
 
-The **daily digest** is one Slack DM per account that lists only what still needs you: pending
-`Jev/Action` emails and replies (calendar invitations left out), unsubscribes done or waiting for a
-click, how many low-confidence emails are still in Review, corrections learned, and errors. What it
-shows, in plain words: [the guide](docs/guide.md#the-daily-slack-digest); schedule, language and
-preview: [operations](docs/operations.md#daily-digest).
+The **daily digest** is one Slack DM per account, laid out with Slack's Block Kit: first how many
+emails need you and which (pending `Jev/Action` emails and replies, calendar invitations left out,
+how many are still in Review), then a table of what Jev did, unsubscribes done or waiting for a
+click, the corrections learned (sender and categories), and errors. What it shows, in plain words:
+[the guide](docs/guide.md#the-daily-slack-digest); schedule, language and preview:
+[operations](docs/operations.md#daily-digest).
 
 ## Privacy
 

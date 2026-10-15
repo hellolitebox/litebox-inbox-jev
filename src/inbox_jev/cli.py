@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -18,6 +19,7 @@ from sqlalchemy.orm import Session
 from . import __version__, labels, logs, rules, triage
 from . import digest as digest_mod
 from . import gmail as gmail_mod
+from . import slack as slack_mod
 from . import unsubscribe_retry as retry_mod
 from .config import (
     Account,
@@ -249,23 +251,50 @@ def digest(
     account: AccountOpt = None,
     hours: int = 24,
     dry_print: Annotated[bool, typer.Option(help="Print instead of sending to Slack.")] = False,
+    blocks: Annotated[
+        bool,
+        typer.Option(
+            "--blocks",
+            help="With --dry-print: print the Block Kit JSON (for Block Kit Builder), "
+            "not the text.",
+        ),
+    ] = False,
+    preview: Annotated[
+        bool,
+        typer.Option(
+            help="Send one digest marked [preview] to --account's own Slack user, e.g. to see a "
+            "layout change."
+        ),
+    ] = False,
 ) -> None:
     """Send the daily digest to each account's Slack user (exits 1 if any account failed)."""
-    s = _settings(announce=not dry_print)  # the timer case announces; a preview doesn't
+    if blocks and not dry_print:
+        raise typer.BadParameter("--blocks only goes with --dry-print")
+    # Not `account is None`: `_accounts` takes an empty one (`-a "$UNSET"`) as every account.
+    if preview and (dry_print or not account):
+        raise typer.BadParameter("--preview needs --account and sends: drop --dry-print")
+    s = _settings(announce=not dry_print)  # the timer case announces; a dry print doesn't
     cfg = load_categories(s.categories_file)
     accounts = _accounts(s, cfg, account)
-    with open_sessions(s.database_url) as sessions:
+    if preview:
+        (target,) = accounts  # one DM, to the account named, never to every account
+        if not (s.slack_bot_token and target.slack_user_id):
+            raise typer.BadParameter(
+                f"--preview needs SLACK_BOT_TOKEN and {target.email}'s slack_user_id"
+            )
+    with open_sessions(s.database_url) as sessions, slack_mod.client() as http:
 
         def send(acc: Account) -> None:
             with _digest_gmail(s, acc.email) as gmail, sessions() as session:
-                text = digest_mod.build(
-                    session, cfg, acc.email, hours, language=acc.digest_language, gmail=gmail
-                )
-            if dry_print or not (s.slack_bot_token and acc.slack_user_id):
-                typer.echo(text + "\n")
+                built = digest_mod.build(session, cfg, acc, hours, gmail=gmail, preview=preview)
+            if dry_print and blocks:
+                typer.echo(json.dumps({"blocks": built.blocks()}, ensure_ascii=False, indent=2))
                 return
-            digest_mod.send_slack(s.slack_bot_token, acc.slack_user_id, text)
-            log.info("digest sent", extra={"account": acc.email})
+            if dry_print or not (s.slack_bot_token and acc.slack_user_id):
+                typer.echo(built.text + "\n")
+                return
+            slack_mod.send_slack(http, s.slack_bot_token, acc.slack_user_id, built)
+            log.info("digest sent", extra={"account": acc.email, "preview": preview})
 
         _each_account(accounts, "digest", send)
 

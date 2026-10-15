@@ -238,28 +238,65 @@ email no longer in the inbox (archived, deleted) or with a message you sent in i
 after it (you replied) is dropped. A low-confidence email without the review label any more (you
 accepted or corrected the suggestion) leaves the low-confidence count, but stays under Needs reply
 if it is there and you haven't replied. The totals line says how many emails no section shows any
-more ("4 already handled"). If that read fails (token, Gmail API), the digest is still sent, listing
-them all, with a line saying the check failed.
+more ("Already handled: 4"). If that read fails (token, Gmail API), the digest is still sent,
+listing them all, with a line saying the check failed.
 
-It shows: totals per category, how many are in Review and how many were already handled; one section
-per keep category other than `important` (e.g. `Jev/Action`) and the emails that need a reply,
-pending ones only (at most 15 per section); calendar messages (an iTIP part: invitations, updates,
-cancellations, responses) are never listed there nor in the low-confidence line, but still count in
-the totals ([ADR 0049](decisions/0049-digest-leaves-calendar-messages-out.md)), and rows stored
-before the `messages.calendar_method` column existed are listed as before; unsubscribes done,
-pending a manual click (with its link), or failed, in full; one line with how many of the period's
-low-confidence emails are still in the inbox with the review label, linking to the Gmail search
-`label:jev-review in:inbox` (which also shows older ones), and one without a link for those a
-`dry_run` pass left unlabeled; how many corrections were learned; and errors. Errors are failed runs
-(identical ones grouped, e.g. an expired Gmail token, with the fix: `run inbox-jev auth add EMAIL`,
-or "Jev unavailable") and emails that stopped being retried. An email that fails is retried with a
-backoff (5, 10, 20 … minutes) and given up after 8 failures, about 10.5 hours (at once when Jev
-refuses that email with a 4xx; when Jev refuses two emails in a row the same way, the run fails and
-each counts an ordinary failure); `inbox-jev retry-errors` retries them again. Failed emails are
-listed by subject and sender (details:
-[docs/how-it-decides.md §1](how-it-decides.md#1-the-pass-over-an-inbox)). Everything taken from an
-email is escaped for Slack, so a subject can't mention `@channel` or fake a link. Preview it with
-`inbox-jev digest --dry-print` (it reads Gmail too, read-only, for the pending check).
+It is one Slack message laid out with Block Kit (`src/inbox_jev/slack.py`), read top to bottom on a
+phone:
+
+1. A header, "📬 Inbox Jev · Thursday, Oct 15" (the UTC date), and a small grey line with the
+   account, the period and the mode.
+2. One bold sentence: how many emails need you ("5 emails need you"), or "Inbox zero — nothing needs
+   you today ✨".
+3. What needs you, pending ones only: one group per keep category other than `important` (🔔, e.g.
+   `Jev/Action`) and ⚡ Needs reply. Each email is its subject in bold, linking to it in Gmail
+   (subjects cut at 60 characters), and under it the sender's name (or address) and how long ago it
+   arrived. At most 10 per group, then "+N more · see all in Gmail", a link to that label's search
+   in the inbox. Calendar messages (an iTIP part: invitations, updates, cancellations, responses)
+   are never listed there nor counted under To review, but still count in the table
+   ([ADR 0049](decisions/0049-digest-leaves-calendar-messages-out.md)); rows stored before the
+   `messages.calendar_method` column existed are listed as before.
+4. 🤔 To review: how many of the period's low-confidence emails are still in the inbox with the
+   review label, linking to the Gmail search `label:jev-review in:inbox` (which also shows older
+   ones), and one line without a link for those a `dry_run` pass left unlabeled.
+5. 📊 What Jev did: a native Block Kit table, one row per category with its count (most first, ties
+   by label), then To review, the Processed total in bold, and Already handled under it (not part of
+   the total: it counts emails the digest would have listed, not processed ones). Category labels
+   longer than 28 characters are cut. An empty period has no table, only "Nothing processed".
+   Category labels show as inline code wherever the digest names one (the 🔔 group titles, the review
+   label, the table's category rows, the corrections, where the sender is code too), a backtick in
+   one as `'`; the text version's table, a code block already, shows them plain.
+6. Unsubscribes (🚫 done, 🖐 waiting for a manual click with its link, ❗ failed), in full.
+7. 🧠 Corrections learned: the ones picked up in the period, newest first, one per line with the
+   sender and the category labels (`• noreply@example.com: Jev/Important → Jev/Spam`, the sender and
+   each label as code, so an underscore in an address can't start an italic; or "(suggestion
+   accepted)" when the correction kept a low-confidence guess), marked "(this email only)" for a
+   sender in `decide_each_email`, which gets no sender rule (at most 15, then "+N more").
+8. ⚠️ Errors, only when there are any: failed runs (identical ones grouped, e.g. an expired Gmail
+   token, with the fix: `run inbox-jev auth add EMAIL`, or "Jev unavailable") and emails that
+   stopped being retried. An email that fails is retried with a backoff (5, 10, 20 … minutes) and
+   given up after 8 failures, about 10.5 hours (at once when Jev refuses that email with a 4xx; when
+   Jev refuses two emails in a row the same way, the run fails and each counts an ordinary failure);
+   `inbox-jev retry-errors` retries them again. Failed emails are listed by subject and sender
+   (details: [docs/how-it-decides.md §1](how-it-decides.md#1-the-pass-over-an-inbox)).
+9. A footer with a tip.
+
+Links are plain mrkdwn links, not buttons: a url button still sends the app an interaction payload,
+and this app has no interactivity Request URL. Everything taken from an email is escaped for Slack
+(`<!channel>`, `<@U…>` and fake links stay text), and every mrkdwn text is sent `verbatim`, so Slack
+doesn't turn a plain `@here`, `@channel` or `#general` in a subject into a mention or channel link;
+the table's cells are raw text, and the text version is posted without `link_names`. The layout
+keeps to Block Kit's limits (50 blocks, 3,000 characters per section, 150 per header, 100 table
+rows), counting what it leaves out as "+N more" (the table sums its last categories in one "+N more"
+row, so the total still adds up). The message's `text`, which push notifications and screen readers
+show, is a one-line summary ("5 emails need you · 87 processed"). If Slack rejects the blocks
+(`invalid_blocks`), a warning is logged with Slack's details (which name the block, not its text)
+and the digest is sent again as plain mrkdwn text, so a bad block never loses it.
+
+Preview it with `inbox-jev digest --dry-print` (the text version) or `--dry-print --blocks` (the
+Block Kit JSON, to paste into [Block Kit Builder](https://app.slack.com/block-kit-builder)); both
+read Gmail too, read-only, for the pending check. `inbox-jev digest --preview -a EMAIL` sends one
+digest marked "[preview]" to that account's own `slack_user_id`, to see a layout change in Slack.
 
 The digest's language is set per account with `digest_language` in `accounts.yaml`: `en` (default)
 or `es`; any other value is rejected when the file is loaded. Category and label names come from

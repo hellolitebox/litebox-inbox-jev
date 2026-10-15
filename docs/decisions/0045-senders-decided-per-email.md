@@ -28,8 +28,8 @@ to the inbox teaches "all HubSpot mail is important" and keeps every dashboard i
   `config.normalize_sender_key`); anything else fails the file at load. For a listed sender:
   - no `auto` rule is learned or counted;
   - a correction is recorded on the email (`corrected_category`), which it decides if it is
-    processed again, but creates no sender rule; it still counts in the digest's "Corrections
-    learned", which counts the fixes picked up;
+    processed again, but creates no sender rule; the digest still lists it under "Corrections
+    learned", marked "(this email only)";
   - existing `auto` and `correction` rules are ignored when deciding, in `run`, `unsubscribe-retry`
     and `dry_classify.py` (`rules.SenderRules.deciding`). They stay in the DB and decide again if
     the sender leaves the list;
