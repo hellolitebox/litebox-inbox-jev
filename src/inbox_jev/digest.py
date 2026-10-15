@@ -210,6 +210,14 @@ def _line(t: DigestMessages, account: str, m: Message, suffix: str = "") -> str:
     return f"• {_link(gmail_link(account, m.gmail_id), subject)} — {esc(m.sender)}{suffix}"
 
 
+def _is_calendar(m: Message) -> bool:
+    """Whether `m` is a calendar message (an invitation, update, cancellation or response:
+    `Message.calendar_method` is set). The digest counts it but never lists it: it stays in the
+    inbox, labeled, and the calendar already shows it (ADR 0049). A row stored before the column
+    existed has None and is listed as before."""
+    return m.calendar_method is not None
+
+
 def _needs_reply(cfg: CategoriesConfig, m: Message) -> bool:
     if m.decided_labels is None:  # rows stored before decided_labels existed
         return (m.needs_reply or 0) >= cfg.needs_reply.threshold
@@ -259,11 +267,14 @@ def build(
 
     modes = sorted({m.mode for m in done})
     low = [m for m in done if m.low_confidence]
-    kept = _kept_on_purpose(cfg, done)
+    # Calendar messages count in the summary's totals but are never listed (ADR 0049).
+    listable = [m for m in done if not _is_calendar(m)]
+    low_listed = [m for m in low if not _is_calendar(m)]
+    kept = _kept_on_purpose(cfg, listable)
     listed = {id(m) for _, msgs in kept for m in msgs}
-    reply = [m for m in done if _needs_reply(cfg, m) and id(m) not in listed]
+    reply = [m for m in listable if _needs_reply(cfg, m) and id(m) not in listed]
     pending = check_pending(
-        gmail, [*(m for _, msgs in kept for m in msgs), *reply], low, cfg.review_label
+        gmail, [*(m for _, msgs in kept for m in msgs), *reply], low_listed, cfg.review_label
     )
 
     out = [t["header"].format(account=account, hours=hours, modes=", ".join(modes) or "—")]
@@ -274,7 +285,7 @@ def build(
     reply = pending.keep(reply)
     out += _section(t["needs_reply"].format(n=len(reply)), reply, lambda m: _line(t, account, m))
     out += _unsubscribe_sections(t, unsubs)
-    out += _low_confidence(t, cfg, account, hours, pending.keep_for_review(low))
+    out += _low_confidence(t, cfg, account, hours, pending.keep_for_review(low_listed))
     if learned:
         out.append(t["learned"].format(n=learned))
     out += _errors(t, account, errors, [r for r in runs if r.error])

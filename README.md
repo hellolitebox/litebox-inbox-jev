@@ -170,10 +170,10 @@ staleness watchdog, nightly off-site backups and Slack alerts on failures.
 back, rolling out `act`, changing categories, alerts, backups and the database.
 
 The **daily digest** is one Slack DM per account that lists only what still needs you: pending
-`Jev/Action` emails and replies, unsubscribes done or waiting for a click, how many low-confidence
-emails are still in Review, corrections learned, and errors. What it shows, in plain words:
-[the guide](docs/guide.md#the-daily-slack-digest); schedule, language and preview:
-[operations](docs/operations.md#daily-digest).
+`Jev/Action` emails and replies (calendar invitations left out), unsubscribes done or waiting for a
+click, how many low-confidence emails are still in Review, corrections learned, and errors. What it
+shows, in plain words: [the guide](docs/guide.md#the-daily-slack-digest); schedule, language and
+preview: [operations](docs/operations.md#daily-digest).
 
 ## Privacy
 

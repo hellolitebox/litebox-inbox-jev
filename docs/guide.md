@@ -283,7 +283,9 @@ the last 24 hours, in English or Spanish:
 - **Totals**: how many emails were processed, how many of each kind, how many are waiting in Review,
   and how many were "already handled": archived, replied to or sorted out by you since, so they
   aren't listed.
-- **Action**: the `Jev/Action` emails still in your inbox.
+- **Action**: the `Jev/Action` emails still in your inbox. Calendar invitations, updates and replies
+  are left out of this and every other list: they stay in your inbox with their label, and your
+  calendar already shows them. They still count in the totals.
 - **Needs reply**: emails waiting for your answer that you haven't replied to yet.
 - **Unsubscribed**: lists you were taken off. **Manual unsubscribe**: lists where it couldn't do it
   automatically, with the link for you to click if you want. **Unsubscribe failed**: attempts that

@@ -79,6 +79,11 @@ class Message(Base):
     from_header: Mapped[str] = mapped_column(Text, default="")
     subject: Mapped[str] = mapped_column(Text, default="")
     received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The iTIP method of its calendar part (`Email.calendar_method`: "REQUEST", "REPLY",
+    # "CANCEL"…), None for any other email. The digest leaves calendar messages out of its lists
+    # (ADR 0049). Rows stored before the column existed (2026-10-15) are None, read as "not a
+    # calendar message": they are listed as before.
+    calendar_method: Mapped[str | None] = mapped_column(String(32))
     status: Mapped[str] = mapped_column(String(16), default=MessageStatus.DONE)
     error: Mapped[str | None] = mapped_column(Text)
     # Consecutive failed passes; reset on success. Retries stop at MAX_ERROR_ATTEMPTS.

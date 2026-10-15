@@ -2,6 +2,7 @@
 
 import logging
 import re
+from dataclasses import replace
 
 import pytest
 from conftest import make_classification, selects_from
@@ -161,6 +162,28 @@ def test_digest_does_not_repeat_kept_emails_in_needs_reply(setup):
     assert text.count("Approve payment") == 1
     reply = text.split("Piden respuesta")[1]
     assert "Can we meet?" in reply and "Approve payment" not in reply
+
+
+def test_calendar_invitation_stays_in_the_inbox_but_the_digest_leaves_it_out(setup):
+    """ADR 0049: an invitation is kept as an action (ADR 0046) and its calendar method stored,
+    but the digest lists only the other action."""
+    ctx, gmail, account = setup
+    gmail.emails["5"] = email("5", "Bank <alerts@bank.com>", "Approve payment")
+    ctx.classifier.answers["Approve payment"] = make_classification("action_required", 0.7)
+    invite = "Invitation: Vemos Lightspeed @ Thu Oct 15, 2026 4:15pm"
+    gmail.emails["6"] = replace(
+        email("6", "Antonella <antonella@client.com>", invite), calendar_method="REQUEST"
+    )
+    ctx.classifier.answers[invite] = make_classification("action_required", 0.9, needs_reply=0.9)
+    triage.run_account(ctx, account, Mode.ACT)
+    assert all(m[2] == [] for m in gmail.modified if m[0] == "6")  # stays in the inbox
+    with ctx.sessions() as s:
+        rows = {m.gmail_id: m for m in s.query(Message)}
+        assert (rows["6"].category, rows["6"].calendar_method) == ("action_required", "REQUEST")
+        assert rows["5"].calendar_method is None
+        text = digest.build(s, ctx.cfg, account.email, language=DigestLanguage.EN, gmail=gmail)
+    assert "Jev/Action (1)" in text and "Approve payment" in text
+    assert "Vemos Lightspeed" not in text
 
 
 def test_unsubscribe_budget_counts_down_to_exhausted():

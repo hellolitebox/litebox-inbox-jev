@@ -243,19 +243,23 @@ them all, with a line saying the check failed.
 
 It shows: totals per category, how many are in Review and how many were already handled; one section
 per keep category other than `important` (e.g. `Jev/Action`) and the emails that need a reply,
-pending ones only (at most 15 per section); unsubscribes done, pending a manual click (with its
-link), or failed, in full; one line with how many of the period's low-confidence emails are still in
-the inbox with the review label, linking to the Gmail search `label:jev-review in:inbox` (which also
-shows older ones), and one without a link for those a `dry_run` pass left unlabeled; how many
-corrections were learned; and errors. Errors are failed runs (identical ones grouped, e.g. an
-expired Gmail token, with the fix: `run inbox-jev auth add EMAIL`, or "Jev unavailable") and emails
-that stopped being retried. An email that fails is retried with a backoff (5, 10, 20 … minutes) and
-given up after 8 failures, about 10.5 hours (at once when Jev refuses that email with a 4xx; when
-Jev refuses two emails in a row the same way, the run fails and each counts an ordinary failure);
-`inbox-jev retry-errors` retries them again. Failed emails are listed by subject and sender
-(details: [docs/how-it-decides.md §1](how-it-decides.md#1-the-pass-over-an-inbox)). Everything taken
-from an email is escaped for Slack, so a subject can't mention `@channel` or fake a link. Preview it
-with `inbox-jev digest --dry-print` (it reads Gmail too, read-only, for the pending check).
+pending ones only (at most 15 per section); calendar messages (an iTIP part: invitations, updates,
+cancellations, responses) are never listed there nor in the low-confidence line, but still count in
+the totals ([ADR 0049](decisions/0049-digest-leaves-calendar-messages-out.md)), and rows stored
+before the `messages.calendar_method` column existed are listed as before; unsubscribes done,
+pending a manual click (with its link), or failed, in full; one line with how many of the period's
+low-confidence emails are still in the inbox with the review label, linking to the Gmail search
+`label:jev-review in:inbox` (which also shows older ones), and one without a link for those a
+`dry_run` pass left unlabeled; how many corrections were learned; and errors. Errors are failed runs
+(identical ones grouped, e.g. an expired Gmail token, with the fix: `run inbox-jev auth add EMAIL`,
+or "Jev unavailable") and emails that stopped being retried. An email that fails is retried with a
+backoff (5, 10, 20 … minutes) and given up after 8 failures, about 10.5 hours (at once when Jev
+refuses that email with a 4xx; when Jev refuses two emails in a row the same way, the run fails and
+each counts an ordinary failure); `inbox-jev retry-errors` retries them again. Failed emails are
+listed by subject and sender (details:
+[docs/how-it-decides.md §1](how-it-decides.md#1-the-pass-over-an-inbox)). Everything taken from an
+email is escaped for Slack, so a subject can't mention `@channel` or fake a link. Preview it with
+`inbox-jev digest --dry-print` (it reads Gmail too, read-only, for the pending check).
 
 The digest's language is set per account with `digest_language` in `accounts.yaml`: `en` (default)
 or `es`; any other value is rejected when the file is loaded. Category and label names come from

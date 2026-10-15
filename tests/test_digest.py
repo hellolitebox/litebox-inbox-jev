@@ -399,6 +399,34 @@ def _build_low(tmp_path, cfg, rows: list[Message], gmail: FakeGmail) -> str:
         return digest.build(s, cfg, ACCOUNT, language=DigestLanguage.EN, gmail=gmail)
 
 
+def test_calendar_messages_are_counted_but_never_listed(tmp_path, cfg):
+    """ADR 0049: invitations, updates and responses stay out of Action, Needs reply and Low
+    confidence (and their threads aren't read), but count in the summary's totals. A row whose
+    `calendar_method` is None (any email stored before the column existed) is listed."""
+    subjects = {
+        "a1": "Approve payment",
+        "c1": "Invitation: Vemos Lightspeed @ Thu Oct 15",
+        "c2": "Updated invitation: Intradiem - Litebox @ Fri Oct 16",
+        "c3": "Invitation: Maybe sync",
+    }
+    gmail = FakeGmail([email(i, "Ana <ana@client.com>", s) for i, s in subjects.items()])
+    gmail.emails["c3"].label_ids.append(_review_label_id(gmail, cfg))
+    request = {"calendar_method": "REQUEST"}
+    rows = [
+        _row("a1", subjects["a1"], category="action_required"),
+        _row("c1", subjects["c1"], category="action_required", **request),
+        _row("c2", subjects["c2"], decided_labels=[cfg.needs_reply.label], **request),
+        _row("c3", subjects["c3"], category="action_required", low_confidence=True, **request),
+    ]
+    text = _build_low(tmp_path, cfg, rows, gmail)
+    assert "4 processed" in text and "to review: 1" in text
+    assert "*🔔 Jev/Action (1)*" in text and subjects["a1"] in text
+    for gmail_id in ("c1", "c2", "c3"):
+        assert subjects[gmail_id] not in text, gmail_id
+    assert "Needs reply" not in text and "Low confidence" not in text
+    assert gmail.thread_batches == [["ta1"]]
+
+
 def test_low_confidence_without_the_review_label_is_handled(tmp_path, cfg):
     """Removing the review label (kept in the inbox) accepts or corrects the suggestion."""
     gmail = FakeGmail([email(i, "Shop <s@shop.com>", "Guess") for i in ("l1", "l2", "l3")])

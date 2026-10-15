@@ -1211,12 +1211,14 @@ def _upsert_message(
 
 
 def _store_metadata(msg: Message, email: Email, sig: Signals) -> None:
-    """The email's thread, sender (resolved: `signals_for`), From, Subject and date on `msg`."""
+    """The email's thread, sender (resolved: `signals_for`), From, Subject, date and calendar
+    method on `msg`."""
     msg.thread_id = email.thread_id
     msg.sender = sig.sender
     msg.from_header = email.header("From")
     msg.subject = email.header("Subject")
     msg.received_at = datetime.fromtimestamp(email.internal_date_ms / 1000, UTC)
+    msg.calendar_method = email.calendar_method
 
 
 def _record_error(
