@@ -56,11 +56,13 @@ gh api graphql -F owner="$OWNER" -F name="$NAME" -F n=$n -f query='query($owner:
 ```
 
 - **`qa-verdict` is `success` for `$head`**: QA's latest review says `APPROVED` and its `Head:` is
-  this commit (or this commit is that one merged with `main` by `update-branch`). `pending` means
-  the head moved after the review: run another QA round. `failure` means the latest review requested
-  changes.
+  this commit (or this commit is that one merged with `main` by `update-branch`, with no edits or
+  conflict resolutions of its own, ADR 0055). `pending` means the head moved after the review: run
+  another QA round. `failure` means the latest review requested changes.
 - **`BEHIND`**: `gh pr update-branch $n`, then watch the new head's CI run as in step 0 and
-  re-check. The gate accepts the merge commit; no new QA round is needed for it.
+  re-check. The gate accepts a clean merge commit; no new QA round is needed for it. If
+  `update-branch` can't merge (a conflict), the hand-resolved merge needs a QA round like any new
+  commit.
 - **`BLOCKED`, `UNSTABLE`, `DIRTY`**: find the gate that fails (a check, an unresolved thread, a
   conflict) and fix it through the loop (`dev-fixer`), then re-check.
 

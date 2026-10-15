@@ -14,10 +14,11 @@ conventions are the same for a human.
 (`.github/pull_request_template.md`). `/ship <n>` runs the QA ⇄ Dev loop (`qa-reviewer` reviews;
 `dev-fixer` addresses a `CHANGES_REQUESTED` verdict; at most 5 rounds) and the merge gates (green
 CI, a `qa-verdict` of `success` for the head commit, i.e. an `APPROVED` review, by someone with
-write access (ADR 0054), whose `Head:` is this commit, no unresolved review threads, branch up to
-date with `main`), then the squash merge. A Claude Code hook (`scripts/guard_main.py`) refuses
-`--admin`, any push to `main` and edits to the ruleset; the ruleset on GitHub enforces the gates
-either way. The details are in `CLAUDE.md`; the Dependabot and Public Suffix List lanes in `/ship`
+write access (ADR 0054), whose `Head:` is this commit or one that `update-branch` merged cleanly
+with `main` (ADR 0055), no unresolved review threads, branch up to date with `main`), then the
+squash merge. A Claude Code hook (`scripts/guard_main.py`) refuses `--admin`, any push to `main` and
+edits to the ruleset; the ruleset on GitHub enforces the gates either way. The details are in
+`CLAUDE.md`; the Dependabot and Public Suffix List lanes in `/ship`
 (`.claude/skills/ship/SKILL.md`).
 
 ## Checks

@@ -70,3 +70,4 @@ decision changes: add a new one and mark the old one `Superseded by NNNN`.
 | [0052](0052-each-install-brings-its-own-oauth-client.md) | Each install brings its own Google OAuth client; `init` walks through it | Accepted | #63 |
 | [0053](0053-installable-from-pypi-with-a-home-folder.md) | Installable from PyPI, with a home folder and a schedule on the user's computer | Accepted | #64 |
 | [0054](0054-qa-reviews-count-only-from-people-with-write-access.md) | QA reviews count only from people with write access | Accepted | #3 |
+| [0055](0055-an-update-merge-keeps-the-verdict-only-when-git-made-it.md) | An update merge keeps QA's verdict only when git would have made it unchanged | Accepted | #5 |

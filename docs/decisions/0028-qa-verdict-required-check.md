@@ -1,7 +1,9 @@
 # 0028. QA's verdict is a required check tied to the head commit
 
 - Status: Accepted (amended by [0054](0054-qa-reviews-count-only-from-people-with-write-access.md):
-  only reviews by people with write access count)
+  only reviews by people with write access count; and by
+  [0055](0055-an-update-merge-keeps-the-verdict-only-when-git-made-it.md): an update merge keeps the
+  verdict only when its tree is the conflict-free merge of its parents)
 - Date: 2026-10-13
 - PR: #23
 
