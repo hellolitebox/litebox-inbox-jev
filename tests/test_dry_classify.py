@@ -347,3 +347,28 @@ def test_checker_ignores_the_learned_rules_of_a_sender_decided_per_email(
         lead, sale = (checker.decide(gmail.get(i)) for i in ("1", "2"))
     assert (lead.decision.source, lead.decision.category) == ("jev", "action_required")
     assert (sale.decision.source, sale.decision.category) == ("rule", "newsletter")
+
+
+def test_checker_ignores_the_learned_rules_of_a_list_address(cfg, account, make_sessions):
+    """As `run` (ADR 0051): a correction rule on an address doesn't decide an email sent as that
+    list's own address; Jev does."""
+    gmail = FakeGmail(
+        [
+            email(
+                "1",
+                "Hello <hello@groups.example>",
+                "Question",
+                list_post="<mailto:hello@groups.example>",
+            )
+        ]
+    )
+    jev = FakeClassifier({"Question": make_classification("important", 0.96)})
+    sessions = make_sessions("sqlite:///:memory:")
+    with sessions() as session:
+        rules.set_rule(
+            session, account.email, "hello@groups.example", "spam", RuleSource.CORRECTION
+        )
+        session.commit()
+        checker = Checker(session, gmail, jev, cfg, account, Mode.ACT, body_chars=3000)
+        checked = checker.decide(gmail.get("1"))
+    assert (checked.decision.source, checked.decision.category) == ("jev", "important")

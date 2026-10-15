@@ -386,7 +386,8 @@ def unsubscribe_retry(account: AccountOpt = None) -> None:
 
 @senders_app.command("backfill")
 def senders_backfill(account: AccountOpt = None) -> None:
-    """Store the author, not the group, as sender of group mail saved before that was done.
+    """Store the author, not the group, as sender of group mail saved before that was done,
+    and whether the sender is the list's own address (ADR 0051).
 
     Re-reads the headers of stored emails whose From has " via ". Safe to run again. Emails
     deleted in Gmail are skipped; any other Gmail error stops that account (the others go on)
@@ -460,7 +461,32 @@ def rules_set(
     with open_sessions(s.database_url) as sessions, sessions() as session:
         rules.set_rule(session, account, key, category, source=rules.RuleSource.MANUAL)
         session.commit()
+        list_address = _sent_as_list(session, account, key)
     typer.echo(f"{key} → {category}")
+    if list_address:
+        typer.echo(
+            f"note: {key} has sent you mail as a mailing list's own address: this rule decides "
+            "everything the list sends as itself, whoever wrote it (ADR 0051)",
+            err=True,
+        )
+
+
+def _sent_as_list(session: Session, account: str, key: str) -> bool:
+    """Whether a stored email of `account` came from `key` as a mailing list's own address
+    (`Message.sender_is_list`). A manual rule there still decides (ADR 0051), so `rules set`
+    says what it covers."""
+    return (
+        session.scalar(
+            select(Message.id)
+            .where(
+                Message.account == account,
+                Message.sender == key,
+                Message.sender_is_list.is_(True),
+            )
+            .limit(1)
+        )
+        is not None
+    )
 
 
 @rules_app.command("delete")

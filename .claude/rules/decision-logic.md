@@ -78,7 +78,9 @@ not once the PR is polished.
 - Anything keyed on the sender (rules, corrections, `previous_contact`, allowlist) uses
   `triage.signals_for()` (resolved signals), never `Email.extract_signals()` directly. Rules for
   trusted groups (`group_domains`) key on the author; untrusted groups stay keyed on the group
-  address, never on the author they claim.
+  address, never on the author they claim. No learned rule (auto or correction) is made on, or
+  decides, an email sent as a mailing list's own address (`Signals.sender_is_list`,
+  `rules.decided_per_email`, ADR 0051): it carries every member's mail.
 - Every path that can unsubscribe goes through the same checks and respects what the user decided
   since (sender rules, corrections, restore, star): unsubscribes are irreversible. The sender checks
   (category, allowlist, verified, group, known contact) are `policy.unsubscribe_gate` and the mode /

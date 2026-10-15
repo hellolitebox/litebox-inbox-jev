@@ -160,16 +160,21 @@ document, e-signature and tax-portal notices sit close to it, and a lower bar mo
   ([§3.7](how-it-decides.md#37-corrections-user-edits-and-restore)): its next emails skip Jev and
   are moved to Spam in `act` on an account that acts on `spam` (`act_categories`), only labeled
   otherwise. A sender in `decide_each_email` gets no rule
-  ([ADR 0045](decisions/0045-senders-decided-per-email.md)).
+  ([ADR 0045](decisions/0045-senders-decided-per-email.md)), and neither does an email sent as a
+  list's own address ([ADR 0051](decisions/0051-no-learned-rules-on-a-lists-own-address.md)).
 - **Group-relayed phishing**: for a group on the account's `group_domains`, the sender is the author
   (`X-Original-Sender`), so the rule is on the author, never the group, and Jev's `sender_auth` is
   the author's from Google's ARC record, or all `none`, never the group's pass
   ([ADR 0050](decisions/0050-group-relayed-mail-carries-its-authors-authentication.md)). For any
   other group that rewrites `From` to its own address (Gmail's "via"), the sender is the group
-  address: a `Jev/Spam` correction there sends everything the group relays to Spam. Undo it with
-  `inbox-jev rules delete -a you@example.com group@example.com`, and list the group's domain in
-  `group_domains` if it is a Workspace you control
-  ([§3.4](how-it-decides.md#34-groups-and-mailing-lists)).
+  address, which its `List-Post` or `Mailing-list` names as the list's own: the correction fixes
+  that email only, and no learned rule decides the group's mail
+  ([ADR 0051](decisions/0051-no-learned-rules-on-a-lists-own-address.md)). List the group's domain
+  in `group_domains` if it is a Workspace you control, so rules key on the authors
+  ([§3.4](how-it-decides.md#34-groups-and-mailing-lists)). Learned rules on a group address from
+  before ADR 0051 are inert for its list mail; find them with `inbox-jev rules list --all` and
+  `inbox-jev rules delete -a you@example.com group@example.com`. To send all of a group's mail
+  somewhere on purpose, set a manual rule (`rules set` warns that it covers the whole list).
 - **Phishing that rotates addresses** on its own domain:
   `inbox-jev rules set -a you@example.com @attacker.example spam`. Never for a public mail provider,
   an ESP's shared sending domain or a domain you also get real mail from: a `@domain` rule covers
@@ -179,11 +184,12 @@ document, e-signature and tax-portal notices sit close to it, and a lower bar mo
   ARC record only in Google's current layout. If Gmail or Google Groups change what they write,
   those emails lose their verdicts: unverified, so never unsubscribed, and `none` for Jev. A trusted
   group's mail also falls back to the group address as sender, since the author is only recovered
-  when the group's own DMARC passes (`signals.original_sender`): rules and corrections then key on
-  the group, and a `Jev/Spam` correction spams everything it relays. The symptom is unsubscribes
-  stopping for senders that used to pass: only emails that would have been unsubscribed get the
-  `messages` row's `downgraded_to_spam` column ("unsubscribe skipped: unverified") set, the others
-  show nothing. See "Known gaps" in the spec.
+  when the group's own DMARC passes (`signals.original_sender`): that address is the list's own, so
+  no learned rule decides those emails and a correction fixes only the one email (ADR 0051), but Jev
+  and the digest see the group instead of the author. The symptom is unsubscribes stopping for
+  senders that used to pass: only emails that would have been unsubscribed get the `messages` row's
+  `downgraded_to_spam` column ("unsubscribe skipped: unverified") set, the others show nothing. See
+  "Known gaps" in the spec.
 
 ## Changing categories
 

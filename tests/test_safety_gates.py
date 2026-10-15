@@ -67,6 +67,8 @@ def test_acts_on(mode, act_categories, acts):
         ),
         ("marketing", {"is_discussion_list": True}, None, GateResult(Veto.GROUP)),
         ("marketing", {"group_author": "dana@pitchco.io"}, None, GateResult(Veto.GROUP)),
+        # Sent as the list itself, named only by Google Groups' Mailing-list (ADR 0051).
+        ("marketing", {"list_addresses": ("promo@news.shop.com",)}, None, GateResult(Veto.GROUP)),
         # A trusted relay: `dmarc_pass` is the author's (ADR 0050). Passing or not, never.
         (
             "marketing",

@@ -1,6 +1,7 @@
 # 0045. Senders decided per email, and website form leads are an action
 
-- Status: Accepted
+- Status: Accepted (extended to mail sent as a list's own address by
+  [0051](0051-no-learned-rules-on-a-lists-own-address.md))
 - Date: 2026-10-14
 - PR: #54
 

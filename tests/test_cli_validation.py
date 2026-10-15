@@ -151,3 +151,39 @@ def test_reprocess_refuses_an_unknown_category(db):
     result = _invoke("reprocess", "-a", "me@acme.com", "--category", "markting")
     assert result.exit_code == 2
     assert "unknown category 'markting'" in result.output
+
+
+def test_rules_set_warns_on_an_address_seen_as_a_lists_own(db):
+    """A manual rule still decides mail sent as a list's own address (ADR 0051): `rules set`
+    says it then covers everything the list sends as itself. Not for other addresses."""
+    with db() as s:
+        s.add_all(
+            [
+                Message(
+                    account="me@acme.com",
+                    gmail_id="1",
+                    thread_id="t1",
+                    sender="hello@acme.com",
+                    mode="act",
+                    sender_is_list=True,
+                ),
+                Message(
+                    account="me@acme.com",
+                    gmail_id="2",
+                    thread_id="t2",
+                    sender="ana@acme.com",
+                    mode="act",
+                    sender_is_list=False,
+                ),
+            ]
+        )
+        s.commit()
+    listed = _invoke("rules", "set", "-a", "me@acme.com", "hello@acme.com", "newsletter")
+    assert listed.exit_code == 0
+    assert "mailing list's own address" in listed.stderr
+    other = _invoke("rules", "set", "-a", "me@acme.com", "ana@acme.com", "newsletter")
+    assert other.exit_code == 0 and "mailing list" not in other.stderr
+    elsewhere = _invoke("rules", "set", "-a", "you@acme.com", "hello@acme.com", "newsletter")
+    assert elsewhere.exit_code == 0 and "mailing list" not in elsewhere.stderr
+    with db() as s:
+        assert {r.source for r in s.query(SenderRule)} == {"manual"}

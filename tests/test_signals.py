@@ -12,6 +12,7 @@ from inbox_jev.signals import (
     extract,
     is_automated_address,
     is_no_reply_address,
+    list_addresses,
     mailbox_key,
     on_domain,
     parse_list_unsubscribe,
@@ -101,6 +102,55 @@ def test_extract_list_post_marks_discussion_list():
     assert extract({**base, "list-post": ["<mailto:x@l.org>"]}).is_discussion_list
     assert extract({**base, "list-post": ["NO"]}).is_discussion_list  # announce-only list
     assert not extract({**base, "list-post": ["  "]}).is_discussion_list
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({}, ()),
+        ({"list-post": ["<mailto:Team@Lists.Example.org>"]}, ("team@lists.example.org",)),
+        # Google Groups: the posting page, then the address; and its Mailing-list.
+        (
+            {
+                "list-post": [
+                    "<https://groups.google.com/a/acme.com/group/hello/post>, "
+                    "<mailto:hello@acme.com>"
+                ],
+                "mailing-list": ["list hello@acme.com; contact hello+owners@acme.com"],
+            },
+            ("hello@acme.com",),
+        ),
+        ({"list-post": ["<mailto:dev%2Dteam@l.org?subject=hi>"]}, ("dev-team@l.org",)),
+        ({"list-post": ["NO"]}, ()),  # an announce-only list names no address
+        ({"list-post": ["<https://forum.example/post>"]}, ()),
+        ({"list-post": ["<mailto:not an address>"]}, ()),
+        ({"mailing-list": ["list news@acme.com"]}, ("news@acme.com",)),
+        ({"mailing-list": ["contact owners@acme.com"]}, ()),
+        (
+            {"list-post": ["<mailto:a@l.org>, <mailto:b@l.org>"], "mailing-list": ["list a@l.org"]},
+            ("a@l.org", "b@l.org"),
+        ),
+    ],
+)
+def test_list_addresses_from_list_post_and_mailing_list(headers, expected):
+    assert list_addresses(headers) == expected
+
+
+def test_sender_is_list_only_when_from_is_the_lists_own_address():
+    base = {"from": ["Hello <hello@acme.com>"], "list-post": ["<mailto:hello@acme.com>"]}
+    assert extract(base).sender_is_list
+    # A member posting under their own From (Mailman without From munging): not the list.
+    assert not extract({**base, "from": ["Ana <ana@acme.com>"]}).sender_is_list
+    assert not extract({"from": ["Hello <hello@acme.com>"]}).sender_is_list  # direct mail
+
+
+def test_a_trusted_relay_resolved_to_its_author_is_not_the_list():
+    sig = extract(_group_headers(**{"list-post": ["<mailto:hello@acme.com>"]}))
+    assert sig.sender_is_list  # the group's own address, until the author is recovered
+    resolved = resolve_relay(sig, ["acme.com"])
+    assert (resolved.sender, resolved.sender_is_list) == ("david.cohen@techstars.com", False)
+    untrusted = resolve_relay(sig, [])
+    assert (untrusted.sender, untrusted.sender_is_list) == ("hello@acme.com", True)
 
 
 def _group_headers(**over):

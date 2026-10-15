@@ -2,7 +2,8 @@
 
 - Status: Accepted (once the author is the sender, its `dmarc_pass` and Jev's `sender_auth` are the
   author's, from Google's ARC record: amended by
-  [0050](0050-group-relayed-mail-carries-its-authors-authentication.md))
+  [0050](0050-group-relayed-mail-carries-its-authors-authentication.md); mail left keyed on the
+  group's own address learns no rule: [0051](0051-no-learned-rules-on-a-lists-own-address.md))
 - Date: 2026-10-13
 - PR: #13 (QA round 1 blocker; round 2 findings on public providers and suffixes)
 

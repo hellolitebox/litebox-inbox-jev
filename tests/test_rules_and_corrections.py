@@ -483,5 +483,5 @@ def test_check_records_a_listed_senders_correction_without_a_rule(cfg, session, 
     assert {m.corrected_category for m in session.query(Message)} == {"important"}
     assert session.query(SenderRule).count() == 0
     assert [r.getMessage() for r in caplog.records] == [
-        "correction recorded: sender decided per email"
+        "correction recorded: email decided on its own"
     ] * 2

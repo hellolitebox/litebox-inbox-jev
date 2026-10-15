@@ -84,6 +84,11 @@ class Message(Base):
     # (ADR 0049). Rows stored before the column existed (2026-10-15) are None, read as "not a
     # calendar message": they are listed as before.
     calendar_method: Mapped[str | None] = mapped_column(String(32))
+    # The sender was the list's own address (`signals.Signals.sender_is_list`): a correction on
+    # it creates no sender rule (`rules.decided_per_email`, ADR 0051). Rows stored before the
+    # column existed (2026-10-15) are None, read as "not a list's own address" until the email
+    # is processed again.
+    sender_is_list: Mapped[bool | None] = mapped_column(Boolean)
     status: Mapped[str] = mapped_column(String(16), default=MessageStatus.DONE)
     error: Mapped[str | None] = mapped_column(Text)
     # Consecutive failed passes; reset on success. Retries stop at MAX_ERROR_ATTEMPTS.

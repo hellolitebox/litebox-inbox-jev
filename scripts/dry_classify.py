@@ -407,7 +407,7 @@ class Checker:
             (None, None)
             if self.ignore_rules
             else rules.load(self.session, account.email, sig.sender)
-            .deciding(account)
+            .deciding(account, sender_is_list=sig.sender_is_list)
             .match(cfg.by_key)
         )
         calls_before = self._jev.calls

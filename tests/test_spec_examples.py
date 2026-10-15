@@ -2029,3 +2029,61 @@ def test_ex49_phishing_relayed_by_your_own_group_shows_its_authors_authenticatio
         )
     assert posts == [] and gmail.sent == []
     assert "sent via a group, sender_auth is the original sender's" in CATEGORY_INSTRUCTIONS
+
+
+# --- EX-50 -----------------------------------------------------------------------------------
+
+# Gmail's header for the group's copy, with a trailing `;` the strict grammar doesn't accept
+# (ADR 0043): it verifies nothing, so the group's author can't be recovered (ADR 0050).
+_UNPARSED_GROUP_AUTH = (
+    "mx.google.com; dkim=pass header.i=@example.com; "
+    "spf=pass smtp.mailfrom=hello@example.com; dmarc=pass header.from=example.com;"
+)
+
+
+def _sent_as_group(gmail_id, author, subject):
+    return email(
+        gmail_id,
+        f"\"'{author}' via Hello\" <hello@example.com>",
+        subject,
+        x_original_sender=f"{author}@clients.example",
+        mailing_list="list hello@example.com; contact hello+owners@example.com",
+        list_id="<hello.example.com>",
+        list_post="<https://groups.google.com/a/example.com/group/hello/post>, "
+        "<mailto:hello@example.com>",
+        list_unsubscribe="<mailto:googlegroups-manage+1+unsubscribe@googlegroups.com>",
+        authentication_results=_UNPARSED_GROUP_AUTH,
+    )
+
+
+def test_ex50_a_correction_on_mail_sent_as_your_group_teaches_no_rule(spec):
+    """EX-50 (docs/how-it-decides.md §5, §3.5 sender rules, §3.7 corrections, ADR 0051)."""
+    ctx, gmail, account = spec
+    lure = _sent_as_group("1", "dana", "Your mailbox storage is full")
+    sig = triage.signals_for(lure, account)
+    assert (sig.sender, sig.relayed_by, sig.sender_is_list) == ("hello@example.com", None, True)
+    gmail.emails = {"1": lure}
+    ctx.classifier.answers["Your mailbox storage is full"] = answer(
+        "cold_outreach", cold_outreach=0.97
+    )
+    triage.run_account(ctx, account, Mode.ACT)
+    assert _row(ctx, "1").sender_is_list
+
+    gmail.emails["1"].label_ids = ["Label_Jev/Spam"]  # the user's fix: Jev/Spam
+    question = "Question about invoice 7"
+    gmail.emails["2"] = _sent_as_group("2", "ana", question)
+    ctx.classifier.answers[question] = answer("important", important=0.97)
+    triage.run_account(ctx, account, Mode.ACT)
+
+    assert _row(ctx, "1").corrected_category == "spam"
+    with ctx.sessions() as s:
+        assert s.query(SenderRule).count() == 0  # neither the correction nor Jev's answer
+    row = _row(ctx, "2")
+    assert (row.sender, row.source, row.category, row.spammed) == (
+        "hello@example.com",
+        "jev",
+        "important",
+        False,
+    )
+    assert "INBOX" in gmail.emails["2"].label_ids
+    assert [st["subject"] for st in ctx.classifier.states][-1] == question

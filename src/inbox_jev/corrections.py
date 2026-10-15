@@ -90,18 +90,22 @@ def check(session: Session, gmail: LabelReader, account: Account, cfg: Categorie
 def record(session: Session, account: Account, msg: Message, category: str) -> None:
     """Store a detected correction and turn it into a sender rule.
 
-    For a sender the account decides email by email (`Account.decides_each_email`) the
-    correction is stored on the email only: it decides that email if it is processed again
-    (`triage.process`), not the sender's next ones.
+    For an email decided on its own (`rules.decided_per_email`: its sender is in the account's
+    decide_each_email, or it was sent as a mailing list's own address, `msg.sender_is_list`)
+    the correction is stored on the email only: it decides that email if it is processed again
+    (`triage.process`), not the sender's next ones. A row stored before `sender_is_list`
+    existed (None) counts as not a list's own address.
     """
     msg.corrected_category = category
-    learned = not account.decides_each_email(msg.sender)
+    learned = not rules.decided_per_email(
+        account, msg.sender, sender_is_list=bool(msg.sender_is_list)
+    )
     if learned:
         rules.set_rule(
             session, account.email, msg.sender, category, source=rules.RuleSource.CORRECTION
         )
     log.info(
-        "correction learned" if learned else "correction recorded: sender decided per email",
+        "correction learned" if learned else "correction recorded: email decided on its own",
         extra={
             "account": account.email,
             "sender": msg.sender,

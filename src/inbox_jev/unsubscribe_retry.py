@@ -116,7 +116,8 @@ def _retry_one(p: _RetryPass, row: Unsubscribe) -> tuple[str, str]:
         return row.list_key, "held: email deleted in Gmail"
     current = current_label_names(email, p.gmail.labels())
     sig = signals_for(email, account)
-    rule = rule_for(p.ctx, account, rules.load(session, account.email, sig.sender))
+    known = rules.load(session, account.email, sig.sender)
+    rule = rule_for(p.ctx, account, known, sender_is_list=sig.sender_is_list)
     rule_category = rule.category if rule else None
     manual_rule = rules.is_manual(rule)
     if reason := _live_user_decision(cfg, msg, current, rule_category):

@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from .config import Account, Action, CategoriesConfig, DigestLanguage, Mode
 from .db import MAX_ERROR_ATTEMPTS, Message, MessageStatus, Run, Unsubscribe, now
 from .gmail import ThreadMessage
+from .rules import decided_per_email
 from .slack import Digest, Group, Totals, Wording
 from .system_labels import INBOX, SENT
 from .unsubscribe import UnsubscribeMethod, UnsubscribeStatus, describe_http_status
@@ -642,9 +643,10 @@ def _corrections(
     t: DigestMessages, cfg: CategoriesConfig, account: Account, corrected: Sequence[Message]
 ) -> Group | None:
     """The corrections picked up in the period, newest first: sender, the category it had and
-    the one the user gave it (or that the user accepted the suggestion). One for a sender the
-    account decides email by email made no sender rule (`corrections.record`), which the line
-    says. At most MAX_ITEMS, then how many more; None when there are none.
+    the one the user gave it (or that the user accepted the suggestion). One on an email
+    decided on its own (`rules.decided_per_email`: a sender in decide_each_email, or an email
+    sent as a mailing list's own address) made no sender rule (`corrections.record`), which the
+    line says. At most MAX_ITEMS, then how many more; None when there are none.
 
     The sender is code, like the labels: an underscore at the start of an address
     (`_bounce@x.example`) would otherwise open an italic that the line's aside closes."""
@@ -657,7 +659,8 @@ def _corrections(
         else:
             old = code(_label(cfg, m.category))
             text = t["correction"].format(sender=sender, old=old, new=new)
-        return text + (t["this_email_only"] if account.decides_each_email(m.sender) else "")
+        per_email = decided_per_email(account, m.sender, sender_is_list=bool(m.sender_is_list))
+        return text + (t["this_email_only"] if per_email else "")
 
     return _group(t["learned"], corrected, line)
 

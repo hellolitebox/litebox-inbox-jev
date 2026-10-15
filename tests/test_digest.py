@@ -925,6 +925,21 @@ def test_corrections_are_listed_one_per_line(tmp_path, cfg, language, expected):
     assert expected in _build_corrections(tmp_path, cfg, account, rows)
 
 
+def test_a_correction_on_mail_sent_as_a_list_is_this_email_only(tmp_path, cfg):
+    """A correction on an email sent as a list's own address made no sender rule (ADR 0051);
+    one from the same address without the flag (direct, or stored before it) did."""
+    earlier = now() - timedelta(minutes=5)
+    rows = [
+        _corrected("c1", "hello@acme.example", "newsletter", "spam", correction_checked_at=earlier),
+        _corrected("c2", "hello@acme.example", "newsletter", "spam", sender_is_list=True),
+    ]
+    text = _build_corrections(tmp_path, cfg, _account(DigestLanguage.EN), rows)
+    assert (
+        "• `hello@acme.example`: `Jev/Newsletters` → `Jev/Spam` _(this email only)_\n"
+        "• `hello@acme.example`: `Jev/Newsletters` → `Jev/Spam`\n"
+    ) in text
+
+
 def test_corrections_are_escaped_and_capped(tmp_path, cfg):
     """A sender can't mention or link in Slack; past MAX_ITEMS the rest is a count. A category
     no longer in categories.yaml shows its key."""

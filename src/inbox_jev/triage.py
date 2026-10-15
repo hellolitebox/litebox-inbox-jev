@@ -590,11 +590,12 @@ def process(p: AccountPass, message_id: str) -> Message:
     The steps: learn a correction the user made in Gmail since an earlier pass
     (`_learn_correction`) and hand off an email the user edited (`_user_edited`); read the
     sender's rules once (`rules.load`: the rule that decides, `rule_for`, and the row an auto
-    rule is learned on; for a sender in decide_each_email, the email's own correction decides
-    first, `_own_correction`); gather Jev's answer and the sent-mail search (`gather_inputs`);
-    decide and plan (`policy`, pure); apply the labels in Gmail and store the outcome; learn an
-    auto rule; unsubscribe within the run cap. Raises `JevStoppedError`, before changing anything,
-    when the email needs Jev's decision and `p.jev` has stopped.
+    rule is learned on; for an email decided on its own, `rules.decided_per_email`, the
+    email's own correction decides first, `_own_correction`); gather Jev's answer and the
+    sent-mail search (`gather_inputs`); decide and plan (`policy`, pure); apply the labels in
+    Gmail and store the outcome; learn an auto rule; unsubscribe within the run cap. Raises
+    `JevStoppedError`, before changing anything, when the email needs Jev's decision and
+    `p.jev` has stopped.
     """
     ctx, session, account, mode = p.ctx, p.session, p.account, p.mode
     timer = StageTimer()
@@ -607,6 +608,7 @@ def process(p: AccountPass, message_id: str) -> Message:
     counted_before = _counted_toward_auto_rule(prev)
     if prev is not None:
         prev.sender = sig.sender  # rows stored before group authors were recovered
+        prev.sender_is_list = sig.sender_is_list  # rows stored before the column existed
         # In dry_run, or before any label of ours is in Gmail (labels_added), nothing to compare.
         if mode != Mode.DRY_RUN and prev.labels_added:
             current = current_label_names(email, p.label_ids)
@@ -616,7 +618,7 @@ def process(p: AccountPass, message_id: str) -> Message:
 
     with timer.stage("lookup"):
         known = rules.load(session, account.email, sig.sender)
-        rule = rule_for(ctx, account, known)
+        rule = rule_for(ctx, account, known, sender_is_list=sig.sender_is_list)
     own_correction = _own_correction(ctx.cfg, account, sig, prev)
     rule_category = own_correction or (rule.category if rule else None)
     manual_rule = own_correction is None and rules.is_manual(rule)
@@ -834,21 +836,22 @@ def _learn_auto_rule(
 ) -> None:
     """Count Jev's decision toward an auto rule for the sender (`rules.record_auto`).
 
-    Only Jev's own decisions count, not in dry_run and not for a sender the account decides
-    email by email (decide_each_email: never learned, any pending rule left as it is). A rule
-    learned in dry_run would apply
-    without Jev (and act) as soon as the mode is label or act. An email Jev's answer was already
-    learned from (`counted_before`: processed again in a stronger mode, or after `reprocess`)
-    adds no hit: an auto rule needs that many different emails. Its new answer can still reset a
-    pending rule. `known` is the sender's rules `process` read for this email. `calendar`: the
-    email is a calendar message (`Email.calendar_method`), which never counts.
+    Only Jev's own decisions count, not in dry_run and not for an email decided on its own
+    (`rules.decided_per_email`: a sender in decide_each_email, or an email sent as a mailing
+    list's own address; never learned, any pending rule left as it is). A rule learned in
+    dry_run would apply without Jev (and act) as soon as the mode is label or act. An email
+    Jev's answer was already learned from (`counted_before`: processed again in a stronger mode,
+    or after `reprocess`) adds no hit: an auto rule needs that many different emails. Its new
+    answer can still reset a pending rule. `known` is the sender's rules `process` read for this
+    email. `calendar`: the email is a calendar message (`Email.calendar_method`), which never
+    counts.
     """
     classification = inputs.classification
     if (
         classification
         and decision.source == DecisionSource.JEV
         and p.mode != Mode.DRY_RUN
-        and not p.account.decides_each_email(sig.sender)
+        and not rules.decided_per_email(p.account, sig.sender, sender_is_list=sig.sender_is_list)
     ):
         rules.record_auto(
             p.session,
@@ -867,14 +870,18 @@ def _learn_auto_rule(
 def _own_correction(
     cfg: CategoriesConfig, account: Account, sig: Signals, prev: Message | None
 ) -> str | None:
-    """The category the user corrected this email to, when its sender is in decide_each_email.
+    """The category the user corrected this email to, when the email is decided on its own
+    (`rules.decided_per_email`: its sender is in decide_each_email, or it was sent as a mailing
+    list's own address).
 
     Such a correction is learned as no sender rule (`corrections.record`), so it decides this
     email alone when it is processed again (a stronger mode, or `reprocess`), as a correction
-    rule would. None for other senders (their correction rule decides) and for a category since
-    removed from categories.yaml.
+    rule would. None for other emails (their sender's correction rule decides) and for a
+    category since removed from categories.yaml.
     """
-    if prev is None or not account.decides_each_email(sig.sender):
+    if prev is None or not rules.decided_per_email(
+        account, sig.sender, sender_is_list=sig.sender_is_list
+    ):
         return None
     category = prev.corrected_category
     return category if category in cfg.by_key else None
@@ -949,16 +956,19 @@ def flags_classification(
     return None
 
 
-def rule_for(ctx: Context, account: Account, known: rules.SenderRules) -> SenderRule | None:
+def rule_for(
+    ctx: Context, account: Account, known: rules.SenderRules, *, sender_is_list: bool
+) -> SenderRule | None:
     """The sender's rule (`rules.SenderRules.match`), from their rules `known` (`rules.load`)
     that may decide in `account` (`rules.SenderRules.deciding`: only a manual one for a sender
-    in decide_each_email): None when its first rule points to a removed category.
+    in decide_each_email, or for an email sent as a mailing list's own address,
+    `sender_is_list`): None when its first rule points to a removed category.
 
     Such a rule makes Jev decide (never the @domain rule behind it) and is logged once per
     invocation, so the user can `rules delete` it or restore the category. It stays in the DB:
     the category may come back, and a manual or correction rule can't be relearned.
     """
-    rule, stale = known.deciding(account).match(ctx.cfg.by_key)
+    rule, stale = known.deciding(account, sender_is_list=sender_is_list).match(ctx.cfg.by_key)
     if stale is not None and (account.email, stale.sender_key) not in ctx.stale_rules_logged:
         ctx.stale_rules_logged.add((account.email, stale.sender_key))
         log.warning(
@@ -982,16 +992,25 @@ def signals_for(email: Email, account: Account) -> Signals:
     return resolve_relay(email.extract_signals(), account.group_domains)
 
 
-# Headers signals_for needs to recover a group's author (see signals.original_sender).
-_SENDER_HEADERS = ["From", "Authentication-Results", "Mailing-list", "X-Original-Sender"]
+# Headers signals_for needs to recover a group's author (see signals.original_sender) and to
+# tell mail sent as a list's own address (`Signals.sender_is_list`: List-Post, Mailing-list).
+_SENDER_HEADERS = [
+    "From",
+    "Authentication-Results",
+    "Mailing-list",
+    "X-Original-Sender",
+    "List-Post",
+]
 
 
 def backfill_senders(session: Session, gmail: GmailApi, account: Account) -> tuple[int, int, int]:
-    """Re-read headers of stored group mail ("… via …" in From) and store its author as sender.
+    """Re-read headers of stored group mail ("… via …" in From) and store its author as sender,
+    and whether that sender is the list's own address (`Signals.sender_is_list`).
 
     For rows saved before group authors were recovered, so corrections on them create rules on
-    the author, not the group. Idempotent. Skips only emails Gmail no longer has (HTTP 404); any
-    other error (auth, quota, 5xx) is raised. Returns (rows checked, updated, skipped).
+    the author, not the group, and none on the group's own address. Idempotent. Skips only
+    emails Gmail no longer has (HTTP 404); any other error (auth, quota, 5xx) is raised.
+    Returns (rows checked, updated, skipped).
     """
     rows = session.scalars(
         select(Message).where(
@@ -1008,9 +1027,9 @@ def backfill_senders(session: Session, gmail: GmailApi, account: Account) -> tup
             log.warning("backfill: email deleted", extra={"account": account.email})
             skipped += 1
             continue
-        sender = signals_for(email, account).sender
-        if sender and sender != msg.sender:
-            msg.sender = sender
+        sig = signals_for(email, account)
+        if sig.sender and (sig.sender, sig.sender_is_list) != (msg.sender, msg.sender_is_list):
+            msg.sender, msg.sender_is_list = sig.sender, sig.sender_is_list
             updated += 1
     session.commit()
     return len(rows), updated, skipped
@@ -1211,10 +1230,11 @@ def _upsert_message(
 
 
 def _store_metadata(msg: Message, email: Email, sig: Signals) -> None:
-    """The email's thread, sender (resolved: `signals_for`), From, Subject, date and calendar
-    method on `msg`."""
+    """The email's thread, sender (resolved: `signals_for`) and whether it is a list's own
+    address (`Signals.sender_is_list`), From, Subject, date and calendar method on `msg`."""
     msg.thread_id = email.thread_id
     msg.sender = sig.sender
+    msg.sender_is_list = sig.sender_is_list
     msg.from_header = email.header("From")
     msg.subject = email.header("Subject")
     msg.received_at = datetime.fromtimestamp(email.internal_date_ms / 1000, UTC)

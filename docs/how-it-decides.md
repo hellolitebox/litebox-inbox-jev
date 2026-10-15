@@ -149,12 +149,12 @@ flowchart TD
     A["Fetch the full message (gmail.get)<br/>headers, body (extract_body), snippet"] --> B["Signals from headers (signals.extract)<br/>then resolve_relay with group_domains"]
     B --> C{"Row seen in an earlier label/act pass<br/>and mode is not dry_run?"}
     C -- yes --> D{"Changed Jev category label<br/>or pulled back to INBOX?"}
-    D -- yes --> D2["Record correction<br/>(sender rule, source correction;<br/>on the email only for a sender in decide_each_email)"]
+    D -- yes --> D2["Record correction<br/>(sender rule, source correction;<br/>on the email only for a sender in decide_each_email<br/>or an email sent as a list's own address)"]
     D -- no --> E
     D2 --> E{"User edit?<br/>starred, our label removed,<br/>another Jev label added"}
     E -- yes --> STOP["Hands off: mark done, change nothing in Gmail"]
     E -- no --> F
-    C -- no --> F["Look up sender rule: the first active one decides (exact address, then @domain);<br/>if its category was removed from categories.yaml, no rule (never the @domain one behind it);<br/>a sender in decide_each_email: manual rules only, and its own correction decides the email"]
+    C -- no --> F["Look up sender rule: the first active one decides (exact address, then @domain);<br/>if its category was removed from categories.yaml, no rule (never the @domain one behind it);<br/>a sender in decide_each_email, or an email sent as a list's own address:<br/>manual rules only, and its own correction decides the email"]
     F --> G{"Allowlisted?<br/>author in allow_senders/allow_domains,<br/>or group address in allow_senders"}
     G -- yes --> FL["Ask Jev for the flags only<br/>(Needs Reply, tags; no previous_contact);<br/>if the call fails, decide without them (warning)"]
     G -- no --> H{"Active sender rule?"}
@@ -170,7 +170,7 @@ flowchart TD
     DEC["policy.decide<br/>allowlist / rule / threshold / archive group / Review<br/>+ Needs Reply and tag labels"] --> PL["policy.plan<br/>mode + act_categories"]
     PL --> AP["Gmail modify: add labels, remove INBOX (archive/spam),<br/>add SPAM, drop stale labels from an earlier pass"]
     AP --> DB["Store the row (category, confidence, probabilities, labels...)"]
-    DB --> AR{"Jev decided (not allowlist or rule),<br/>mode is not dry_run and sender<br/>not in decide_each_email?"}
+    DB --> AR{"Jev decided (not allowlist or rule),<br/>mode is not dry_run, sender<br/>not in decide_each_email and<br/>not sent as a list's own address?"}
     AR -- yes --> AR2["rules.record_auto<br/>(count toward / reset an auto rule;<br/>each email counts once)"]
     AR -- no --> U
     AR2 --> U{"plan.unsubscribe and run budget left?"}
@@ -192,7 +192,7 @@ flowchart TD
     L -- yes --> N
     L -- no --> C{"Verified: DMARC pass<br/>and a List-Unsubscribe header?"}
     C -- no --> N1["Archive only<br/>(unsubscribe_skipped_unverified)"]
-    C -- yes --> D{"Group or discussion list?<br/>List-Post, Google Groups target,<br/>relayed by a group, own-domain sender or list"}
+    C -- yes --> D{"Group or discussion list?<br/>List-Post, Google Groups target,<br/>relayed by a group, sent as a list,<br/>own-domain sender or list"}
     D -- yes --> N
     D -- no --> E{"Category spares known contacts<br/>and previous_contact is<br/>wrote_to_sender / wrote_to_their_domain?"}
     E -- yes --> N2["Archive only (known_contact_kept)"]
@@ -324,7 +324,7 @@ An unsubscribe is irreversible. During `run` it happens only when **all** of the
 | 2 | Decided by a sender rule, or by Jev at or above the category threshold. An archive-group or Review decision never unsubscribes | `policy.decide` |
 | 3 | **Not a sender decided per email** ([3.5](#35-sender-rules)) unless a **manual** rule decided the email: Jev's answer, the email's own correction or a stored decision never unsubscribe a sender in `decide_each_email` (`Veto.DECIDED_EACH_EMAIL`; [EX-45](#ex-45--a-sender-decided-per-email-is-unsubscribed-only-on-a-manual-rule)). The email keeps its category and is archived | `policy.unsubscribe_gate` |
 | 4 | **Verified**: `dmarc=pass` in Gmail's own `Authentication-Results` ([4.2](#42-dmarc)), for a trusted group's author in Google's ARC record of what the group received ([4.2](#42-dmarc)), and a `List-Unsubscribe` header with an `https:` or `mailto:` URI (an `http:`-only header counts as none, [4.3](#43-list-unsubscribe-one-click-and-mailto)). If not, the email keeps its category, is archived, and `unsubscribe_skipped_unverified` is set. It is never moved to Spam for this | `policy.unsubscribe_gate` |
-| 5 | **Not a group or discussion list** (`_group_list`): no `List-Post` header; no unsubscribe target on `googlegroups.com` / `groups.google.com` (host or subdomain); not relayed by a Google Group (`group_author` found, trusted or not); sender domain and `List-Id` not on the account's own domain (or a subdomain) | `policy.unsubscribe_gate` |
+| 5 | **Not a group or discussion list** (`_group_list`): no `List-Post` header; no unsubscribe target on `googlegroups.com` / `groups.google.com` (host or subdomain); not relayed by a Google Group (`group_author` found, trusted or not); not sent as a list's own address (`sender_is_list`, [3.5](#35-sender-rules)), which Google Groups' `Mailing-list` alone can name; sender domain and `List-Id` not on the account's own domain (or a subdomain) | `policy.unsubscribe_gate` |
 | 6 | For a category with `unsubscribe_known_contacts: false` (`cold_outreach`): `previous_contact` is not `wrote_to_sender` / `wrote_to_their_domain` (`known_contact_kept` otherwise). Unknown (`None`, the search failed or wasn't run) does **not** block it: deliberate, so that one failed search doesn't stop every outreach unsubscribe ([ADR 0011](decisions/0011-never-unsubscribe-groups-or-known-contacts.md), re-confirmed by the maintainer on 2026-10-14; `unsubscribe-retry` holds the row instead) | `policy.unsubscribe_gate` |
 | 7 | Mode is `act`, and the account has no `act_categories` or lists the category | `policy.acts_on`, from `policy.plan` |
 | 8 | The run's budget (`MAX_UNSUBSCRIBES_PER_RUN`, 20) has attempts left | `triage.process` |
@@ -353,7 +353,7 @@ fewer than 3 attempts against the email's current state, with the same `acts_on`
 | Email deleted (404) | n/a | held; any other Gmail error is raised |
 | `SPAM` or `TRASH` label in Gmail | n/a | `skipped` |
 | Correction visible in live labels, or a user edit (starred, our label removed, another Jev label added) | Correction learned / hands off | `skipped` |
-| Category | Current rule, else Jev | Current rule (if its category exists), else the stored category. For a sender in `decide_each_email` only a manual rule counts ([3.5](#35-sender-rules)): an `auto` or `correction` rule is ignored, so a row it decided is held (`rule since removed`) and one to a keep category doesn't skip the row |
+| Category | Current rule, else Jev | Current rule (if its category exists), else the stored category. For a sender in `decide_each_email`, or an email sent as a list's own address, only a manual rule counts ([3.5](#35-sender-rules)): an `auto` or `correction` rule is ignored, so a row it decided is held (`rule since removed`) and one to a keep category doesn't skip the row |
 | Current rule points to a non-unsubscribing category | Rule decides | `skipped` |
 | Stored category from a rule that was since deleted | Jev is asked again | held: `rule since removed` |
 | Stored Jev category | Jev's fresh answer vs threshold | Stored confidence must still be ≥ the current threshold (account override included) and not `low_confidence`; else held |
@@ -373,9 +373,9 @@ Held rows stay `failed`.
 | -- | -- | -- | -- |
 | Direct mail | `From` address | `from` header | Per [3.3](#33-unsubscribe-conditions) |
 | Google Group on a domain in the account's `group_domains`, with the [trust checks](#45-x-original-sender-trust) passing | The author (`X-Original-Sender`); `relayed_by` = group address | adds `original_sender` and `sent_via_group` | **Never** |
-| Google Group on any other domain (incl. `@googlegroups.com`, public providers), or trust checks failing | The group address (`From`) | `from` header only | **Never** if `X-Original-Sender` was a candidate, a `List-Post` is present, the target is Google Groups, or the group is on your own domain; else per 3.3 |
-| Mail the group itself sends (held-spam report, moderation notice): no `X-Original-Sender` | The group address | `from` header | Per 3.3; never for a group on your own domain |
-| Other discussion lists (Mailman, groups.io, LISTSERV, Discourse) | `From` (the list) | `from` header | **Never** (`List-Post`) |
+| Google Group on any other domain (incl. `@googlegroups.com`, public providers), or trust checks failing | The group address (`From`), sent as the list: no learned rule decides it ([3.5](#35-sender-rules)) | `from` header only | **Never** if `X-Original-Sender` was a candidate, a `List-Post` is present, the target is Google Groups, or the group is on your own domain; else per 3.3 |
+| Mail the group itself sends (held-spam report, moderation notice): no `X-Original-Sender` | The group address (sent as the list when `Mailing-list` or `List-Post` names it) | `from` header | Per 3.3; never for a group on your own domain |
+| Other discussion lists (Mailman, groups.io, LISTSERV, Discourse) | `From`: the author when the list keeps it, else the list (sent as the list when it is the `List-Post` address) | `from` header | **Never** (`List-Post`) |
 | ESP / sequence tool (Mailchimp, Instantly…) | `From` | `from` header | Per 3.3 (they don't send `List-Post`) |
 
 - `group_domains` is opt-in and empty by default, not even the account's own domain. Entries are
@@ -396,7 +396,10 @@ Held rows stay `failed`.
   For an untrusted group the sender is the group address, so an `allow_domains` entry for the
   group's domain allowlists everything sent through it.
 - Rules and corrections for a trusted group key on the author; untrusted groups stay keyed on the
-  group address, never on the author they claim.
+  group address, never on the author they claim. An email whose sender is the group's or list's own
+  address (trust checks failing, an untrusted group, a list's own notice) learns no rule and no
+  learned rule decides it ([3.5](#35-sender-rules), "Mail sent as a list's own address"): that
+  address carries every member's mail.
 - `list_key` (once per list) is `List-Id`, else the sender domain.
 
 ### 3.5 Sender rules
@@ -436,6 +439,27 @@ Held rows stay `failed`.
   See [EX-44](#ex-44--a-sender-decided-per-email-keeps-its-leads-and-archives-its-fyis),
   [EX-45](#ex-45--a-sender-decided-per-email-is-unsubscribed-only-on-a-manual-rule) and
   [ADR 0045](decisions/0045-senders-decided-per-email.md).
+
+- **Mail sent as a list's own address** (`Signals.sender_is_list`): the resolved sender equals an
+  address the email's own headers give the list, exactly: a `mailto:` address of `List-Post`
+  ([4.4](#44-list-post)) or the address in Google Groups' `Mailing-list: list <address>`. That
+  happens when a group's author isn't recovered ([4.5](#45-x-original-sender-trust): Gmail's header
+  doesn't parse, no `X-Original-Sender`, a group outside `group_domains` that rewrites `From`), for
+  a list's own notices, and for an announcement list sending as itself. Such an address carries
+  every member's mail, so the email is decided on its own, exactly like a sender in
+  `decide_each_email` above (`rules.decided_per_email`; `run`, `unsubscribe-retry` and
+  `dry_classify.py`): learned rules on the address are ignored, none is learned or counted, a
+  correction stays on the email ("(this email only)" in the digest), and a manual rule still
+  decides. `rules set` on an address stored as a list's own prints a note on stderr that the rule
+  covers everything the list sends as itself. A trusted relay resolved to its author isn't sent as
+  the list, and neither is mail from the same address without list headers (a person writing from a
+  shared mailbox): a rule on the address still decides that. It is never unsubscribed: it is a group
+  ([3.3](#33-unsubscribe-conditions), condition 5). Colleagues on a `group_domains` domain keep
+  their rules: only the list's own address is concerned. An ESP's newsletter names no `List-Post`
+  and keeps learning rules. Each row stores the flag (`messages.sender_is_list`) for
+  `corrections.check`; rows stored before it existed are `NULL`, read as not sent as the list. See
+  [EX-50](#ex-50--a-correction-on-mail-sent-as-your-group-teaches-no-rule) and
+  [ADR 0051](decisions/0051-no-learned-rules-on-a-lists-own-address.md).
 
 - A rule decision has source `rule` and confidence 1.0, and no `previous_contact` unless the
   unsubscribe needs it.
@@ -539,10 +563,10 @@ only sends more mail to Jev. See
 | Two or more category labels, or none, and not pulled back | none |
 
 A correction sets `corrected_category` on the row and a `correction` sender rule (active) on the
-row's stored sender. For a sender in the account's `decide_each_email` ([3.5](#35-sender-rules))
-there is no rule: the correction decides that email alone when it is processed again (a stronger
-mode, or `reprocess`; `triage._own_correction`), and the sender's next emails go to Jev. It is
-checked in two places:
+row's stored sender. For a sender in the account's `decide_each_email`, or an email sent as a list's
+own address (the row's `sender_is_list`; [3.5](#35-sender-rules)), there is no rule: the correction
+decides that email alone when it is processed again (a stronger mode, or `reprocess`;
+`triage._own_correction`), and the sender's next emails go to Jev. It is checked in two places:
 
 - `corrections.check`, at the start of every `label`/`act` run: rows that are `done`, not `dry_run`,
   not restored, not yet corrected, processed in the last **7 days**, and not checked in the last
@@ -556,7 +580,7 @@ and never in `dry_run`):
 | Edit | Result |
 | -- | -- |
 | Email is starred | Hands off, **even after a correction** |
-| Row has a correction | Processed again: the new correction rule decides (for a sender in `decide_each_email`, the email's own correction) |
+| Row has a correction | Processed again: the new correction rule decides (for a sender in `decide_each_email` or an email sent as a list's own address, the email's own correction) |
 | A label we added (other than `Jev/Processed`) was removed | Hands off |
 | A Jev label we didn't add (category, `Jev/Needs Reply`, `Jev/Review`, tag) is present | Hands off |
 
@@ -838,6 +862,12 @@ Any non-empty `List-Post` header marks a discussion list (RFC 2369; set by Googl
 groups.io, LISTSERV, Discourse; not by ESPs or sequence tools). Its `List-Unsubscribe` would remove
 *you* from the list, so it is never used.
 
+Its `mailto:` addresses (`signals.list_addresses`; query and percent-encoding removed, lowercased,
+plain addresses only), with the address of Google Groups' `Mailing-list: list <address>`, are the
+list's own addresses: an email whose resolved sender is one of them is sent as the list
+([3.5](#35-sender-rules)). `List-Post: NO` (an announce-only list) and `https:` posting pages name
+none. `List-Id` isn't used: it is a dotted identifier (`<hello.acme.com>`), not an address.
+
 ### 4.5 `X-Original-Sender` trust
 
 `signals.original_sender` records a candidate author (`group_author`) only when:
@@ -849,7 +879,9 @@ groups.io, LISTSERV, Discourse; not by ESPs or sequence tools). Its `List-Unsubs
 
 `signals.resolve_relay` then moves the candidate into `sender` (and the group into `relayed_by`)
 only when the `From` domain is one of the account's `group_domains` or a subdomain of one. Any
-candidate, trusted or not, makes the email a group for the unsubscribe check.
+candidate, trusted or not, makes the email a group for the unsubscribe check. When a check fails,
+the sender stays the group's address, which is the list's own address: no learned rule decides the
+email and none is learned from it ([3.5](#35-sender-rules)).
 
 The first check reads the group's own DMARC, as Gmail's header gives it; the author's authentication
 never takes part in it. Once the author is the sender, `dmarc_pass` and Jev's `sender_auth` become
@@ -1787,6 +1819,27 @@ probabilities that matter are shown; the rest are ~0.
   [ADR 0050](decisions/0050-group-relayed-mail-carries-its-authors-authentication.md)). As in EX-38,
   the test pins the state and the outcome of Jev's answer, not the judgement.
 
+### EX-50 — A correction on mail sent as your group teaches no rule
+
+- **Test**: `test_ex50_a_correction_on_mail_sent_as_your_group_teaches_no_rule`
+- **Input**: `group_domains: [example.com]`. "Your mailbox storage is full" from
+  `"'dana' via Hello" <hello@example.com>`, a Google Group relay (`X-Original-Sender`,
+  `Mailing-list: list hello@example.com`, `List-Post` with the group's posting page and
+  `mailto:hello@example.com`), but Gmail's `Authentication-Results` ends in a `;` the strict grammar
+  doesn't accept. Jev: cold_outreach 0.97. In `act` it is archived; the user then labels it
+  `Jev/Spam`. Next run, a client's "Question about invoice 7" arrives through the same group, with
+  the same header (Jev: important 0.97).
+- **Outcome**: the header verifies nothing, so the author isn't recovered: both rows have
+  `hello@example.com` as sender and `sender_is_list` set. The correction is stored on the first
+  email (`corrected_category = spam`) and no sender rule exists, neither from it nor from Jev's
+  confident answers. The client's question goes to Jev and stays in the inbox as `important`; it
+  isn't spammed.
+- **Why**: before, the correction made a rule `hello@example.com → spam`, which would have sent
+  everything the group relays, the client's question included, to Spam without asking Jev. The
+  group's address carries every member's mail; no rule learned from some of it may decide the next
+  one ([3.5](#35-sender-rules),
+  [ADR 0051](decisions/0051-no-learned-rules-on-a-lists-own-address.md)).
+
 ## 6. Glossary
 
 - **Action**: what a category does: `keep`, `archive`, `archive_unsubscribe`, `spam`.
@@ -1799,10 +1852,12 @@ probabilities that matter are shown; the rest are ~0.
   unsubscribes or spams. `Decision.archive_group`, logged, not stored.
 - **Auto rule**: a sender rule created by `record_auto` after `auto_rule.hits` consistent answers.
 - **Correction**: a change you made in Gmail (another category label, back to the inbox) that
-  becomes a `correction` sender rule (for a sender in `decide_each_email`, decides that email only).
+  becomes a `correction` sender rule (for a sender in `decide_each_email` or an email sent as a
+  list's own address, decides that email only).
 - **Decided per email**: a sender in the account's `decide_each_email`: Jev decides each of its
   emails; no rule is learned for it, only a manual rule applies, and only a manual rule can
-  unsubscribe it.
+  unsubscribe it. An email sent as a list's own address is decided the same way (and never
+  unsubscribed).
 - **`downgraded_to_spam`**: historical name of the `messages` column that stores
   `unsubscribe_skipped_unverified` (kept to avoid a migration).
 - **Flags-only call**: the Jev call for an allowlisted email or one decided by a rule to a keep
@@ -1819,6 +1874,9 @@ probabilities that matter are shown; the rest are ~0.
 - **Group author / relayed_by**: the person who wrote to a Google Group, and the group address, when
   the group is trusted (`group_domains`).
 - **Hands off**: an email you edited is left as it is and not revisited in that mode.
+- **List's own address / sent as the list**: an address the email's `List-Post` (`mailto:`) or
+  Google Groups' `Mailing-list` names; an email whose resolved sender is one is sent as the list
+  (`sender_is_list`) and decided per email.
 - **Machine address**: an address no person reads (`signals.is_automated_address`,
   [4.8](#48-machine-and-no-reply-addresses)): writing to one doesn't make a known contact.
 - **No-reply email**: the sender is a no-reply address and so is every `Reply-To`
@@ -1899,19 +1957,19 @@ Behaviour found while writing this spec, documented as it is today:
   inbox with `Jev/Review` ([3.2](#32-confidence-outcomes-jev-path)); when Jev's answer was `spam` it
   already has `Jev/Spam`, so the user's correction is removing `Jev/Review` (keeping both teaches
   nothing). That correction is a rule on the exact resolved sender
-  ([3.7](#37-corrections-user-edits-and-restore)): the author for a trusted group, the group address
-  for any other group that rewrites `From` to its own (Gmail's "via"; it then spams all the group's
-  relayed mail, [3.4](#34-groups-and-mailing-lists)); phishing that changes address escapes it.
-  `reply_without_thread` is also set for a genuine forward from a client that leaves out
-  `In-Reply-To` and `References`, so the criteria present it as one sign among others.
-  `link_domains` sees the link as written: an ESP that rewrites every link through its click tracker
-  shows only the tracker's domain, and a lure's single link can fall outside the 8 most frequent
-  domains of a long newsletter. In plain-text parts only `http://` and `https://` URLs are found
-  (the WHATWG forms are read in `href`s). On a private suffix (`github.io`, `workers.dev`) a link
-  domain keeps the site's own label, which can name a person or carry a per-recipient token
-  ([4.6](#46-body-extraction)). The host mapping is UTS #46's ignored code points, NFKC and IDNA's
-  full stops, not the whole UTS #46 table (its few other non-NFKC mappings, such as deviation
-  characters, are left as written).
+  ([3.7](#37-corrections-user-edits-and-restore)): the author for a trusted group. For any other
+  group that rewrites `From` to its own address (Gmail's "via") the sender is the group, sent as the
+  list, so the correction fixes that email only and the group's next phishing goes to Jev again
+  ([3.5](#35-sender-rules)). Phishing that changes address escapes it. `reply_without_thread` is
+  also set for a genuine forward from a client that leaves out `In-Reply-To` and `References`, so
+  the criteria present it as one sign among others. `link_domains` sees the link as written: an ESP
+  that rewrites every link through its click tracker shows only the tracker's domain, and a lure's
+  single link can fall outside the 8 most frequent domains of a long newsletter. In plain-text parts
+  only `http://` and `https://` URLs are found (the WHATWG forms are read in `href`s). On a private
+  suffix (`github.io`, `workers.dev`) a link domain keeps the site's own label, which can name a
+  person or carry a per-recipient token ([4.6](#46-body-extraction)). The host mapping is UTS #46's
+  ignored code points, NFKC and IDNA's full stops, not the whole UTS #46 table (its few other
+  non-NFKC mappings, such as deviation characters, are left as written).
 - Reading `Authentication-Results` per RFC 8601 ([4.2](#42-dmarc)) relies on Gmail writing the
   envelope sender and HELO name as SMTP accepted them: an unquoted local part can't hold `;`, `(`,
   `)`, `"`, `\`, `[` or `]` (RFC 5321 refuses it at `MAIL FROM`), a quoted one keeps its quotes and
@@ -1922,10 +1980,11 @@ Behaviour found while writing this spec, documented as it is today:
 - The grammar is strict (an allowlist): if Gmail starts writing something it doesn't accept (a new
   SPF, DKIM or DMARC result word, a trailing `;`), those emails lose their verdicts, unverified and
   never unsubscribed, until the grammar is widened. A trusted group's mail also falls back to the
-  group address as sender (`original_sender` needs the group's own `dmarc_pass`), so rules and
-  corrections key on the group: a `Jev/Spam` correction then spams everything it relays. Only emails
-  that would have been unsubscribed show it (`unsubscribe_skipped_unverified`). Every shape Gmail
-  wrote on 400 recent production emails parses (`test_real_gmail_header_shapes_parse`).
+  group address as sender (`original_sender` needs the group's own `dmarc_pass`): sent as the list,
+  it learns no rule and no learned rule decides it ([3.5](#35-sender-rules)), so a correction fixes
+  that email only, but Jev sees the group instead of the author. Only emails that would have been
+  unsubscribed show it (`unsubscribe_skipped_unverified`). Every shape Gmail wrote on 400 recent
+  production emails parses (`test_real_gmail_header_shapes_parse`).
 - A trusted group's author is authenticated from Google's ARC record ([4.2](#42-dmarc)), which
   relies on Google's layout: Google Groups' two identical records just below Gmail's own delivery
   set, all three sealed by `google.com`, the records' `header.from` being exactly
@@ -1941,9 +2000,19 @@ Behaviour found while writing this spec, documented as it is today:
   on another domain than the author's `From` (it copies `From` today), that author would be unknown
   too.
 - The rules `decide_each_email` ignores ([3.5](#35-sender-rules)) still show in `rules list`, and
-  decide again if the sender leaves the list. `dry_classify.py` asks Jev for an email of such a
-  sender that you corrected, where a `run` in a stronger mode would apply the correction (with
-  `--reference`, which ignores every rule, that is the point).
+  decide again if the sender leaves the list. So do learned rules on a list's own address made
+  before ADR 0051: inert for mail sent as the list, they still decide that address's mail without
+  list headers; `rules delete` them. `dry_classify.py` asks Jev for an email you corrected whose
+  sender is in `decide_each_email`, or that was sent as a list's own address, where a `run` in a
+  stronger mode would apply the correction (with `--reference`, which ignores every rule, that is
+  the point).
+- "Sent as the list" trusts the email's own `List-Post` and `Mailing-list`
+  ([3.5](#35-sender-rules)). A sender that names its own address there keeps a learned rule (a
+  `Jev/Spam` correction) from deciding its next emails: Jev decides each, as for a sender that
+  changes address. A manual rule, `@domain` included, still applies. A list that never names its
+  address (no `List-Post`, no `Mailing-list`) and rewrites `From` to itself is not recognised, and
+  still learns rules on that address. A correction on a row stored before `messages.sender_is_list`
+  existed (`NULL`) still creates a rule, which the list's next emails then ignore.
 - A meeting booked through a scheduling link is kept only when Jev is asked
   ([EX-46](#ex-46--a-meeting-booked-through-a-scheduling-link-stays-in-the-inbox)): a scheduling
   tool whose address also sends FYIs (HubSpot sends both from its notifications address) can earn an

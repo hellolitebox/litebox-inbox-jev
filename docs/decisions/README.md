@@ -61,3 +61,4 @@ decision changes: add a new one and mark the old one `Superseded by NNNN`.
 | [0048](0048-one-click-multipart-then-urlencoded-on-415.md) | One-click sends multipart, and urlencoded once after a 415 | Accepted | #57 |
 | [0049](0049-digest-leaves-calendar-messages-out.md) | The digest leaves calendar messages out of its lists | Accepted | #59 |
 | [0050](0050-group-relayed-mail-carries-its-authors-authentication.md) | Mail relayed by a trusted group carries its author's authentication, from Google's ARC record | Accepted | #60 |
+| [0051](0051-no-learned-rules-on-a-lists-own-address.md) | No learned rule decides mail sent as a mailing list's own address | Accepted | #62 |

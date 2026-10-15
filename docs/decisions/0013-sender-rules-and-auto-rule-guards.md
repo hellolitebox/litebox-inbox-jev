@@ -2,7 +2,8 @@
 
 - Status: Accepted (amended by [0020](0020-flags-for-allowlist-and-keep-rules.md),
   [0023](0023-one-order-for-unsubscribe-checks.md), [0024](0024-no-auto-rules-in-dry-run.md),
-  [0045](0045-senders-decided-per-email.md))
+  [0045](0045-senders-decided-per-email.md),
+  [0051](0051-no-learned-rules-on-a-lists-own-address.md))
 - Date: 2026-10-13
 - PR: initial design; #8 (keep guards); #12 (unverified senders, known contacts); #13 (author key)
 

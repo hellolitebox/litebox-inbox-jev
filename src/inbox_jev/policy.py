@@ -298,8 +298,8 @@ def _group_list(sig: Signals, account: Account) -> bool:
     hosts = [_target_host(u) for u in (*sig.unsubscribe_https, *sig.unsubscribe_mailto)]
     if any(on_domain(h, g) for h in hosts for g in PUBLIC_GROUP_HOSTS):
         return True
-    if sig.relayed_by or sig.group_author:
-        return True  # Google Groups relay, trusted or not
+    if sig.relayed_by or sig.group_author or sig.sender_is_list:
+        return True  # Google Groups relay, trusted or not, or mail sent as the list itself
     names = [sig.sender_domain, (sig.list_id or "").lower()]
     return any(on_domain(n, own) for n in names if n)
 

@@ -246,10 +246,12 @@ be unsubscribed, and `Jev/Spam` means they go straight to Spam.
 Emails that come through a group (Gmail shows "via" and the group's name next to the sender) need
 care. For one of your company's own groups that whoever runs Inbox Jev has set up, your fix is about
 the person who wrote to the group, not the group: teaching it that a stranger's email to `hello@` is
-`Jev/Spam` doesn't send the rest of `hello@`'s mail to Spam. For any other group, your fix is about
-the group itself, so all of that group's future emails would get the kind you chose. To mark one
-email from such a group as spam, use Gmail's "Report spam" or "Report phishing" and leave the `Jev/`
-label alone.
+`Jev/Spam` doesn't send the rest of `hello@`'s mail to Spam. When Inbox Jev can't tell who wrote an
+email to a group (any other group, or when it can't check the email's origin), your fix applies to
+that one email only: the group carries everyone's mail, so it never learns a rule for the whole
+group from it, and Jev keeps looking at each of the group's emails. The same goes for mailing lists
+that send as themselves. To have all of a group's mail handled one way, ask whoever runs Inbox Jev
+to set a rule by hand.
 
 Rules can also be set by hand from the command line, by sender or by whole domain (see the
 [README](../README.md#commands)).
@@ -266,8 +268,8 @@ already has `Jev/Spam` next to `Jev/Review`, remove `Jev/Review` (see
 still do it once the email is in the Spam folder. Then the next email from that address goes to Spam
 (in a gentler mode it only gets the label). Phishing often changes address, so also tell whoever
 runs Inbox Jev: when the domain it came from is the attacker's own, they can send everything from
-that domain to Spam. If it came through a group, read the note on groups in
-[How it learns from you](#how-it-learns-from-you) first.
+that domain to Spam. If it came through a group, your fix may apply to that one email only: see the
+note on groups in [How it learns from you](#how-it-learns-from-you).
 
 **Why is a newsletter in my inbox?** Usually Jev wasn't sure enough: look for `Jev/Review`. Swap the
 label for `Jev/Newsletters` (or just remove `Jev/Review` if the guess was right) and future issues

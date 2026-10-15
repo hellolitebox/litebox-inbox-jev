@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, replace
 from email.utils import getaddresses, parseaddr
 from typing import NamedTuple, TypeVar
+from urllib.parse import unquote
 
 from . import psl
 
@@ -171,6 +172,21 @@ class Signals:
     author_auth: AuthVerdicts | None = None
     # Reply-To addresses (lowercased), empty when the header is absent.
     reply_to: tuple[str, ...] = ()
+    # The list's own addresses, named by the email's own headers: RFC 2369 List-Post's mailto:
+    # addresses and Google Groups' Mailing-list `list <address>` (`list_addresses`). Empty for
+    # direct mail and for lists that name none (an ESP, `List-Post: NO`).
+    list_addresses: tuple[str, ...] = ()
+
+    @property
+    def sender_is_list(self) -> bool:
+        """The sender is the list's own address: the email was sent as the list (a group that
+        rewrites From to itself and whose author wasn't recovered, a list's own notice).
+
+        Such an address carries every member's mail, so no sender rule learned from some of its
+        emails (auto or correction) may decide the next one (`rules.decided_per_email`, ADR
+        0051). False once `resolve_relay` made the author the sender.
+        """
+        return self.sender in self.list_addresses
 
     @property
     def no_reply(self) -> bool:
@@ -582,6 +598,27 @@ def sender_address(from_header: str | None) -> str:
 _MAILING_LIST = re.compile(r"^\s*list\s+([^;\s]+)", re.IGNORECASE)
 
 
+def list_addresses(headers: dict[str, list[str]]) -> tuple[str, ...]:
+    """The list's own addresses its headers name (`headers` keyed by lowercased name),
+    lowercased: the `mailto:` addresses of the first List-Post (RFC 2369, set by Google Groups,
+    Mailman, groups.io, LISTSERV) and the address of Google Groups' first Mailing-list header
+    (`list hello@co.com; contact …`). Only plain addresses (`ADDRESS`) count; `List-Post: NO`
+    and `https:` posting pages name none.
+
+    List-Id is left out: it is a dotted identifier (`<hello.co.com>`), not an address, and
+    can't be mapped back to one without guessing where the local part ends.
+    """
+    found: list[str] = []
+    for uri in _ANGLE.findall(first_header(headers, "list-post") or ""):
+        uri = uri.strip()
+        if uri.lower().startswith("mailto:"):
+            found.append(unquote(uri[len("mailto:") :].split("?", 1)[0]).strip().lower())
+    match = _MAILING_LIST.match(first_header(headers, "mailing-list") or "")
+    if match:
+        found.append(match.group(1).lower())
+    return tuple(dict.fromkeys(a for a in found if ADDRESS.match(a)))
+
+
 def original_sender(
     headers: dict[str, list[str]], from_addr: str, *, dmarc_pass: bool
 ) -> str | None:
@@ -627,6 +664,7 @@ def extract(headers: dict[str, list[str]]) -> Signals:
         reply_to=tuple(
             a.strip().lower() for _, a in getaddresses(headers.get("reply-to", [])) if a.strip()
         ),
+        list_addresses=list_addresses(headers),
     )
 
 

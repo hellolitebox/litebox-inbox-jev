@@ -64,7 +64,10 @@ for each new inbox email:
    mail that needs you, e.g. a CRM's notifications address that also relays your website's
    contact-form leads) never get a learned rule: Jev decides each of their emails, a correction
    fixes only that email, and only a manual `rules set` rule applies
-   ([ADR 0045](docs/decisions/0045-senders-decided-per-email.md)).
+   ([ADR 0045](docs/decisions/0045-senders-decided-per-email.md)). The same holds for an email sent
+   as a mailing list's own address (its `From` is the address its `List-Post` or Google Groups'
+   `Mailing-list` names, e.g. a group whose author can't be recovered): that address carries every
+   member's mail ([ADR 0051](docs/decisions/0051-no-learned-rules-on-a-lists-own-address.md)).
 3. **Jev** gets the headers that matter, the start of the body (`BODY_CHARS`; the HTML when the
    `text/plain` part is just a "view this in your browser" stub) and `previous_contact`: whether you
    ever wrote to the sender or a person at their domain, from a search over your sent mail (emails
@@ -104,8 +107,8 @@ one-click, else `mailto:`, else leaves a manual link in the digest. Sender rules
 Google Groups on a domain you list in the account's `group_domains` (opt-in: only domains whose
 Google Workspace you control) are keyed on the author, so rules, corrections, the allowlist and
 `previous_contact` apply to the person (allowlist a group itself by its exact address in
-`allow_senders`); other groups stay keyed on the group address, and an entry that is a public suffix
-(`co.uk`, `github.io`) fails the accounts file
+`allow_senders`); other groups stay keyed on the group address, which learns no rule from its mail
+(step 2), and an entry that is a public suffix (`co.uk`, `github.io`) fails the accounts file
 ([§3.4](docs/how-it-decides.md#34-groups-and-mailing-lists)).
 
 ### Modes
@@ -170,7 +173,7 @@ uv run inbox-jev digest --dry-print
 | `inbox-jev rules list [-a EMAIL] [--all]` / `rules set -a EMAIL @domain.com newsletter` / `rules delete -a EMAIL SENDER` | Sender rules (`rules set` and `rules delete` take an address or `@domain`, any case; `rules delete` also removes a rule stored as typed before `rules set` checked its input) |
 | `inbox-jev retry-errors -a EMAIL` | Have the next `run` retry emails that failed, including those that stopped retrying after 8 failures (pair with `run --lookback`) |
 | `inbox-jev unsubscribe-retry [-a EMAIL]` | Retry failed unsubscribes after re-checking them against the current rules, corrections and [unsubscribe checks](docs/how-it-decides.md#33-unsubscribe-conditions) |
-| `inbox-jev senders backfill [-a EMAIL]` | Store the author, not the group, for group emails saved before authors were recovered |
+| `inbox-jev senders backfill [-a EMAIL]` | Store the author, not the group, for group emails saved before authors were recovered, and whether the sender is the list's own address |
 | `inbox-jev stats [-a EMAIL] [--days 7]` | Counts per category |
 | `inbox-jev labels rename OLD NEW [-a EMAIL]` | Rename a label in Gmail and the DB (see [Renaming a label](docs/operations.md#renaming-a-label)) |
 | `inbox-jev --version` | The release and, inside the image, the commit it was built from |

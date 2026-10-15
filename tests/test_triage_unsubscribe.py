@@ -187,6 +187,31 @@ def test_retry_follows_current_sender_rule(setup, source):
     assert rows["agency.io"] == ("skipped", 1) and gmail.sent == []
 
 
+@pytest.mark.parametrize("source", [RuleSource.AUTO, RuleSource.CORRECTION])
+def test_retry_ignores_a_learned_rule_on_a_list_address(setup, source):
+    # Mail sent as the list's own address: a learned rule on that address doesn't decide it
+    # (ADR 0051), so the retry reaches the gate, which vetoes the list as a group.
+    ctx, gmail, account = setup
+    account.mode = Mode.ACT
+    address = "dev@lists.example.org"
+    gmail.emails = as_archived(
+        email(
+            "9",
+            f"Dev <{address}>",
+            "Pitch 9",
+            list_post=f"<mailto:{address}>",
+            list_unsubscribe="<mailto:u@lists.example.org>",
+        )
+    )
+    with ctx.sessions() as s:
+        failed_unsub(s, account, "9", "lists.example.org", "cold_outreach", sender=address)
+        rules.set_rule(s, account.email, address, "important", source=source)
+        s.commit()
+    out, rows = _retry(ctx, gmail, account)
+    assert out == {"lists.example.org": "skipped: unverified sender, group or own list"}
+    assert rows["lists.example.org"] == ("skipped", 1) and gmail.sent == []
+
+
 def test_retry_rule_to_unsubscribing_category_skips_confidence_check(setup):
     # As in run, a rule decides with confidence 1.0: Jev's stored 0.5 no longer matters.
     ctx, gmail, account = setup

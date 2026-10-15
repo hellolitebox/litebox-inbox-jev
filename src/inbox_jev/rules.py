@@ -23,6 +23,18 @@ class RuleSource(StrEnum):
     AUTO = "auto"  # learned from consistent, confident Jev answers (record_auto)
 
 
+def decided_per_email(account: Account, sender: str, *, sender_is_list: bool) -> bool:
+    """Whether an email from `sender` is decided on its own: no auto rule is learned from it, a
+    correction on it creates no sender rule, and only a manual rule decides it.
+
+    True for a sender in the account's decide_each_email (`Account.decides_each_email`, ADR
+    0045), and for an email sent as a mailing list's own address (`sender_is_list`:
+    `Signals.sender_is_list`, or the stored `Message.sender_is_list`; ADR 0051), whose address
+    carries every member's mail.
+    """
+    return sender_is_list or account.decides_each_email(sender)
+
+
 @dataclass(frozen=True)
 class SenderRules:
     """Every rule keyed on one sender (exact address, then @domain), active or not.
@@ -44,13 +56,14 @@ class SenderRules:
         """The rule keyed on the exact address, active or not (auto rules are keyed so)."""
         return next((r for r in self.rows if r.sender_key == self.sender), None)
 
-    def deciding(self, account: Account) -> SenderRules:
+    def deciding(self, account: Account, *, sender_is_list: bool) -> SenderRules:
         """The rules that may decide for the sender in `account`: all of them, or only the
-        manual ones when the account decides the sender's emails one by one
-        (`Account.decides_each_email`). A rule learned from some of such a sender's emails (auto
-        or correction) says nothing about the next one; a manual rule is the user's own choice.
+        manual ones when the email is decided on its own (`decided_per_email`: a sender in
+        decide_each_email, or an email sent as a list's own address, `sender_is_list`). A rule
+        learned from some of such a sender's emails (auto or correction) says nothing about the
+        next one; a manual rule is the user's own choice.
         """
-        if not account.decides_each_email(self.sender):
+        if not decided_per_email(account, self.sender, sender_is_list=sender_is_list):
             return self
         return SenderRules(self.sender, tuple(r for r in self.rows if is_manual(r)))
 
@@ -61,7 +74,7 @@ class SenderRules:
         of `categories` (removed from categories.yaml), it comes back as `stale` and `rule` is
         None: the sender has no rule and Jev decides. It never falls through to the @domain
         rule: an exact rule is the user's exception to it, so applying the domain rule would undo
-        that exception. Deciding code calls it on `deciding(account)`, never on all the rules.
+        that exception. Deciding code calls it on `deciding(…)`, never on all the rules.
         """
         found = self.active
         first = found[0] if found else None

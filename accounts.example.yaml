@@ -29,7 +29,8 @@ accounts:
     # the author, never the group, and the author's SPF/DKIM/DMARC come from Google's ARC record
     # (unknown without a trusted one, never the group's own pass; docs/how-it-decides.md, 4.2).
     # An untrusted group that rewrites From to its own address (Gmail's "via") is keyed on that
-    # address: its corrections cover all its mail.
+    # address, which is the list's own (List-Post, Mailing-list): no rule is learned on it from
+    # its mail, a correction fixes that email only, and only a rule set by hand covers all of it.
     # Optional (default: none).
     group_domains:
       - example.com
