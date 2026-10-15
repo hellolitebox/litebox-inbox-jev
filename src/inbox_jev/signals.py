@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, replace
 from email.utils import getaddresses, parseaddr
+from typing import NamedTuple, TypeVar
 
 from . import psl
 
@@ -131,6 +132,19 @@ def first_header(headers: dict[str, list[str]], name: str) -> str | None:
     return values[0] if values else None
 
 
+class AuthVerdicts(NamedTuple):
+    """Gmail's SPF, DKIM and DMARC verdicts for one message, each one lowercased RFC 8601 result
+    word ("none" when Gmail gave none, or when they can't be trusted)."""
+
+    spf: str
+    dkim: str
+    dmarc: str
+
+
+# Verdicts nobody vouches for: what Jev gets for a trusted group's author without Google's record.
+UNKNOWN_AUTH = AuthVerdicts("none", "none", "none")
+
+
 @dataclass(frozen=True)
 class Signals:
     sender: str  # lowercased email address
@@ -150,6 +164,11 @@ class Signals:
     # Group address that relayed the email (e.g. hello@company.com), set by resolve_relay when
     # the author was moved into `sender`. None for direct mail and untrusted groups.
     relayed_by: str | None = None
+    # Gmail's verdicts for the message `group_author` sent to the group, from the ARC record
+    # Google added when the group received it (relay_author_auth). None without a group author
+    # or without a record to trust. resolve_relay makes it `dmarc_pass` once the author is the
+    # sender: `dmarc_pass` is the group's own verdict until then.
+    author_auth: AuthVerdicts | None = None
     # Reply-To addresses (lowercased), empty when the header is absent.
     reply_to: tuple[str, ...] = ()
 
@@ -196,9 +215,12 @@ def parse_list_unsubscribe(value: str | None) -> tuple[tuple[str, ...], tuple[st
 # The authserv-id Gmail stamps on its own Authentication-Results header.
 GMAIL_AUTHSERV_ID = "mx.google.com"
 AUTH_METHODS = ("spf", "dkim", "dmarc")
+# The methods `_parse_auth_results` returns verdicts for: the three above, and ARC (RFC 8617),
+# whose verdict in Gmail's own header says whether Gmail validated the message's ARC chain.
+_VERDICT_METHODS = (*AUTH_METHODS, "arc")
 # The result words RFC 8601 2.7 defines for these methods, plus "hardfail", the legacy synonym of
 # SPF "fail" (RFC 5451). A Gmail header that gives one of them any other word is not trusted
-# (`_parse_auth_results`).
+# (`_parse_auth_results`). ARC's results (`pass`, `fail`, `none`) are among them.
 AUTH_RESULTS = frozenset(
     {"pass", "fail", "softfail", "hardfail", "neutral", "none", "temperror", "permerror", "policy"}
 )
@@ -263,44 +285,63 @@ _AUTHSERV = re.compile(rf" ?({_VALUE})(?: [0-9]+)? ?")
 _RESINFO = re.compile(
     rf" ?(?P<method>{_KEYWORD}) ?(?:/ ?[0-9]+ ?)?= ?(?P<result>{_KEYWORD})"
     rf"(?: reason ?= ?{_VALUE})?"
-    rf"(?: {_KEYWORD} ?\. ?{_KEYWORD} ?= ?{_PVALUE})* ?"
+    rf"(?P<properties>(?: {_KEYWORD} ?\. ?{_KEYWORD} ?= ?{_PVALUE})*) ?"
 )
+# One `ptype.property=pvalue` of a resinfo that `_RESINFO` matched (its `properties` group).
+_PROPERTY = re.compile(rf" ({_KEYWORD}) ?\. ?({_KEYWORD}) ?= ?({_PVALUE})")
 
 
-def _parse_auth_results(header: str) -> tuple[str, list[tuple[str, str]]]:
-    """An Authentication-Results header's authserv-id (lowercased) and its (method, result)
-    verdicts for `AUTH_METHODS`, lowercased, in order (RFC 8601 2.2).
+class _AuthResults(NamedTuple):
+    authserv_id: str  # lowercased
+    verdicts: list[tuple[str, str]]  # (method, result) for `_VERDICT_METHODS`, lowercased
+    # The `header.from` of each DMARC resinfo: lowercased, without a final dot.
+    dmarc_header_from: frozenset[str]
+
+
+def _parse_auth_results(header: str) -> _AuthResults:
+    """An Authentication-Results header's authserv-id (lowercased), its (method, result)
+    verdicts for `_VERDICT_METHODS`, lowercased, in order (RFC 8601 2.2), and the `header.from`
+    its DMARC resinfos name.
 
     The header must match RFC 8601's grammar exactly (an allowlist, not a search for verdicts):
     `authserv-id [version] ; resinfo ; …` or `authserv-id ; none`, each resinfo being
     `method[/version]=result [reason=…] [ptype.property=pvalue …]`, once comments, quoted
     strings and domain literals are reduced to opaque pieces (`_reduce_free_text`). Only the
-    `method=result` that starts a resinfo is a verdict, and an SPF, DKIM or DMARC result must be
-    an RFC 8601 word (`AUTH_RESULTS`). A header with anything else anywhere (a stray `;` or
+    `method=result` that starts a resinfo is a verdict, and an SPF, DKIM, DMARC or ARC result
+    must be an RFC 8601 word (`AUTH_RESULTS`). A header with anything else anywhere (a stray `;` or
     delimiter, a property with no value, `dmarc=passx`) has no verdicts at all: fail closed,
     never what came before the break. The authserv-id is still read from such a header, so a
     malformed Gmail header is still the one trusted (`_gmail_verdicts`), with nothing in it.
-    Other methods (`arc`, `dara`) must parse but are dropped.
+    Other methods (`dara`) must parse but are dropped. An ARC-Authentication-Results header is
+    read the same way once its `i=N;` is taken off (`_arc_auth_results`). A malformed header
+    names no `header.from` either.
     """
     text, well_formed = _reduce_free_text(header)
     authserv, *resinfos = re.sub(r"\s+", " ", text).split(";")
     id_tokens = authserv.split()
-    authserv_id = id_tokens[0].lower() if id_tokens else ""
+    nothing = _AuthResults(id_tokens[0].lower() if id_tokens else "", [], frozenset())
     if not well_formed or not _AUTHSERV.fullmatch(authserv) or not resinfos:
-        return authserv_id, []
+        return nothing
     if len(resinfos) == 1 and resinfos[0].strip().lower() == "none":
-        return authserv_id, []
+        return nothing
     verdicts: list[tuple[str, str]] = []
+    dmarc_header_from: set[str] = set()
     for resinfo in resinfos:
         match = _RESINFO.fullmatch(resinfo)
         if match is None:
-            return authserv_id, []
+            return nothing
         method, result = match["method"].lower(), match["result"].lower()
-        if method in AUTH_METHODS:
+        if method in _VERDICT_METHODS:
             if result not in AUTH_RESULTS:
-                return authserv_id, []
+                return nothing
             verdicts.append((method, result))
-    return authserv_id, verdicts
+        if method == "dmarc":
+            dmarc_header_from.update(
+                value.lower().removesuffix(".")
+                for ptype, prop, value in _PROPERTY.findall(match["properties"])
+                if (ptype.lower(), prop.lower()) == ("header", "from")
+            )
+    return nothing._replace(verdicts=verdicts, dmarc_header_from=frozenset(dmarc_header_from))
 
 
 def _gmail_verdicts(authentication_results: list[str]) -> list[tuple[str, str]] | None:
@@ -313,9 +354,9 @@ def _gmail_verdicts(authentication_results: list[str]) -> list[tuple[str, str]] 
     (`mx.google.com.attacker.example` included) could have been written by the sender.
     """
     for header in authentication_results:
-        authserv_id, verdicts = _parse_auth_results(header)
-        if authserv_id == GMAIL_AUTHSERV_ID:
-            return verdicts
+        parsed = _parse_auth_results(header)
+        if parsed.authserv_id == GMAIL_AUTHSERV_ID:
+            return parsed.verdicts
     return None
 
 
@@ -351,7 +392,162 @@ def sender_auth(authentication_results: list[str]) -> dict[str, str] | None:
     parsed = _gmail_verdicts(authentication_results)
     if parsed is None:
         return None
-    return {method: _method_verdict(parsed, method) for method in AUTH_METHODS}
+    return _auth_verdicts(parsed)._asdict()
+
+
+def _auth_verdicts(verdicts: list[tuple[str, str]]) -> AuthVerdicts:
+    """Each of `AUTH_METHODS`' verdict among `verdicts` (`_method_verdict`)."""
+    return AuthVerdicts(*(_method_verdict(verdicts, method) for method in AUTH_METHODS))
+
+
+# The signing domain (`d=`) of the ARC sets Google adds: Google Groups when a group receives a
+# message, and Gmail when it delivers the group's copy. Only Google can sign for it.
+GOOGLE_ARC_SEALER = "google.com"
+# RFC 8617 4.2.1: an ARC set's instance (`i=`) is 1 to 50, written without leading zeros here.
+_ARC_INSTANCE = re.compile(r"[1-9][0-9]?")
+_ARC_MAX_INSTANCE = 50
+# RFC 8617 4.1.1: an ARC-Authentication-Results is `i=N;` and then an Authentication-Results.
+_ARC_AUTH_RESULTS = re.compile(
+    r"[ \t\r\n]*i[ \t\r\n]*=[ \t\r\n]*([0-9]+)[ \t\r\n]*;(.*)", re.DOTALL
+)
+# RFC 6376 3.2, the tag-list of an ARC-Seal and ARC-Message-Signature: `name=value` pieces split
+# on `;`, a value being printable ASCII but `;`, with folding whitespace inside.
+_TAG_SPEC = re.compile(
+    r"[ \t\r\n]*([A-Za-z][A-Za-z0-9_]*)[ \t\r\n]*=[ \t\r\n]*"
+    r"((?:[\x21-\x3a\x3c-\x7e]+(?:[ \t\r\n]+[\x21-\x3a\x3c-\x7e]+)*)?)[ \t\r\n]*"
+)
+
+_T = TypeVar("_T")
+
+
+class _ArcSeal(NamedTuple):
+    cv: str  # chain validation status the sealer found: none (first set), pass or fail
+    sealer: str  # `d=`, lowercased
+
+
+def _tag_list(header: str) -> dict[str, str] | None:
+    """An ARC-Seal or ARC-Message-Signature's tags (RFC 6376 3.2), or None when it doesn't
+    parse or names a tag twice (RFC 6376 3.2: such a header is invalid). A final `;` is allowed.
+    """
+    pieces = header.split(";")
+    if len(pieces) > 1 and not pieces[-1].strip():
+        pieces.pop()
+    tags: dict[str, str] = {}
+    for piece in pieces:
+        match = _TAG_SPEC.fullmatch(piece)
+        if match is None or match[1] in tags:
+            return None
+        tags[match[1]] = match[2]
+    return tags
+
+
+def _arc_instance(value: str) -> int | None:
+    """An ARC instance number (1 to 50), or None when `value` isn't one."""
+    if not _ARC_INSTANCE.fullmatch(value) or int(value) > _ARC_MAX_INSTANCE:
+        return None
+    return int(value)
+
+
+def _arc_seal(header: str) -> tuple[int, _ArcSeal] | None:
+    """An ARC-Seal's instance, `cv=` and `d=`, or None when it lacks one or doesn't parse."""
+    tags = _tag_list(header)
+    instance = _arc_instance(tags.get("i", "")) if tags else None
+    if tags is None or instance is None or not tags.get("cv") or not tags.get("d"):
+        return None
+    return instance, _ArcSeal(tags["cv"].lower(), tags["d"].lower())
+
+
+def _arc_message_signature(header: str) -> tuple[int, None] | None:
+    """An ARC-Message-Signature's instance, or None when it lacks one or doesn't parse."""
+    tags = _tag_list(header)
+    instance = _arc_instance(tags.get("i", "")) if tags else None
+    return None if instance is None else (instance, None)
+
+
+def _arc_auth_results(header: str) -> tuple[int, str] | None:
+    """An ARC-Authentication-Results' instance and the Authentication-Results after its `i=N;`,
+    or None when it doesn't start with a valid `i=N;`."""
+    match = _ARC_AUTH_RESULTS.fullmatch(header)
+    instance = _arc_instance(match[1]) if match else None
+    return None if match is None or instance is None else (instance, match[2])
+
+
+def _by_instance(parsed: list[tuple[int, _T] | None]) -> dict[int, _T] | None:
+    """`parsed` ARC headers of one kind keyed by instance, or None when one didn't parse or two
+    share an instance (RFC 8617 5.1.1: the chain is then invalid)."""
+    by_instance: dict[int, _T] = {}
+    for item in parsed:
+        if item is None or item[0] in by_instance:
+            return None
+        by_instance[item[0]] = item[1]
+    return by_instance
+
+
+def relay_author_auth(headers: dict[str, list[str]], author: str) -> AuthVerdicts | None:
+    """Gmail's verdicts for the message a Google Group received from `author` (its
+    X-Original-Sender, a lowercase address), or None when there is no record of them to trust.
+
+    A group re-sends the author's message from its own address, so the Authentication-Results
+    Gmail writes on delivery (`sender_auth`) authenticates the group, not the author. Google
+    records the author's verdicts in the ARC set it adds when the group receives the message
+    (RFC 8617): Google Groups adds two, both with the author's verdicts, and Gmail adds one more
+    on delivery, with its own. The one read is the ARC-Authentication-Results just below Gmail's
+    delivery set (instance N-1 of N), trusted only when all of these hold:
+
+    - Gmail's own Authentication-Results (the one `_gmail_verdicts` trusts) says `arc=pass`:
+      Gmail checked every ARC-Seal's signature. A sender can write ARC headers but can't sign
+      for google.com, so a forged set breaks the chain (`arc=fail`).
+    - Each kind of ARC header (ARC-Seal, ARC-Message-Signature, ARC-Authentication-Results)
+      parses and has exactly one per instance, numbered 1 to N with N of at least 3.
+    - Every seal's `cv` is `none` at instance 1 and `pass` after it.
+    - The seals at N, N-1 and N-2 are signed by google.com (`d=`): N is Gmail's delivery set,
+      N-1 and N-2 Google Groups' two records of the message the group received.
+    - The ARC-Authentication-Results at N-1 has the authserv-id `mx.google.com` and is parsed
+      like Gmail's own header (`_parse_auth_results`, strict).
+    - That record is about `author`'s message: its DMARC resinfo's `header.from` (the domain of
+      the From the message had, which Google writes inside the sealed record) is exactly
+      `author`'s domain, and it names no other. One more Google hop after the group (a nested
+      group, a set Google adds to its layout) puts Google's record of the group's own copy at
+      N-1, with `header.from` the group's domain and the group's pass: that one is not the
+      author's. A record without `header.from`, or a malformed one, is not bound to the author
+      either.
+    - The ARC-Authentication-Results at N-2 is Google Groups' second record of the same message:
+      it parses to the same authserv-id, verdicts and `header.from` as the one at N-1. A single
+      extra Google set after the group (Google's record of the group's copy, the group's pass)
+      differs from the author's record below it, so it is not read even when the author is on
+      the group's own domain, where the `header.from` binding can't tell the two apart.
+
+    Gmail's `arc=pass` also comes with a comment summarising the author's verdicts, but a
+    comment is free text that is never read (ADR 0043).
+    """
+    top = _gmail_verdicts(headers.get("authentication-results", []))
+    if top is None or _method_verdict(top, "arc") != "pass":
+        return None
+    seals = _by_instance([_arc_seal(h) for h in headers.get("arc-seal", [])])
+    signatures = _by_instance(
+        [_arc_message_signature(h) for h in headers.get("arc-message-signature", [])]
+    )
+    results = _by_instance(
+        [_arc_auth_results(h) for h in headers.get("arc-authentication-results", [])]
+    )
+    if seals is None or signatures is None or results is None:
+        return None
+    last = len(seals)
+    instances = set(range(1, last + 1))
+    if last < 3 or not set(seals) == set(signatures) == set(results) == instances:
+        return None
+    if any(seal.cv != ("none" if i == 1 else "pass") for i, seal in seals.items()):
+        return None
+    if {seals[i].sealer for i in (last, last - 1, last - 2)} != {GOOGLE_ARC_SEALER}:
+        return None
+    record = _parse_auth_results(results[last - 1])
+    if record.authserv_id != GMAIL_AUTHSERV_ID:
+        return None
+    if record.dmarc_header_from != {domain_of(author)}:
+        return None
+    if _parse_auth_results(results[last - 2]) != record:
+        return None
+    return _auth_verdicts(record.verdicts)
 
 
 # Reply and forward prefixes in the languages mail clients localise them to: RE, FW, FWD; AW and
@@ -416,6 +612,7 @@ def extract(headers: dict[str, list[str]]) -> Signals:
     if list_id_raw:
         match = _ANGLE.search(list_id_raw)
         list_id = (match.group(1) if match else list_id_raw).strip().lower() or None
+    group_author = original_sender(headers, sender, dmarc_pass=dmarc_pass)
     return Signals(
         sender=sender,
         sender_domain=domain_of(sender),
@@ -425,7 +622,8 @@ def extract(headers: dict[str, list[str]]) -> Signals:
         one_click="list-unsubscribe=one-click" in post and bool(https),
         dmarc_pass=dmarc_pass,
         is_discussion_list=bool((first_header(headers, "list-post") or "").strip()),
-        group_author=original_sender(headers, sender, dmarc_pass=dmarc_pass),
+        group_author=group_author,
+        author_auth=relay_author_auth(headers, group_author) if group_author else None,
         reply_to=tuple(
             a.strip().lower() for _, a in getaddresses(headers.get("reply-to", [])) if a.strip()
         ),
@@ -439,6 +637,10 @@ def resolve_relay(sig: Signals, own_domains: list[str]) -> Signals:
     Workspace can produce dmarc=pass for a group address on it, so its X-Original-Sender is
     Google's. Any other group (an attacker's domain, @googlegroups.com, a public provider) keeps
     sender = From.
+
+    Once the author is the sender, `dmarc_pass` is the author's (`author_auth`), not the group's:
+    the group's pass, which `original_sender` already required, says nothing about the author,
+    and without Google's record the author's DMARC is unknown, so it doesn't pass.
     """
     if not sig.group_author or sig.relayed_by:
         return sig
@@ -446,4 +648,10 @@ def resolve_relay(sig: Signals, own_domains: list[str]) -> Signals:
     if not any(on_domain(sig.sender_domain, d) for d in domains):
         return sig
     author = sig.group_author
-    return replace(sig, sender=author, sender_domain=domain_of(author), relayed_by=sig.sender)
+    return replace(
+        sig,
+        sender=author,
+        sender_domain=domain_of(author),
+        relayed_by=sig.sender,
+        dmarc_pass=(sig.author_auth or UNKNOWN_AUTH).dmarc == "pass",
+    )

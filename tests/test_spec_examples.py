@@ -30,6 +30,7 @@ from fakes import (
     calendar_payload,
     email,
     gmail_factory,
+    group_relay_headers,
     jev_http_error,
     sent_mail_gmail,
 )
@@ -44,7 +45,7 @@ from inbox_jev import digest, jev_guard, rules, scan_rows, triage
 from inbox_jev import unsubscribe as unsub
 from inbox_jev.body import calendar_method, extract_body, extract_link_domains
 from inbox_jev.classification import Classification, PreviousContact
-from inbox_jev.classifier import build_state
+from inbox_jev.classifier import CATEGORY_INSTRUCTIONS, build_state
 from inbox_jev.config import Account, DigestLanguage, Mode, Settings
 from inbox_jev.db import (
     MAX_ERROR_ATTEMPTS,
@@ -1976,3 +1977,55 @@ def test_ex48_a_one_click_endpoint_that_parses_one_encoding_only(spec):
         }
         text = digest.build(s, ctx.cfg, in_language(account, DigestLanguage.EN), gmail=gmail).text
     assert "• outlet.example: HTTP 415 Unsupported Media Type" in text
+
+
+# --- EX-49 ----------------------------------------------------------------------------------
+
+LURE_RESULTS = (
+    "mx.google.com;\r\n       spf=softfail (google.com: domain of transitioning "
+    "docs@homescape-lure.example does not designate 192.0.2.9 as permitted sender) "
+    "smtp.mailfrom=docs@homescape-lure.example;\r\n       dmarc=fail (p=NONE sp=NONE dis=NONE) "
+    "header.from=homescape-lure.example"
+)
+
+
+def test_ex49_phishing_relayed_by_your_own_group_shows_its_authors_authentication(spec):
+    """EX-49 (docs/how-it-decides.md §5, §4.2 DMARC, §4.5 X-Original-Sender trust, ADR 0050)."""
+    ctx, gmail, account = spec
+    subject = "Document ID: New Pending Review"
+    headers = group_relay_headers(author="docs@homescape-lure.example", author_results=LURE_RESULTS)
+    headers |= {
+        "subject": [subject],
+        "list-post": ["<mailto:hello@example.com>"],
+        "list-unsubscribe": ["<mailto:googlegroups-manage+1+unsubscribe@googlegroups.com>"],
+    }
+    # The same email without Google's record of what the group received (no ARC sets).
+    bare = {k: v for k, v in headers.items() if not k.startswith("arc-")}
+    bare["subject"] = [subject + " (2)"]
+    gmail.emails = {
+        "1": Email("1", "t1", ["INBOX"], headers, "", "body", 1_700_000_000_000),
+        "2": Email("2", "t2", ["INBOX"], bare, "", "body", 1_700_000_000_000),
+    }
+    for s in (subject, subject + " (2)"):
+        ctx.classifier.answers[s] = answer("spam", spam=0.95, action_required=0.03)
+    posts = _one_click_posts(ctx)
+    triage.run_account(ctx, account, Mode.ACT)
+
+    first, second = ctx.classifier.states
+    assert (first["original_sender"], first["sent_via_group"]) == (
+        "docs@homescape-lure.example",
+        "hello@example.com",
+    )
+    # The author's verdicts, as Google recorded them when the group received the email; Gmail's
+    # own header says spf, dkim and dmarc pass, for the group's re-sent copy.
+    assert first["sender_auth"] == {"spf": "softfail", "dkim": "none", "dmarc": "fail"}
+    assert second["sender_auth"] == {"spf": "none", "dkim": "none", "dmarc": "none"}
+    for gmail_id in ("1", "2"):
+        row = _row(ctx, gmail_id)
+        assert (row.sender, row.category, row.spammed) == (
+            "docs@homescape-lure.example",
+            "spam",
+            True,
+        )
+    assert posts == [] and gmail.sent == []
+    assert "sent via a group, sender_auth is the original sender's" in CATEGORY_INSTRUCTIONS

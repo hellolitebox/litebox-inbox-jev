@@ -179,6 +179,82 @@ def email(id: str, sender: str, subject: str, **headers: str) -> Email:
     return Email(id, "t" + id, ["INBOX"], h, "", "body", 1_700_000_000_000)
 
 
+# The shape of a Google Groups relay as Gmail delivers it (real production headers, 2026-10-15,
+# with invented domains, addresses and signatures): Google Groups adds two ARC sets with the
+# author's verdicts when the group receives the message (i=1, i=2), Gmail adds a third on
+# delivery (i=3) with the same verdicts as its own Authentication-Results, for the group.
+AUTHOR_PASS = (
+    "mx.google.com;\r\n       dkim=pass header.i=@pitchco.example header.s=sel1 "
+    "header.b=dONauLPM;\r\n       spf=pass (google.com: domain of dana@pitchco.example designates "
+    "192.0.2.7 as permitted sender) smtp.mailfrom=dana@pitchco.example;\r\n       "
+    "dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=pitchco.example"
+)
+
+
+def _arc_set(instance: int, results: str, cv: str, sealer: str = "google.com") -> list[str]:
+    """One ARC set as Google writes it: ARC-Seal, ARC-Message-Signature,
+    ARC-Authentication-Results, with folded values."""
+    return [
+        f"i={instance}; a=rsa-sha256; t=1792079036; cv={cv};\r\n        d={sealer}; "
+        "s=arc-20260327;\r\n        b=m4Gh3PbXQpoo/jJrqJhHQHLXMrKd4Vb0xeBBAmLDec+EeRQ5VGHKa9sD\r\n"
+        "         lmp6/66f/G834e7esb0S6f3LBn3yijQglbIXABIsVMMIvtg==",
+        f"i={instance}; a=rsa-sha256; c=relaxed/relaxed; d={sealer};\r\n        "
+        "s=arc-20260327;\r\n        h=list-id:mailing-list:precedence:reply-to:date\r\n"
+        "         :mime-version:message-id:subject:to:from:dkim-signature;\r\n        "
+        "bh=47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=;\r\n        "
+        "fh=tePfUN0WazOFAmFCLMf8ezL/CosLZ3bzuvlKz8H3XUw=;\r\n        "
+        "b=qJPWO9v27jB0ZZwjK7QqTLSJQgPdpSO5pbIb1uLf8G44e2LNI1LurVoG62IK+Sln\r\n"
+        "         M4Ofx8i5ig==",
+        f"i={instance}; {results}",
+    ]
+
+
+def group_relay_headers(
+    author: str = "dana@pitchco.example",
+    group: str = "hello@example.com",
+    author_results: str = AUTHOR_PASS,
+    arc: str = "pass",
+    *,
+    group_copy_sets: int = 0,
+) -> dict[str, list[str]]:
+    """The authentication headers of `author`'s message relayed by Google Group `group`, topmost
+    first as Gmail lists them: From, Mailing-list, X-Original-Sender, Gmail's own
+    Authentication-Results (the group's DMARC pass, `arc=<arc>`), the three ARC sets (i=3, i=2,
+    i=1: `author_results` at 1 and 2) and the X-Original-Authentication-Results Google Groups
+    adds. With `group_copy_sets`, Google hops after the group: that many sets with Google's
+    record of the group's own copy (its pass) sit between the author's records and Gmail's, which
+    becomes i=3+`group_copy_sets` (1: an extra set in Google's layout; 2: a nested group, which
+    adds its own pair of records). Add Subject before building an Email."""
+    domain, author_domain = group.rsplit("@", 1)[1], author.rsplit("@", 1)[1]
+    top = (
+        f"mx.google.com;\r\n       dkim=pass header.i=@{domain} header.s=google "
+        f"header.b=FVAIP7dz;\r\n       arc={arc} (i=2 spf=pass spfdomain={author_domain} "
+        f"dkim=pass dkdomain={author_domain} dmarc=pass fromdomain={author_domain});\r\n       "
+        f"spf=pass (google.com: domain of {group} designates 2607:f8b0:4864:20::a4a as "
+        f"permitted sender) smtp.mailfrom={group};\r\n       dmarc=pass (p=REJECT sp=REJECT "
+        f"dis=NONE) header.from={domain};\r\n       dara=neutral header.i=@{domain}"
+    )
+    group_copy = (
+        f"mx.google.com;\r\n       dkim=pass header.i=@{domain} header.s=google "
+        f"header.b=FVAIP7dz;\r\n       spf=pass (google.com: domain of {group} designates "
+        f"2607:f8b0:4864:20::a4a as permitted sender) smtp.mailfrom={group};\r\n       "
+        f"dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from={domain}"
+    )
+    hop = [_arc_set(i, group_copy, "pass") for i in range(2 + group_copy_sets, 2, -1)]
+    sets = [_arc_set(3 + len(hop), top, "pass"), *hop, _arc_set(2, author_results, "pass")]
+    sets.append(_arc_set(1, author_results, "none"))
+    return {
+        "from": [f"\"'Dana' via Hello\" <{group}>"],
+        "mailing-list": [f"list {group}; contact {group.replace('@', '+owners@')}"],
+        "x-original-sender": [author],
+        "authentication-results": [top],
+        "arc-seal": [s[0] for s in sets],
+        "arc-message-signature": [s[1] for s in sets],
+        "arc-authentication-results": [s[2] for s in sets],
+        "x-original-authentication-results": [author_results],
+    }
+
+
 def _part(part_id: str, content_type: str, text: str = "", **extra: Any) -> dict[str, Any]:
     """One MIME part as Gmail's `full` format returns it: its own headers, base64url data."""
     data = base64.urlsafe_b64encode(text.encode()).decode().rstrip("=")

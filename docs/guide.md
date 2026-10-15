@@ -70,7 +70,11 @@ spot phishing:
 - whether the subject says "RE:" or "FW:" while the email doesn't actually answer any earlier
   message;
 - which websites the links really go to (just the site names, never the full links);
-- whether Gmail's own checks confirm which domain (web address) the email was sent from.
+- whether Gmail's own checks confirm which domain (web address) the email was sent from. For an
+  email that reached you through one of your company's own groups, these are the checks on the
+  person who wrote to the group, as Google recorded them when the group received it, not on the
+  group: the group always passes, because it is yours. When that record is missing, can't be trusted
+  or is about someone other than that person, Jev is told the checks are unknown.
 
 Passing those checks only proves where the email was sent from, not that it is honest: phishing
 often comes from the attacker's own domain. What gives phishing away is a mismatch, like a notice

@@ -21,7 +21,7 @@ from typesafe_sdk import (
 from .classification import Classification, PreviousContact
 from .config import CategoriesConfig
 from .gmail import Email
-from .signals import Signals, reply_without_thread, sender_auth
+from .signals import UNKNOWN_AUTH, Signals, reply_without_thread, sender_auth
 
 CATEGORY_Q = "category"
 NEEDS_REPLY_Q = "needs_reply"
@@ -132,11 +132,12 @@ CATEGORY_INSTRUCTIONS = (
     "cold outreach, not important. "
     "sender_auth holds Gmail's SPF, DKIM and DMARC verdicts: a pass only proves which domain "
     "sent the email, not that it is legitimate, while dmarc none or fail strengthens other "
-    "signs of phishing. reply_without_thread means the subject says it is a reply or forward "
-    "(RE:, FW:) but the email answers no earlier message. link_domains lists the domains its "
-    "links point to, most frequent first: links to a brand unrelated to the sender are a sign "
-    "of phishing, while a service linking to its own brand or portal domains (which can differ "
-    "from the sending domain) is normal."
+    "signs of phishing. For an email sent via a group, sender_auth is the original sender's, "
+    "for their own domain, not the group's. reply_without_thread means the subject says it is "
+    "a reply or forward (RE:, FW:) but the email answers no earlier message. link_domains lists "
+    "the domains its links point to, most frequent first: links to a brand unrelated to the "
+    "sender are a sign of phishing, while a service linking to its own brand or portal domains "
+    "(which can differ from the sending domain) is normal."
 )
 
 
@@ -152,6 +153,8 @@ def build_state(
     Optional keys are left out when they say nothing: `original_sender` / `sent_via_group`
     (no trusted group), `previous_contact` (unknown), `reply_without_thread` (false),
     `link_domains` (no link) and `sender_auth` (no Authentication-Results from Gmail).
+    For a trusted group relay `sender_auth` is the author's (`Signals.author_auth`, all "none"
+    without Google's record), never the group's, which Gmail's own header describes.
     """
     sig = sig or email.extract_signals()
     state: JevState = {
@@ -176,8 +179,9 @@ def build_state(
         state["reply_without_thread"] = True
     if email.link_domains:
         state["link_domains"] = email.link_domains
-    auth = sender_auth(email.headers.get("authentication-results", []))
-    if auth is not None:
+    if sig.relayed_by:
+        state["sender_auth"] = (sig.author_auth or UNKNOWN_AUTH)._asdict()
+    elif (auth := sender_auth(email.headers.get("authentication-results", []))) is not None:
         state["sender_auth"] = auth
     return state
 

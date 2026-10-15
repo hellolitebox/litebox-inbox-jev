@@ -1,6 +1,7 @@
 # 0042. Give Jev phishing signals; passing authentication is not legitimacy
 
-- Status: Accepted
+- Status: Accepted (for a trusted group relay, `sender_auth` is the author's: amended by
+  [0050](0050-group-relayed-mail-carries-its-authors-authentication.md))
 - Date: 2026-10-14
 - PR: #50
 

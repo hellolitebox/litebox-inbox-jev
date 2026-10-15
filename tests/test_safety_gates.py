@@ -67,6 +67,23 @@ def test_acts_on(mode, act_categories, acts):
         ),
         ("marketing", {"is_discussion_list": True}, None, GateResult(Veto.GROUP)),
         ("marketing", {"group_author": "dana@pitchco.io"}, None, GateResult(Veto.GROUP)),
+        # A trusted relay: `dmarc_pass` is the author's (ADR 0050). Passing or not, never.
+        (
+            "marketing",
+            {
+                "sender": "dana@pitchco.io",
+                "sender_domain": "pitchco.io",
+                "relayed_by": "hi@acme.com",
+            },
+            None,
+            GateResult(Veto.GROUP),
+        ),
+        (
+            "marketing",
+            {"sender": "dana@pitchco.io", "relayed_by": "hi@acme.com", "dmarc_pass": False},
+            None,
+            GateResult(Veto.UNVERIFIED),
+        ),
         ("marketing", {"list_id": "news.acme.com"}, None, GateResult(Veto.GROUP)),
     ],
 )

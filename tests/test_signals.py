@@ -3,9 +3,10 @@ import random
 import re
 
 import pytest
-from fakes import GMAIL_PASS
+from fakes import AUTHOR_PASS, GMAIL_PASS, group_relay_headers
 
 from inbox_jev.signals import (
+    AuthVerdicts,
     dmarc_passed,
     domain_of,
     extract,
@@ -14,6 +15,7 @@ from inbox_jev.signals import (
     mailbox_key,
     on_domain,
     parse_list_unsubscribe,
+    relay_author_auth,
     reply_without_thread,
     resolve_relay,
     sender_auth,
@@ -1035,3 +1037,333 @@ def test_sender_auth_trusts_only_the_topmost_gmail_header():
     assert sender_auth([other, GMAIL_PASS])["spf"] == "pass"
     assert sender_auth([other]) is None
     assert sender_auth([]) is None
+
+
+# --- The author's authentication for mail relayed by a trusted group (ARC) ------------------
+
+_AUTHOR_FAILS = (
+    "mx.google.com;\r\n       spf=softfail (google.com: domain of transitioning "
+    "docs@lure.example does not designate 192.0.2.9 as permitted sender) "
+    "smtp.mailfrom=docs@lure.example;\r\n       dmarc=fail (p=NONE sp=NONE dis=NONE) "
+    "header.from=lure.example"
+)
+
+
+def _relayed(headers):
+    return resolve_relay(extract(headers), ["example.com"])
+
+
+def test_relayed_mail_carries_the_authors_verdicts_from_googles_arc_record():
+    sig = _relayed(group_relay_headers(author="docs@lure.example", author_results=_AUTHOR_FAILS))
+    assert sig.relayed_by == "hello@example.com" and sig.sender == "docs@lure.example"
+    assert sig.author_auth == AuthVerdicts(spf="softfail", dkim="none", dmarc="fail")
+    assert not sig.dmarc_pass  # the author's DMARC, not the group's pass
+    # Gmail's own header still describes the group: that is what it authenticates.
+    assert sender_auth(group_relay_headers()["authentication-results"])["dmarc"] == "pass"
+
+
+def test_relayed_mail_whose_author_passes_keeps_a_dmarc_pass():
+    headers = group_relay_headers()
+    headers["arc-seal"] = [f"{v};" for v in headers["arc-seal"]]  # a final `;` is allowed
+    sig = _relayed(headers)
+    assert sig.author_auth == AuthVerdicts(spf="pass", dkim="pass", dmarc="pass")
+    assert sig.dmarc_pass
+
+
+def test_the_group_check_still_uses_the_groups_own_dmarc():
+    """X-Original-Sender is trusted on the group's DMARC pass, whatever the author's."""
+    headers = group_relay_headers(author_results=_AUTHOR_FAILS)
+    assert extract(headers).group_author == "dana@pitchco.example"
+    headers["authentication-results"] = [
+        headers["authentication-results"][0].replace("dmarc=pass", "dmarc=fail")
+    ]
+    sig = extract(headers)
+    assert sig.group_author is None and sig.author_auth is None
+
+
+def test_direct_mail_and_untrusted_groups_get_no_author_auth():
+    direct = group_relay_headers()
+    del direct["mailing-list"], direct["x-original-sender"]
+    assert extract(direct).author_auth is None
+    untrusted = resolve_relay(extract(group_relay_headers()), ["other.example"])
+    assert untrusted.relayed_by is None and untrusted.dmarc_pass  # From's (the group's) DMARC
+
+
+def _without_arc(headers, dkim_comment):
+    """`headers` with no arc verdict in Gmail's header; `dkim_comment` after its DKIM verdict."""
+    top = re.sub(r"arc=pass \([^)]*\);\s*", "", headers["authentication-results"][0])
+    top = top.replace("header.b=FVAIP7dz;", f"header.b=FVAIP7dz{dkim_comment};")
+    assert not re.search(r";\s*arc=", top)
+    return {**headers, "authentication-results": [top]}
+
+
+def _forge(headers, kind, index, old, new):
+    assert old in headers[kind][index]
+    headers[kind][index] = headers[kind][index].replace(old, new)
+    return headers
+
+
+def _only_two_sets(headers):
+    """`headers` with one record of the author's (i=1) and Gmail's set (i=2): N=2."""
+    seals, signatures, results = (
+        headers[k][::2] for k in ("arc-seal", "arc-message-signature", "arc-authentication-results")
+    )
+    seals = [seals[0].replace("i=3", "i=2"), seals[1]]
+    return {
+        **headers,
+        "arc-seal": seals,
+        "arc-message-signature": [signatures[0].replace("i=3", "i=2"), signatures[1]],
+        "arc-authentication-results": [results[0].replace("i=3", "i=2"), results[1]],
+    }
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        # Gmail didn't validate the chain: a forged set (a sender can't sign for google.com).
+        pytest.param(lambda h: group_relay_headers(arc="fail"), id="arc-fail"),
+        pytest.param(lambda h: group_relay_headers(arc="none"), id="arc-none"),
+        pytest.param(lambda h: _without_arc(h, ""), id="no-arc"),
+        pytest.param(lambda h: _without_arc(h, " (arc=pass)"), id="arc-pass-in-comment"),
+        pytest.param(
+            lambda h: {
+                **h,
+                "authentication-results": [
+                    h["authentication-results"][0].replace("arc=pass", "arc=pass; arc=fail")
+                ],
+            },
+            id="arc-verdicts-disagree",
+        ),
+        # A sender's own extra set, even one claiming i=1, mx.google.com and d=google.com.
+        pytest.param(
+            lambda h: {
+                **h,
+                "arc-authentication-results": [
+                    *h["arc-authentication-results"],
+                    "i=1; mx.google.com; spf=pass; dkim=pass; dmarc=pass header.from=bank.example",
+                ],
+            },
+            id="duplicate-aar-instance",
+        ),
+        pytest.param(
+            lambda h: {**h, "arc-seal": [*h["arc-seal"], h["arc-seal"][2]]},
+            id="duplicate-seal-instance",
+        ),
+        pytest.param(
+            lambda h: {**h, "arc-message-signature": h["arc-message-signature"][:2]},
+            id="missing-message-signature",
+        ),
+        pytest.param(
+            lambda h: {k: v[:1] if k.startswith("arc-") else v for k, v in h.items()},
+            id="only-gmails-delivery-set",
+        ),
+        pytest.param(lambda h: _forge(h, "arc-seal", 1, "cv=pass", "cv=fail"), id="cv-fail"),
+        pytest.param(lambda h: _forge(h, "arc-seal", 2, "cv=none", "cv=pass"), id="cv-1-pass"),
+        pytest.param(lambda h: _forge(h, "arc-seal", 0, "i=3", "i=4"), id="instance-gap"),
+        pytest.param(lambda h: _forge(h, "arc-seal", 0, "i=3", "i=03"), id="leading-zero"),
+        # The record and the delivery set must be Google's.
+        pytest.param(
+            lambda h: _forge(h, "arc-seal", 1, "d=google.com", "d=attacker.example"),
+            id="record-not-sealed-by-google",
+        ),
+        pytest.param(
+            lambda h: _forge(h, "arc-seal", 0, "d=google.com", "d=google.com.attacker.example"),
+            id="delivery-not-sealed-by-google",
+        ),
+        pytest.param(
+            lambda h: _forge(
+                h, "arc-seal", 1, "d=google.com;", "d=attacker.example; d=google.com;"
+            ),
+            id="seal-tag-twice",
+        ),
+        pytest.param(
+            lambda h: _forge(
+                h, "arc-authentication-results", 1, "mx.google.com", "mx.attacker.example"
+            ),
+            id="record-authserv-not-gmail",
+        ),
+        pytest.param(
+            lambda h: _forge(h, "arc-authentication-results", 1, "i=2;", "i=2"),
+            id="record-without-instance-separator",
+        ),
+        # Google Groups' second record (N-2) must be Google's and agree with the one read.
+        pytest.param(
+            lambda h: _forge(h, "arc-seal", 2, "d=google.com", "d=attacker.example"),
+            id="pair-not-sealed-by-google",
+        ),
+        pytest.param(
+            lambda h: _forge(h, "arc-authentication-results", 2, "spf=pass", "spf=softfail"),
+            id="pair-verdicts-differ",
+        ),
+        pytest.param(
+            lambda h: _forge(
+                h, "arc-authentication-results", 2, "dkim=pass", "dkim=pass; arc=none"
+            ),
+            id="pair-has-another-verdict",
+        ),
+        pytest.param(
+            lambda h: _forge(
+                h,
+                "arc-authentication-results",
+                2,
+                "header.from=pitchco.example",
+                "header.from=b.example",
+            ),
+            id="pair-names-another-domain",
+        ),
+        pytest.param(
+            lambda h: _forge(
+                h, "arc-authentication-results", 2, "mx.google.com", "mx.attacker.example"
+            ),
+            id="pair-authserv-not-gmail",
+        ),
+        pytest.param(
+            lambda h: _forge(
+                h, "arc-authentication-results", 2, "header.b=dONauLPM", "header.b=dONa)uLPM"
+            ),
+            id="pair-malformed",
+        ),
+        pytest.param(_only_two_sets, id="only-two-sets"),
+    ],
+)
+def test_an_arc_record_is_trusted_only_as_google_wrote_and_gmail_validated_it(tamper):
+    headers = tamper(group_relay_headers())
+    assert relay_author_auth(headers, "dana@pitchco.example") is None
+    sig = _relayed(headers)
+    # Still a trusted relay (the group's own DMARC passes), but the author's verdicts are unknown.
+    assert sig.relayed_by == "hello@example.com"
+    assert sig.author_auth is None and not sig.dmarc_pass
+
+
+def test_without_gmails_header_nothing_is_trusted():
+    headers = {**group_relay_headers(), "authentication-results": []}
+    assert relay_author_auth(headers, "dana@pitchco.example") is None
+    assert extract(headers).group_author is None
+
+
+def test_a_record_that_doesnt_parse_verifies_nothing():
+    """The record is parsed as strictly as Gmail's own header (ADR 0043): fail closed, and a
+    malformed record names no `header.from` to bind it to the author."""
+    broken = AUTHOR_PASS.replace("header.b=dONauLPM", "header.b=dONa)uLPM")
+    headers = group_relay_headers(author_results=broken)
+    assert relay_author_auth(headers, "dana@pitchco.example") is None
+    assert not _relayed(headers).dmarc_pass
+
+
+@pytest.mark.parametrize(
+    "group_copy_sets",
+    [pytest.param(1, id="an-extra-google-set"), pytest.param(2, id="a-nested-groups-pair")],
+)
+def test_a_record_of_the_groups_own_copy_is_not_the_authors(group_copy_sets):
+    """More Google hops after the group put Google's record of the group's own copy at N-1: its
+    pass is the group's, so the author's verdicts are unknown, never that pass (ADR 0050)."""
+    headers = group_relay_headers(
+        author="x@lure.example", author_results=_AUTHOR_FAILS, group_copy_sets=group_copy_sets
+    )
+    assert len(headers["arc-seal"]) == 3 + group_copy_sets
+    sig = _relayed(headers)
+    assert sig.relayed_by == "hello@example.com" and sig.sender == "x@lure.example"
+    assert sig.author_auth is None and not sig.dmarc_pass
+    assert relay_author_auth(headers, "x@lure.example") is None
+
+
+def test_an_extra_google_set_is_not_read_for_an_author_on_the_groups_domain():
+    """An author on the group's own domain whose record fails (a spoofed CEO): one extra Google
+    set after the group is Google's record of the group's copy, whose `header.from` is that same
+    domain, so the binding alone would read the group's pass as the author's. That record differs
+    from the author's record at N-2, so it is not read (ADR 0050)."""
+    fails = (
+        "mx.google.com;\r\n       spf=fail (google.com: domain of ceo@example.com does not "
+        "designate 192.0.2.9 as permitted sender) smtp.mailfrom=ceo@example.com;\r\n       "
+        "dkim=none;\r\n       dmarc=fail (p=REJECT sp=REJECT dis=NONE) header.from=example.com"
+    )
+    headers = group_relay_headers(author="ceo@example.com", author_results=fails, group_copy_sets=1)
+    assert relay_author_auth(headers, "ceo@example.com") is None
+    sig = _relayed(headers)
+    assert sig.relayed_by == "hello@example.com" and sig.sender == "ceo@example.com"
+    assert sig.author_auth is None and not sig.dmarc_pass
+    # Without the extra set, the same author's record is read: its failure, not the group's pass.
+    plain = relay_author_auth(
+        group_relay_headers(author="ceo@example.com", author_results=fails), "ceo@example.com"
+    )
+    assert plain == AuthVerdicts(spf="fail", dkim="none", dmarc="fail")
+
+
+@pytest.mark.parametrize(
+    ("header_from", "expected"),
+    [
+        pytest.param("pitchco.example", AuthVerdicts("pass", "pass", "pass"), id="same-domain"),
+        pytest.param("PitchCo.Example.", AuthVerdicts("pass", "pass", "pass"), id="case-and-dot"),
+        pytest.param("example.com", None, id="the-groups-domain"),
+        pytest.param("mail.pitchco.example", None, id="a-subdomain"),
+        pytest.param("example", None, id="its-parent"),
+        pytest.param('"pitchco.example"', None, id="quoted"),
+    ],
+)
+def test_the_record_is_bound_to_the_authors_domain_exactly(header_from, expected):
+    results = AUTHOR_PASS.replace("header.from=pitchco.example", f"header.from={header_from}")
+    headers = group_relay_headers(author_results=results)
+    assert relay_author_auth(headers, "dana@pitchco.example") == expected
+
+
+@pytest.mark.parametrize(
+    "results",
+    [
+        pytest.param(AUTHOR_PASS.replace(" header.from=pitchco.example", ""), id="none"),
+        pytest.param(
+            "mx.google.com; spf=pass header.from=pitchco.example; dkim=pass; dmarc=pass",
+            id="on-spf-only",
+        ),
+        pytest.param(AUTHOR_PASS + ";\r\n       dmarc=pass header.from=example.com", id="two"),
+    ],
+)
+def test_a_record_naming_no_single_author_domain_is_unknown(results):
+    headers = group_relay_headers(author_results=results)
+    assert relay_author_auth(headers, "dana@pitchco.example") is None
+
+
+def _with_senders_set(headers, sealer, results):
+    """`headers` with an ARC set the sender sealed (`d=<sealer>`) before the group, at i=1: the
+    group's two records and Gmail's set move up one instance (N=4)."""
+    for kind in ("arc-seal", "arc-message-signature", "arc-authentication-results"):
+        values = headers[kind]
+        headers[kind] = [re.sub(r"^i=(\d)", lambda m: f"i={int(m[1]) + 1}", v) for v in values]
+    headers["arc-seal"] = [v.replace("cv=none", "cv=pass") for v in headers["arc-seal"]]
+    headers["arc-seal"].append(f"i=1; a=rsa-sha256; cv=none; d={sealer}; s=s; b=AAAA")
+    headers["arc-message-signature"].append(f"i=1; a=rsa-sha256; d={sealer}; s=s; b=AAAA")
+    headers["arc-authentication-results"].append(f"i=1; {results}")
+    return headers
+
+
+def test_a_sender_written_chain_below_googles_is_not_read():
+    """A sender may seal its own ARC set (i=1) before the group: Google's records are then i=2
+    and i=3."""
+    headers = _with_senders_set(
+        group_relay_headers(author="docs@lure.example", author_results=_AUTHOR_FAILS),
+        "attacker.example",
+        "mx.google.com; spf=pass; dkim=pass; dmarc=pass header.from=bank.example",
+    )
+    expected = AuthVerdicts(spf="softfail", dkim="none", dmarc="fail")
+    assert relay_author_auth(headers, "docs@lure.example") == expected
+
+
+def test_a_four_set_relay_whose_two_google_records_agree_still_resolves():
+    """The other layout seen on real mail (4 of 62 group relays): the author's own provider
+    sealed a set first, then Google Groups added its two identical records and Gmail its own.
+    N-1 and N-2 agree, so the author's record is read (ADR 0050)."""
+    headers = _with_senders_set(
+        group_relay_headers(),
+        "pitchco.example",
+        "mail.pitchco.example; dkim=pass header.i=@pitchco.example",
+    )
+    assert len(headers["arc-seal"]) == 4
+    sig = _relayed(headers)
+    assert sig.sender == "dana@pitchco.example" and sig.dmarc_pass
+    assert sig.author_auth == AuthVerdicts(spf="pass", dkim="pass", dmarc="pass")
+
+
+def test_x_original_authentication_results_is_never_read():
+    """Google Groups adds it, but a sender can write one too: only the ARC record counts."""
+    headers = group_relay_headers(arc="fail")
+    headers["x-original-authentication-results"] = [AUTHOR_PASS]
+    assert relay_author_auth(headers, "dana@pitchco.example") is None

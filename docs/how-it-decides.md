@@ -323,7 +323,7 @@ An unsubscribe is irreversible. During `run` it happens only when **all** of the
 | 1 | The final category's action is `archive_unsubscribe` | `policy._apply` |
 | 2 | Decided by a sender rule, or by Jev at or above the category threshold. An archive-group or Review decision never unsubscribes | `policy.decide` |
 | 3 | **Not a sender decided per email** ([3.5](#35-sender-rules)) unless a **manual** rule decided the email: Jev's answer, the email's own correction or a stored decision never unsubscribe a sender in `decide_each_email` (`Veto.DECIDED_EACH_EMAIL`; [EX-45](#ex-45--a-sender-decided-per-email-is-unsubscribed-only-on-a-manual-rule)). The email keeps its category and is archived | `policy.unsubscribe_gate` |
-| 4 | **Verified**: `dmarc=pass` in Gmail's own `Authentication-Results` ([4.2](#42-dmarc)) and a `List-Unsubscribe` header with an `https:` or `mailto:` URI (an `http:`-only header counts as none, [4.3](#43-list-unsubscribe-one-click-and-mailto)). If not, the email keeps its category, is archived, and `unsubscribe_skipped_unverified` is set. It is never moved to Spam for this | `policy.unsubscribe_gate` |
+| 4 | **Verified**: `dmarc=pass` in Gmail's own `Authentication-Results` ([4.2](#42-dmarc)), for a trusted group's author in Google's ARC record of what the group received ([4.2](#42-dmarc)), and a `List-Unsubscribe` header with an `https:` or `mailto:` URI (an `http:`-only header counts as none, [4.3](#43-list-unsubscribe-one-click-and-mailto)). If not, the email keeps its category, is archived, and `unsubscribe_skipped_unverified` is set. It is never moved to Spam for this | `policy.unsubscribe_gate` |
 | 5 | **Not a group or discussion list** (`_group_list`): no `List-Post` header; no unsubscribe target on `googlegroups.com` / `groups.google.com` (host or subdomain); not relayed by a Google Group (`group_author` found, trusted or not); sender domain and `List-Id` not on the account's own domain (or a subdomain) | `policy.unsubscribe_gate` |
 | 6 | For a category with `unsubscribe_known_contacts: false` (`cold_outreach`): `previous_contact` is not `wrote_to_sender` / `wrote_to_their_domain` (`known_contact_kept` otherwise). Unknown (`None`, the search failed or wasn't run) does **not** block it: deliberate, so that one failed search doesn't stop every outreach unsubscribe ([ADR 0011](decisions/0011-never-unsubscribe-groups-or-known-contacts.md), re-confirmed by the maintainer on 2026-10-14; `unsubscribe-retry` holds the row instead) | `policy.unsubscribe_gate` |
 | 7 | Mode is `act`, and the account has no `act_categories` or lists the category | `policy.acts_on`, from `policy.plan` |
@@ -728,9 +728,10 @@ whole header must match the RFC's grammar, or nothing in it counts
   is a verdict: properties such as `smtp.mailfrom=`, which name the envelope sender the sender
   chooses, are never read, so `dmarc=pass@attacker.example` there is no verdict
   ([EX-40](#ex-40--an-envelope-sender-that-looks-like-a-dmarc-pass)).
-- **Vocabulary**: an `spf`, `dkim` or `dmarc` result must be an RFC 8601 word (`pass`, `fail`,
-  `softfail`, `hardfail`, `neutral`, `none`, `temperror`, `permerror`, `policy`). Other methods
-  (`arc`, `dara`) must parse but are ignored.
+- **Vocabulary**: an `spf`, `dkim`, `dmarc` or `arc` result must be an RFC 8601 word (`pass`,
+  `fail`, `softfail`, `hardfail`, `neutral`, `none`, `temperror`, `permerror`, `policy`). `arc` is
+  read only to trust a group's ARC record (below); other methods (`dara`) must parse but are
+  ignored.
 - **Fails closed**: a header with anything else (an unbalanced comment, quote or literal, a stray
   `]` or `\`, a property without a value, a stray word, an empty resinfo, `dmarc=passx`) has no
   verdicts at all, not even those before the break: DMARC doesn't pass, and every method is `none`
@@ -745,6 +746,48 @@ whole header must match the RFC's grammar, or nothing in it counts
 method the header doesn't mention. DKIM is `pass` when any signature passes, else its first verdict;
 SPF and DMARC are their one verdict, or `none` when two disagree. Without a trusted header it is
 unknown and the key is left out. It only informs Jev; no rule acts on it.
+
+**Mail relayed by a trusted group** ([4.5](#45-x-original-sender-trust)): a Google Group re-sends
+the author's message from the group's address, so Gmail's own header authenticates the group's copy
+(for a group on `group_domains`, always a pass for your own domain), not the author. For such an
+email, once `resolve_relay` has made the author the sender, Jev's `sender_auth` and `dmarc_pass` are
+the **author's**, read by `signals.relay_author_auth` from the ARC record (RFC 8617) Google adds
+when the group receives the message
+([ADR 0050](decisions/0050-group-relayed-mail-carries-its-authors-authentication.md),
+[EX-49](#ex-49--phishing-relayed-by-your-own-group-shows-its-authors-authentication)). Google Groups
+adds two ARC sets with the author's verdicts and Gmail one more on delivery, a copy of its own
+header; the record read is the `ARC-Authentication-Results` at instance N-1 of N, and only when:
+
+- Gmail's own header (the trusted one above) has the verdict `arc=pass`: Gmail checked every
+  `ARC-Seal` signature, and a sender can't sign for `google.com`. An `arc=pass` inside a comment, in
+  another header, or next to another `arc` verdict that disagrees doesn't count;
+- every `ARC-Seal`, `ARC-Message-Signature` and `ARC-Authentication-Results` parses (tag-lists per
+  RFC 6376 3.2, a tag named twice is invalid; a strict `i=N;` before the authentication results),
+  with exactly one of each per instance, numbered 1 to N, N ≥ 3;
+- every seal's `cv` is `none` at instance 1 and `pass` above it;
+- the seals at N, N-1 and N-2 are signed `d=google.com`, exactly;
+- the record's authserv-id is exactly `mx.google.com`, and it parses with the grammar above;
+- the record is about the author's message: its DMARC resinfo names exactly one `header.from`
+  (lowercased, a final dot dropped), and it is exactly the domain of `X-Original-Sender`. A record
+  of the group's own copy (`header.from` = the group's domain), which one more Google hop after the
+  group puts at N-1 (a nested group, a set Google adds to its layout), names the group, not the
+  author. DMARC's `header.from` is the domain of the `From` the message had when Google received it,
+  which for the author's message is the author's address, the one Google Groups copies into
+  `X-Original-Sender`; Google writes it inside the sealed record, so the sender can't choose it;
+- the record agrees with Google Groups' second record: the one at N-2 parses to the same
+  authserv-id, the same verdicts and the same `header.from`. One extra Google set after the group
+  (Google's record of the group's copy, the group's pass) differs from the author's record below it,
+  so it is not read, even for an author on the group's own domain, whose `header.from` the binding
+  above can't tell from the group copy's.
+
+Without such a record (no record, an untrusted one, a malformed one, one without `header.from` or
+about another domain, one that differs from Google Groups' second record) the author's verdicts are
+unknown: `sender_auth` is all `none` and the resolved `dmarc_pass` is false, never the group's pass.
+The comment Gmail writes after `arc=pass` (a summary of the author's verdicts) and the
+`X-Original-Authentication-Results` header Google Groups adds are never read: one is free text, the
+other a header a sender can write too. Before the author is resolved, `dmarc_pass` is still the
+group's, which is what the `X-Original-Sender` check needs ([4.5](#45-x-original-sender-trust)).
+Untrusted groups and direct mail keep Gmail's own header.
 
 ### 4.3 `List-Unsubscribe`, one-click and `mailto:`
 
@@ -807,6 +850,12 @@ groups.io, LISTSERV, Discourse; not by ESPs or sequence tools). Its `List-Unsubs
 `signals.resolve_relay` then moves the candidate into `sender` (and the group into `relayed_by`)
 only when the `From` domain is one of the account's `group_domains` or a subdomain of one. Any
 candidate, trusted or not, makes the email a group for the unsubscribe check.
+
+The first check reads the group's own DMARC, as Gmail's header gives it; the author's authentication
+never takes part in it. Once the author is the sender, `dmarc_pass` and Jev's `sender_auth` become
+the author's, from Google's ARC record or unknown without one ([4.2](#42-dmarc)). A relayed author
+is still never unsubscribed (condition 5 of [3.3](#33-unsubscribe-conditions)); one whose DMARC
+doesn't pass stops at condition 4 first, so its row has `unsubscribe_skipped_unverified`.
 
 ### 4.6 Body extraction
 
@@ -879,15 +928,16 @@ keeps the email out of auto rules ([3.5](#35-sender-rules)). `dry_classify.py` s
 | `previous_contact` | Only when known (`None` leaves the key out); always left out of the flags-only call for allowlist and keep-rule emails |
 | `reply_without_thread` | `true` when the subject starts with a reply or forward prefix (`RE:`, `Fwd:`, `AW:`, `WG:`, `RV:`, `RES:`, `TR:`, `SV:`, `VS:`, `ANTW:`, `ODP:`, `ENC:`, any case, numbered or repeated) and the email has neither `In-Reply-To` nor `References` (`signals.reply_without_thread`); left out otherwise |
 | `link_domains` | The domains the body's links point to, most frequent first, at most 8 ([4.6](#46-body-extraction)); left out when there is none |
-| `sender_auth` | `{"spf", "dkim", "dmarc"}` verdicts from Gmail's own `Authentication-Results` ([4.2](#42-dmarc)); left out without one |
+| `sender_auth` | `{"spf", "dkim", "dmarc"}` verdicts from Gmail's own `Authentication-Results` ([4.2](#42-dmarc)); left out without one. For a trusted group relay, the author's, from Google's ARC record, all `none` without a trusted one, never the group's |
 
 Questions (`build_questions`): one `Choice` over the categories, with each category's `criteria` and
 the instruction to judge by who wrote it and why, explaining `previous_contact` ("a personal-looking
 pitch from a sender I never wrote to is usually cold outreach") and the phishing signals (a passing
 `sender_auth` only proves which domain sent the email, and DMARC `none` or `fail` strengthens other
-signs; `reply_without_thread` is a reply subject answering nothing; links to a brand unrelated to
-the sender are a sign of phishing, while a service linking to its own brand or portal domains, even
-ones that differ from the sending domain, is normal,
+signs; for an email sent via a group, `sender_auth` is the original sender's, for their own domain;
+`reply_without_thread` is a reply subject answering nothing; links to a brand unrelated to the
+sender are a sign of phishing, while a service linking to its own brand or portal domains, even ones
+that differ from the sending domain, is normal,
 [ADR 0042](decisions/0042-phishing-signals-for-jev.md)); one `Noul` for `needs_reply`, whose
 instructions are `needs_reply.question` with its yes / no examples
 ([3.2](#32-confidence-outcomes-jev-path)); one `Noul` per tag. The answer gives the category, its
@@ -1711,9 +1761,38 @@ probabilities that matter are shown; the rest are ~0.
   the server's raw JSON, which the digest showed ([4.3](#43-list-unsubscribe-one-click-and-mailto),
   [ADR 0048](decisions/0048-one-click-multipart-then-urlencoded-on-415.md)).
 
+### EX-49 — Phishing relayed by your own group shows its author's authentication
+
+- **Test**: `test_ex49_phishing_relayed_by_your_own_group_shows_its_authors_authentication`
+- **Input**: "Document ID: New Pending Review" from `"'Dana' via Hello" <hello@example.com>`, a
+  Google Group on `group_domains`, written by `docs@homescape-lure.example` (`X-Original-Sender`,
+  `Mailing-list: list hello@example.com`, `List-Post`, a Google Groups `List-Unsubscribe`). Gmail's
+  own header says `spf=pass`, `dkim=pass`, `dmarc=pass header.from=example.com` and `arc=pass`. The
+  ARC sets are Google Groups' `i=1` and `i=2`, whose `ARC-Authentication-Results` say
+  `mx.google.com; spf=softfail …; dmarc=fail … header.from=homescape-lure.example` (the author's
+  domain), and Gmail's `i=3`, all sealed `d=google.com`. A second, identical email has no ARC sets.
+  Jev: spam 0.95 for both. Shape of the 2026-10-15 production incident, whose author's domain
+  passed.
+- **Outcome**: Jev's state carries `original_sender: docs@homescape-lure.example`,
+  `sent_via_group: hello@example.com` and
+  `sender_auth: {"spf": "softfail", "dkim": "none", "dmarc": "fail"}`; for the second email
+  `sender_auth: {"spf": "none", "dkim": "none", "dmarc": "none"}`. Both rows have the author as
+  sender and are moved to Spam; nothing is unsubscribed.
+- **Why**: before, `sender_auth` was Gmail's own header, which for a relayed email authenticates the
+  group's re-sent copy: Jev saw three passes, for your own domain, on a stranger's phishing. Now it
+  sees what Google recorded about the author when the group received the email, trusted only when
+  Gmail validated the ARC chain, the record is Google's, its `header.from` is the author's domain
+  and Google Groups' two records agree; without one, nothing is known about the author
+  ([4.2](#42-dmarc),
+  [ADR 0050](decisions/0050-group-relayed-mail-carries-its-authors-authentication.md)). As in EX-38,
+  the test pins the state and the outcome of Jev's answer, not the judgement.
+
 ## 6. Glossary
 
 - **Action**: what a category does: `keep`, `archive`, `archive_unsubscribe`, `spam`.
+- **ARC record**: the `ARC-Authentication-Results` Google adds when a Google Group receives a
+  message (RFC 8617): Gmail's verdicts for the author, read for a trusted group's email when Gmail
+  validated the chain ([4.2](#42-dmarc)).
 - **Archive categories**: categories whose action is `archive` or `archive_unsubscribe`.
 - **Archive group**: archiving because the archive categories together reach
   `archive_group_min_confidence` though the top one alone doesn't reach its threshold. Never
@@ -1837,6 +1916,20 @@ Behaviour found while writing this spec, documented as it is today:
   SPF, DKIM or DMARC result word, a trailing `;`), those emails lose their verdicts, unverified and
   never unsubscribed, until the grammar is widened. Every shape Gmail wrote on 400 recent production
   emails parses (`test_real_gmail_header_shapes_parse`).
+- A trusted group's author is authenticated from Google's ARC record ([4.2](#42-dmarc)), which
+  relies on Google's layout: Google Groups' two identical records just below Gmail's own delivery
+  set, all three sealed by `google.com`, the records' `header.from` being exactly
+  `X-Original-Sender`'s domain (true of all 62 group relays among 64 recent production emails with
+  `X-Original-Sender`, ADR 0050). One extra Google set after the group is unknown, for every author.
+  A whole nested group (a second Google Groups hop adding its own pair of records of the inner
+  group's copy) is unknown too, except for an author on the inner group's own domain: that pair
+  names the same domain and agrees, so the inner group's copy's verdicts are read, which pass. A
+  spoofed own-domain author gets that far only if the inner group accepted the message, which a
+  `p=reject` DMARC policy on that domain prevents. If Google changes the layout, or Gmail adds no
+  `arc=` verdict, relayed mail shows the author's verdicts as unknown (all `none`), never the
+  group's pass. The match is exact: should Google Groups ever put in `X-Original-Sender` an address
+  on another domain than the author's `From` (it copies `From` today), that author would be unknown
+  too.
 - The rules `decide_each_email` ignores ([3.5](#35-sender-rules)) still show in `rules list`, and
   decide again if the sender leaves the list. `dry_classify.py` asks Jev for an email of such a
   sender that you corrected, where a `run` in a stronger mode would apply the correction (with

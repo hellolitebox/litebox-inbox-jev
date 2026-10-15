@@ -1,6 +1,7 @@
 # 0043. Authentication-Results is parsed per RFC 8601
 
-- Status: Accepted
+- Status: Accepted (`arc` verdicts read, and ARC-Authentication-Results parsed with this grammar:
+  amended by [0050](0050-group-relayed-mail-carries-its-authors-authentication.md))
 - Date: 2026-10-14
 - PR: #50
 
