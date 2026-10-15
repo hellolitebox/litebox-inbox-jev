@@ -201,7 +201,7 @@ flowchart TD
     F -- yes --> G{"Run budget left and the list<br/>not already settled?"}
     G -- no --> N
     G -- yes --> H{"One-click header and an https URL<br/>passing the public-host guard?"}
-    H -- yes --> P["POST List-Unsubscribe=One-Click"]
+    H -- yes --> P["POST List-Unsubscribe=One-Click<br/>(multipart; once urlencoded after a 415)"]
     P -- "2xx/3xx" --> OK["ok"]
     P -- "failed, mailto present" --> M
     P -- "failed, no mailto" --> FL["failed (retried up to 3 attempts)"]
@@ -759,9 +759,23 @@ unknown and the key is left out. It only informs Jev; no rule acts on it.
 - Order in `unsubscribe.unsubscribe`:
   1. `dmarc_pass` is false → `manual`/`skipped` (never reached from `run`, which checks first).
   2. With one-click: the first `https` URL that passes the guard gets a `POST` with form body
-     `List-Unsubscribe=One-Click`, 15 s timeout, **no redirects**. A 2xx or 3xx is `ok`. If it fails
-     and a `mailto:` exists, go to step 3; if it fails and none exists, `failed`. URLs that fail the
-     guard are skipped.
+     `List-Unsubscribe=One-Click`, 15 s timeout, **no redirects**. The body is sent as
+     `multipart/form-data`, the encoding RFC 8058 (section 3.2) says SHOULD be used; an answer of
+     **415** (Unsupported Media Type) gets the same request **once** more, to the same address, as
+     `application/x-www-form-urlencoded`, which it allows, and that answer (or error) is the result
+     (logged as `one-click multipart refused (415), retried urlencoded`). A 415 is the one answer
+     retried: the server refused the body's encoding without acting on it. Any other answer, or an
+     error once the request was sent, may come from a server that acted, so it is the result
+     ([ADR 0048](decisions/0048-one-click-multipart-then-urlencoded-on-415.md)). A 2xx or 3xx is
+     `ok`. If it fails and a `mailto:` exists, go to step 3; if it fails and none exists, `failed`.
+     A refused `POST` stores `HTTP <status> <reason>` (the standard reason phrase) as the error,
+     plus the server's own message when its body is a JSON object with a `message`, `error` or
+     `detail` string that says more: one line of printable ASCII without braces or links (any word
+     with `://`), at most 120 characters. Only a body of at most 4 KB is read for it; any body that
+     can't be read (huge, deeply nested, not UTF-8) leaves just `HTTP <status> <reason>`, so a sent
+     `POST` is always recorded. The body itself is never stored: it is the sender's text. The digest
+     shows `HTTP <status> <reason>` for a row whose error doesn't start with it (one stored before,
+     which holds the raw body). URLs that fail the guard are skipped.
   3. The first `mailto:` with an `@` gets an email from your Gmail (subject and body from the URI,
      default `unsubscribe`). Sent → `ok`; any error → `failed` (its traceback is logged as
      `unsubscribe mail failed`).
@@ -1679,6 +1693,24 @@ probabilities that matter are shown; the rest are ~0.
   an auto rule ([3.5](#35-sender-rules),
   [ADR 0047](decisions/0047-calendar-messages-teach-no-auto-rule.md)).
 
+### EX-48 — A one-click endpoint that parses one encoding only
+
+- **Test**: `test_ex48_a_one_click_endpoint_that_parses_one_encoding_only`
+- **Input**: in `act`, three verified marketing emails (Jev: marketing 0.97), each with one-click
+  and only an `https` URL in `List-Unsubscribe`: `deals@shop.example`, whose endpoint parses only
+  `multipart/form-data` and answers 415 to anything else (the production incident of 2026-10-14);
+  `offers@store.example`, whose endpoint parses only `application/x-www-form-urlencoded`; and
+  `promo@outlet.example`, whose endpoint answers 415 to both.
+- **Outcome**: `shop.example` gets one multipart `POST` and is `ok`. `store.example` gets the
+  multipart `POST`, answered 415, then the same `POST` urlencoded, and is `ok`. `outlet.example`
+  gets both and is `failed` with `http_status` 415 and error `HTTP 415 Unsupported Media Type`,
+  which the digest lists under "Unsubscribe failed".
+- **Why**: RFC 8058 says the body SHOULD be multipart and MAY be urlencoded, so an endpoint can
+  parse either; a 415 says it parsed nothing and acted on nothing, so one more try in the other
+  encoding can't unsubscribe twice. Before, the body was urlencoded only and the failed row stored
+  the server's raw JSON, which the digest showed ([4.3](#43-list-unsubscribe-one-click-and-mailto),
+  [ADR 0048](decisions/0048-one-click-multipart-then-urlencoded-on-415.md)).
+
 ## 6. Glossary
 
 - **Action**: what a category does: `keep`, `archive`, `archive_unsubscribe`, `spam`.
@@ -1827,3 +1859,9 @@ Behaviour found while writing this spec, documented as it is today:
   the first answer didn't count (e.g. 0.93 then 0.97): the sender just needs another email. And an
   email seen in `dry_run` whose `label` pass then failed has a row that looks learned from (Jev
   decision, mode `label`), so its eventual answer adds no hit either. Both err toward fewer rules.
+- A one-click endpoint that rejects a multipart body with another status than 415 (a 400 for a body
+  it can't parse) is not retried urlencoded: a 400 can't tell "wrong encoding" from "bad or expired
+  token", and the server may have acted, so the attempt fails like any other refusal and its later
+  attempts (`run` or `unsubscribe-retry`, up to 3) send multipart again
+  ([EX-48](#ex-48--a-one-click-endpoint-that-parses-one-encoding-only)). Such an endpoint, seen in
+  the digest as `HTTP 400 Bad Request`, needs a manual unsubscribe.

@@ -8,7 +8,11 @@ import base64
 import re
 import sys
 from datetime import timedelta
+from email import policy as email_policy
+from email.parser import BytesParser
 from pathlib import Path
+from typing import NamedTuple
+from urllib.parse import urlencode
 
 import httpx
 import pytest
@@ -95,16 +99,47 @@ def _row(ctx, gmail_id):
         return row
 
 
-def _one_click_posts(ctx):
-    """Route `ctx`'s one-click POSTs to a mock transport (no network, no DNS) and record them."""
+class Post(NamedTuple):
+    """A one-click POST as the server saw it: its URL, media type and form fields (urlencoded)."""
+
+    url: str
+    media_type: str
+    fields: str
+
+
+def _form_fields(request: httpx.Request) -> tuple[str, str]:
+    """The request's media type and form fields, decoded by the stdlib's own parsers, whichever
+    of RFC 8058's two encodings carried them."""
+    content_type = request.headers["content-type"]
+    media_type = content_type.split(";", 1)[0]
+    if media_type != "multipart/form-data":
+        return media_type, request.content.decode()
+    raw = f"Content-Type: {content_type}\r\n\r\n".encode() + request.content
+    parts = BytesParser(policy=email_policy.default).parsebytes(raw).iter_parts()
+    fields = [
+        (part.get_param("name", header="content-disposition"), part.get_content()) for part in parts
+    ]
+    return media_type, urlencode(fields)
+
+
+ANY_FORM = frozenset({"multipart/form-data", "application/x-www-form-urlencoded"})
+
+
+def _one_click_posts(ctx, parses=None):
+    """Route `ctx`'s one-click POSTs to a mock transport (no network, no DNS) and record them.
+
+    An endpoint answers 415 to a media type its host doesn't parse (`parses`: host → media
+    types, every host parsing both by default), 200 otherwise."""
+    parses = parses or {}
     posts = []
     real = unsub.unsubscribe
 
     def handler(request):
         # The POST goes to the IP the guard validated; Host carries the URL's hostname.
         url = f"https://{request.headers['host']}{request.url.raw_path.decode()}"
-        posts.append((url, request.content.decode()))
-        return httpx.Response(200)
+        posts.append(Post(url, *_form_fields(request)))
+        parsed = parses.get(request.headers["host"], ANY_FORM)
+        return httpx.Response(200 if posts[-1].media_type in parsed else 415)
 
     def fake(sig, send_mail):
         with httpx.Client(transport=httpx.MockTransport(handler)) as client:
@@ -269,7 +304,13 @@ def test_ex04_stranger_sequence_is_archived_and_unsubscribed(spec):
     assert ctx.classifier.states[0]["previous_contact"] == "never"
     assert gmail.modified[-1][2] == ["INBOX"]
     assert "Label_Jev/Outreach" in gmail.modified[-1][1]
-    assert posts == [("https://unsub.sequencer.example/u/abc", "List-Unsubscribe=One-Click")]
+    assert posts == [
+        Post(
+            "https://unsub.sequencer.example/u/abc",
+            "multipart/form-data",
+            "List-Unsubscribe=One-Click",
+        )
+    ]
     assert gmail.sent == []  # the mailto isn't needed
     with ctx.sessions() as s:
         row = s.query(Unsubscribe).one()
@@ -1008,7 +1049,7 @@ def test_ex26_writing_to_a_friend_on_country_free_mail_makes_no_known_contact(sp
     assert gmail.written_queries == ["growth.lead@hotmail.com.ar"]  # no domain search
     assert ctx.classifier.states[0]["previous_contact"] == "never"
     assert gmail.modified[-1][2] == ["INBOX"]
-    assert [url for url, _ in posts] == ["https://unsub.sequencer.example/u/xyz"]
+    assert [post.url for post in posts] == ["https://unsub.sequencer.example/u/xyz"]
     with ctx.sessions() as s:
         assert s.query(Unsubscribe).one().status == "ok"
 
@@ -1286,7 +1327,7 @@ def test_ex34_an_email_to_a_similar_address_makes_no_known_contact(spec, monkeyp
     assert svc.reads == ["s0"]  # its To says who it went to
     assert ctx.classifier.states[0]["previous_contact"] == "never"
     assert gmail.modified[-1][2] == ["INBOX"]
-    assert [url for url, _ in posts] == ["https://unsub.sequencer.example/u/lee"]
+    assert [post.url for post in posts] == ["https://unsub.sequencer.example/u/lee"]
 
     # An email to her own address, however it is capitalised, makes her a known contact.
     svc = SentMailService(
@@ -1890,3 +1931,48 @@ def test_ex47_rsvp_responses_from_a_person_never_teach_a_rule_on_them(spec):
     row = _row(ctx, "4")
     assert (row.source, row.category, row.archived) == ("jev", "important", False)
     assert "INBOX" in gmail.emails["4"].label_ids
+
+
+# --- EX-48 -----------------------------------------------------------------------------------
+
+
+def test_ex48_a_one_click_endpoint_that_parses_one_encoding_only(spec):
+    """EX-48 (docs/how-it-decides.md §5, §4.3 one-click, ADR 0048)."""
+    ctx, gmail, account = spec
+    multipart, form = "multipart/form-data", "application/x-www-form-urlencoded"
+    one_click = "List-Unsubscribe=One-Click"
+    senders = {
+        "1": ("deals@shop.example", "news.shop.example", {multipart}),
+        "2": ("offers@store.example", "go.store.example", {form}),
+        "3": ("promo@outlet.example", "u.outlet.example", set()),
+    }
+    for gmail_id, (sender, host, _) in senders.items():
+        subject = f"Sale {gmail_id}"
+        gmail.emails[gmail_id] = email(
+            gmail_id,
+            sender,
+            subject,
+            list_unsubscribe=f"<https://{host}/u/{gmail_id}>",
+            list_unsubscribe_post=one_click,
+        )
+        ctx.classifier.answers[subject] = answer("marketing", marketing=0.97)
+    posts = _one_click_posts(ctx, {host: parses for _, host, parses in senders.values()})
+    triage.run_account(ctx, account, Mode.ACT)
+
+    assert posts == [
+        Post("https://news.shop.example/u/1", multipart, one_click),
+        Post("https://go.store.example/u/2", multipart, one_click),
+        Post("https://go.store.example/u/2", form, one_click),
+        Post("https://u.outlet.example/u/3", multipart, one_click),
+        Post("https://u.outlet.example/u/3", form, one_click),
+    ]
+    with ctx.sessions() as s:
+        rows = {r.list_key: r for r in s.query(Unsubscribe)}
+        outcome = {k: (r.method, r.status, r.http_status, r.error) for k, r in rows.items()}
+        assert outcome == {
+            "shop.example": ("one_click", "ok", 200, None),
+            "store.example": ("one_click", "ok", 200, None),
+            "outlet.example": ("one_click", "failed", 415, "HTTP 415 Unsupported Media Type"),
+        }
+        text = digest.build(s, ctx.cfg, account.email, language=DigestLanguage.EN, gmail=gmail)
+    assert "• outlet.example: HTTP 415 Unsupported Media Type" in text

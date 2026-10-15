@@ -184,7 +184,10 @@ either.
 
 **How it unsubscribes:**
 
-- If the sender offers a one-click unsubscribe, it uses that.
+- If the sender offers a one-click unsubscribe, it uses that. The standard allows two ways of
+  writing that request; Inbox Jev uses the recommended one, and if the sender's site answers that it
+  doesn't accept that way, it asks once more the other way. It never repeats a request the site may
+  have acted on.
 - If that doesn't work, or there is none, and the sender gives an address for it, it sends a short
   "unsubscribe" email from your account to that address. You'll see it in your Sent folder.
 - If the sender only offers a link to a web page, Inbox Jev does **not** open it. The link appears
@@ -193,7 +196,8 @@ either.
 
 **Where to see what it did:** the [daily digest](#the-daily-slack-digest) lists the lists you were
 taken off ("Unsubscribed"), the ones waiting for you, with their link ("Manual unsubscribe"), and
-the attempts that didn't work ("Unsubscribe failed"), or their Spanish names if your digest is in
+the attempts that didn't work ("Unsubscribe failed", with a short reason such as the error code the
+sender's site answered, never the text of its reply), or their Spanish names if your digest is in
 Spanish. Inbox Jev can't undo an unsubscribe: to get those emails again, subscribe again on the
 sender's website.
 

@@ -635,3 +635,42 @@ def test_cli_digest_is_sent_when_gmail_cannot_be_opened(tmp_path, monkeypatch, c
     assert digest.MESSAGES[DigestLanguage.EN]["pending_check_failed"] in result.output
     (warning,) = [r for r in caplog.records if r.levelname == "WARNING"]
     assert (warning.account, warning.error_type) == ("me@acme.com", "FileNotFoundError")
+
+
+def _failed_unsubscribe(list_key: str, http_status: int | None, error: str | None) -> Unsubscribe:
+    return Unsubscribe(
+        account=ACCOUNT,
+        list_key=list_key,
+        sender=f"news@{list_key}",
+        gmail_id=list_key,
+        method=UnsubscribeMethod.ONE_CLICK,
+        status=UnsubscribeStatus.FAILED,
+        http_status=http_status,
+        error=error,
+    )
+
+
+def test_failed_unsubscribes_show_a_readable_reason_never_a_stored_body():
+    """Rows stored before the error was `HTTP <status> <reason>` hold the server's raw body
+    (sender-controlled JSON or HTML): the digest shows the status instead. A readable error, and
+    one without a status (a connection or mailto failure), is shown as stored, escaped."""
+    legacy_json = (
+        '{"statusCode":415,"code":"FST_ERR_CTP_INVALID_MEDIA_TYPE","error":"Unsupported Media '
+        'Type","message":"Unsupported Media Type: application/x-www-form-urlencoded"}'
+    )
+    rows = [
+        _failed_unsubscribe("a.example", 415, legacy_json),
+        _failed_unsubscribe("b.example", 500, "<html><body><!channel> gone</body></html>"),
+        _failed_unsubscribe("c.example", 499, ""),
+        _failed_unsubscribe("d.example", 400, "HTTP 400 Bad Request: token <!here> expired"),
+        _failed_unsubscribe("e.example", None, "ConnectError: refused <x>"),
+    ]
+    lines = digest._unsubscribe_sections(digest.MESSAGES[DigestLanguage.EN], rows)
+    assert lines == [
+        "\n*❗ Unsubscribe failed (5)*",
+        "• a.example: HTTP 415 Unsupported Media Type",
+        "• b.example: HTTP 500 Internal Server Error",
+        "• c.example: HTTP 499",
+        "• d.example: HTTP 400 Bad Request: token &lt;!here&gt; expired",
+        "• e.example: ConnectError: refused &lt;x&gt;",
+    ]

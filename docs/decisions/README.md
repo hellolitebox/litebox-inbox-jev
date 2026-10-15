@@ -58,3 +58,4 @@ decision changes: add a new one and mark the old one `Superseded by NNNN`.
 | [0045](0045-senders-decided-per-email.md) | Senders decided per email, and website form leads are an action | Accepted | #54 |
 | [0046](0046-meetings-booked-with-me-are-an-action.md) | A meeting someone booked with me through a scheduling link is an action | Accepted | #55 |
 | [0047](0047-calendar-messages-teach-no-auto-rule.md) | Calendar messages never count toward an auto rule | Accepted | #55 |
+| [0048](0048-one-click-multipart-then-urlencoded-on-415.md) | One-click sends multipart, and urlencoded once after a 415 | Accepted | #57 |

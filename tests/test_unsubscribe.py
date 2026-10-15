@@ -1,3 +1,4 @@
+import json
 import socket
 import ssl
 import threading
@@ -33,9 +34,202 @@ def test_one_click_success_posts_rfc8058_body():
         make_signals(), lambda *a: sent.append(a), client_returning(200, seen), url_guard=allow
     )
     assert (r.method, r.status, r.http_status) == ("one_click", "ok", 200)
-    assert seen[0].method == "POST"
-    assert seen[0].content == b"List-Unsubscribe=One-Click"
+    [req] = seen
+    assert req.method == "POST"
+    _assert_multipart_one_click(req)
     assert sent == []
+
+
+def _assert_multipart_one_click(req: httpx.Request) -> None:
+    """RFC 8058's body as multipart/form-data: one plain field `List-Unsubscribe` = `One-Click`."""
+    content_type = req.headers["content-type"]
+    assert content_type.startswith("multipart/form-data; boundary=")
+    boundary = content_type.split("boundary=", 1)[1].encode()
+    assert req.content == (
+        b"--" + boundary + b"\r\n"
+        b'Content-Disposition: form-data; name="List-Unsubscribe"\r\n\r\n'
+        b"One-Click\r\n"
+        b"--" + boundary + b"--\r\n"
+    )
+
+
+def _answering(*statuses, seen, body='{"message": "nope"}'):
+    """A client whose server answers `statuses` in turn, recording each request in `seen`."""
+    answers = iter(statuses)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(next(answers), text=body)
+
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+# The body of the 415 a one-click endpoint answered in production (2026-10-14).
+FASTIFY_415 = (
+    '{"statusCode":415,"code":"FST_ERR_CTP_INVALID_MEDIA_TYPE","error":"Unsupported Media Type",'
+    '"message":"Unsupported Media Type: application/x-www-form-urlencoded"}'
+)
+
+
+def test_one_click_retries_once_urlencoded_after_a_415(caplog):
+    """A server that only parses one encoding answers 415 without acting: the same address gets
+    the same request once more, urlencoded, with the same Host, User-Agent and pinning."""
+    seen = []
+    caplog.set_level("INFO", logger="inbox_jev.unsubscribe")
+    with _answering(415, 200, seen=seen, body=FASTIFY_415) as client:
+        r = one_click("https://shop.com/u/1", [PUBLIC_IP, "93.184.216.35"], client)
+    assert (r.status, r.http_status, r.error) == ("ok", 200, None)
+    first, second = seen
+    _assert_multipart_one_click(first)
+    assert second.headers["content-type"] == "application/x-www-form-urlencoded"
+    assert second.content == b"List-Unsubscribe=One-Click"
+    for req in seen:
+        assert str(req.url) == f"https://{PUBLIC_IP}/u/1"
+        assert req.headers["host"] == "shop.com"
+        assert req.headers["user-agent"] == unsub.USER_AGENT
+        assert req.extensions["sni_hostname"] == "shop.com"
+    [record] = [x for x in caplog.records if "retried urlencoded" in x.getMessage()]
+    assert (record.host, record.http_status) == ("shop.com", 200)
+
+
+def test_one_click_refused_in_both_encodings_fails_with_a_readable_error():
+    seen = []
+    with _answering(415, 415, seen=seen, body=FASTIFY_415) as client:
+        r = one_click("https://shop.com/u/1", [PUBLIC_IP], client)
+    assert (r.status, r.http_status, len(seen)) == ("failed", 415, 2)
+    assert r.error == (
+        "HTTP 415 Unsupported Media Type: Unsupported Media Type: application/x-www-form-urlencoded"
+    )
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 410, 422, 429, 500, 502, 503])
+def test_one_click_never_retries_any_other_refusal(status):
+    """Only a 415 says the server didn't act on the request; any other answer is the result."""
+    seen = []
+    with _answering(status, 200, seen=seen) as client:
+        r = one_click("https://shop.com/u/1", [PUBLIC_IP, "93.184.216.35"], client)
+    assert (r.status, r.http_status, len(seen)) == ("failed", status, 1)
+    assert r.error.startswith(f"HTTP {status} ")
+
+
+def test_one_click_retry_after_a_415_is_never_redirected_and_its_error_is_the_result():
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        if len(seen) == 1:
+            return httpx.Response(415)
+        if len(seen) == 2:
+            return httpx.Response(302, headers={"Location": "https://127.0.0.1/admin"})
+        pytest.fail("the redirect was followed")
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        r = one_click("https://shop.com/u", [PUBLIC_IP], client)
+    assert (r.status, r.http_status, len(seen)) == ("ok", 302, 2)
+
+    seen.clear()
+
+    def refused_then_timeout(request):
+        seen.append(request.url.host)
+        if len(seen) == 1:
+            return httpx.Response(415)
+        raise httpx.ConnectError("refused", request=request)
+
+    with httpx.Client(transport=httpx.MockTransport(refused_then_timeout)) as client:
+        r = one_click("https://shop.com/u", [PUBLIC_IP, "93.184.216.35"], client)
+    assert (r.status, r.error) == ("failed", "ConnectError: refused")
+    assert seen == [PUBLIC_IP, PUBLIC_IP]  # no third request, to the next address or any other
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "error"),
+    [
+        (
+            500,
+            "<html><body>Oops <script>x</script></body></html>",
+            "HTTP 500 Internal Server Error",
+        ),
+        (404, "", "HTTP 404 Not Found"),
+        (400, '{"message": "Bad Request"}', "HTTP 400 Bad Request"),
+        (400, '["not", "an object"]', "HTTP 400 Bad Request"),
+        (
+            400,
+            json.dumps({"message": 42, "error": "token\u0007 expired\n<!channel>"}),
+            "HTTP 400 Bad Request: token expired <!channel>",
+        ),
+        (410, '{"detail": "{gone} ' + "x" * 200 + '"}', "HTTP 410 Gone: gone " + "x" * 115),
+        (499, json.dumps({"message": "\u00e9\u2028\u00e9", "detail": 7}), "HTTP 499"),
+        (
+            403,
+            json.dumps({"message": "confirm at https://evil.example/x?t=1 or ftp://a.b now"}),
+            "HTTP 403 Forbidden: confirm at or now",
+        ),
+        (403, json.dumps({"error": "http://only.a/link"}), "HTTP 403 Forbidden"),
+    ],
+)
+def test_a_refused_one_click_stores_the_status_and_at_most_a_short_plain_message(
+    status, body, error
+):
+    """Never the raw body: the status and its standard reason, plus a JSON body's own message
+    when it has one, on one line of printable ASCII without braces, at most 120 characters."""
+    with _answering(status, seen=[], body=body) as client:
+        r = one_click("https://shop.com/u", [PUBLIC_IP], client)
+    assert (r.status, r.http_status, r.error) == ("failed", status, error)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"[" * 20_000,  # deeply nested: json raises RecursionError
+        b'{"a": ' * 20_000 + b"1" + b"}" * 20_000,
+        json.dumps({"message": "huge " + "x" * 5000}).encode(),  # over the parse limit
+        b'"just a string"',
+        b"42",
+        b"null",
+        b'{"message": "caf\xe9 \xff"}',  # not UTF-8
+        b"\xff\xfe\x00\x01",
+    ],
+    ids=[
+        "nested-arrays",
+        "nested-objects",
+        "huge-object",
+        "string",
+        "number",
+        "null",
+        "latin-1",
+        "binary",
+    ],
+)
+def test_a_refused_one_click_with_a_hostile_body_still_returns_a_result(body):
+    """The request was sent, so whatever the body, a Result comes back and can be recorded."""
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(500, content=body)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        r = one_click("https://shop.com/u", [PUBLIC_IP, "93.184.216.35"], client)
+    assert (r.status, r.http_status, r.error, len(seen)) == (
+        "failed",
+        500,
+        "HTTP 500 Internal Server Error",
+        1,
+    )
+
+
+def test_a_bug_describing_a_refusal_still_returns_the_status(monkeypatch, caplog):
+    """The safety net after the POST: a failure in building the error keeps the attempt."""
+
+    def broken(resp: httpx.Response) -> str:
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(unsub, "describe_http_failure", broken)
+    with _answering(502, seen=[]) as client:
+        r = one_click("https://shop.com/u", [PUBLIC_IP], client)
+    assert (r.status, r.http_status, r.error) == ("failed", 502, "HTTP 502 Bad Gateway")
+    [record] = [x for x in caplog.records if "describing a refused" in x.getMessage()]
+    assert (record.host, record.http_status, record.exc_info[0]) == ("shop.com", 502, RuntimeError)
 
 
 def test_one_click_failure_falls_back_to_mailto():

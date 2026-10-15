@@ -89,8 +89,92 @@ def _one_click_failed(url: str, error: str) -> Result:
     return Result(UnsubscribeMethod.ONE_CLICK, UnsubscribeStatus.FAILED, url, error=error)
 
 
+def _request_failed(url: str, exc: Exception) -> Result:
+    return _one_click_failed(url, f"{type(exc).__name__}: {exc}")
+
+
+class _Encoding(StrEnum):
+    """How the one-click body is encoded (RFC 8058 section 3.2)."""
+
+    MULTIPART = "multipart/form-data"  # SHOULD
+    FORM = "application/x-www-form-urlencoded"  # MAY
+
+
+# The single key/value pair RFC 8058 sends as the POST body.
+_FIELD, _VALUE = "List-Unsubscribe", "One-Click"
+_MESSAGE_CHARS = 120
+_MESSAGE_BODY_BYTES = 4096  # larger error bodies are not parsed for a message
+_MESSAGE_KEYS = ("message", "error", "detail")
+
+
+def _post(client: httpx.Client, url: str, address: str, encoding: _Encoding) -> httpx.Response:
+    """POST the one-click body to `url`, connected to `address`, with the hostname as `Host` and
+    for TLS (SNI and certificate check)."""
+    target = httpx.URL(url)
+    multipart = encoding == _Encoding.MULTIPART
+    return client.post(
+        target.copy_with(host=address),
+        # A `(None, value)` file is a plain form field: no filename, no part Content-Type.
+        files={_FIELD: (None, _VALUE)} if multipart else None,
+        data=None if multipart else {_FIELD: _VALUE},
+        headers={"User-Agent": USER_AGENT, "Host": target.netloc.decode("ascii")},
+        extensions={"sni_hostname": target.raw_host.decode("ascii")},
+    )
+
+
+def describe_http_status(status: int) -> str:
+    """`HTTP 415 Unsupported Media Type`: the status and its standard reason phrase (not the
+    server's own, which is sender-controlled text); `HTTP 499` for a status without one."""
+    return f"HTTP {status} {httpx.codes.get_reason_phrase(status)}".rstrip()
+
+
+def _server_message(resp: httpx.Response) -> str:
+    """A short, single-line, printable-ASCII message from a JSON error body (`message`, `error`
+    or `detail`), or "" for any other body: a body is sender-controlled text, often a whole HTML
+    page, so only a field meant as a message is kept, and only its plain words, without links.
+
+    Total: it runs after the POST was sent, so it never raises. Only a small body is parsed (a
+    huge or deeply nested one costs CPU or raises RecursionError), and a parse failure is "".
+    """
+    if len(resp.content) > _MESSAGE_BODY_BYTES:
+        return ""
+    try:
+        body = resp.json()
+    # ValueError: not JSON, or not UTF-8 (UnicodeDecodeError); RecursionError: deeply nested.
+    except (ValueError, RecursionError, TypeError):
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    for key in _MESSAGE_KEYS:
+        if isinstance(value := body.get(key), str):
+            text = "".join(c if c.isascii() and c.isprintable() else " " for c in value)
+            words = text.replace("{", " ").replace("}", " ").split()
+            # A link in the owner's digest would be the sender's, so no token with a scheme.
+            text = " ".join(w for w in words if "://" not in w)
+            if text:
+                return text[:_MESSAGE_CHARS]
+    return ""
+
+
+def describe_http_failure(resp: httpx.Response) -> str:
+    """The `unsubscribes.error` of a refused one-click: `HTTP 415 Unsupported Media Type`, plus
+    the server's own short message when its JSON body has one that says more than the status."""
+    status = describe_http_status(resp.status_code)
+    message = _server_message(resp)
+    reason = httpx.codes.get_reason_phrase(resp.status_code)
+    if not message or message.casefold() == reason.casefold():
+        return status
+    return f"{status}: {message}"
+
+
 def one_click(url: str, addresses: Sequence[str], client: httpx.Client) -> Result:
     """RFC 8058 POST to `url`, connecting to the IPs the guard validated, in order.
+
+    The body is `List-Unsubscribe=One-Click` as multipart/form-data, the encoding RFC 8058 says
+    SHOULD be used. A server that answers 415 (Unsupported Media Type) refused the request
+    without acting on it, so the same address gets it **once** more as
+    application/x-www-form-urlencoded (which RFC 8058 allows), and that answer (or error) is the
+    result. No other answer is retried: any other status may come from a server that acted on it.
 
     The request goes to the IP with the original Host header, and TLS uses the hostname for SNI
     and certificate verification (httpx's `sni_hostname` extension), so the certificate must
@@ -101,28 +185,48 @@ def one_click(url: str, addresses: Sequence[str], client: httpx.Client) -> Resul
     result = _one_click_failed(url, "no address to connect to")
     for address in addresses:
         try:
-            target = httpx.URL(url)
-            resp = client.post(
-                target.copy_with(host=address),
-                data={"List-Unsubscribe": "One-Click"},
-                headers={"User-Agent": USER_AGENT, "Host": target.netloc.decode("ascii")},
-                extensions={"sni_hostname": target.raw_host.decode("ascii")},
-            )
+            resp = _post(client, url, address, _Encoding.MULTIPART)
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:  # not sent: try the next IP
-            result = _one_click_failed(url, f"{type(exc).__name__}: {exc}")
+            result = _request_failed(url, exc)
             continue
         except (httpx.HTTPError, httpx.InvalidURL) as exc:
-            return _one_click_failed(url, f"{type(exc).__name__}: {exc}")
-        # RFC 8058 servers answer 2xx; some ESPs reply with a redirect to a confirmation page.
-        ok = 200 <= resp.status_code < 400
-        return Result(
-            UnsubscribeMethod.ONE_CLICK,
-            UnsubscribeStatus.OK if ok else UnsubscribeStatus.FAILED,
-            url,
-            http_status=resp.status_code,
-            error=None if ok else resp.text[:500],
-        )
+            return _request_failed(url, exc)
+        if resp.status_code == httpx.codes.UNSUPPORTED_MEDIA_TYPE:
+            try:
+                resp = _post(client, url, address, _Encoding.FORM)
+            except (httpx.HTTPError, httpx.InvalidURL) as exc:
+                return _request_failed(url, exc)
+            log.info(
+                "one-click multipart refused (415), retried urlencoded",
+                extra={"host": httpx.URL(url).host, "http_status": resp.status_code},
+            )
+        return _answered(url, resp)
     return result
+
+
+def _answered(url: str, resp: httpx.Response) -> Result:
+    """The result of a one-click POST the server answered. It never raises: the request was
+    sent, so the attempt must be recorded, or the next run would POST again."""
+    # RFC 8058 servers answer 2xx; some ESPs reply with a redirect to a confirmation page.
+    ok = 200 <= resp.status_code < 400
+    error = None
+    if not ok:
+        try:
+            error = describe_http_failure(resp)
+        except Exception:  # a bug in describing it must not lose the attempt
+            log.warning(
+                "describing a refused one-click failed",
+                extra={"host": httpx.URL(url).host, "http_status": resp.status_code},
+                exc_info=True,
+            )
+            error = describe_http_status(resp.status_code)
+    return Result(
+        UnsubscribeMethod.ONE_CLICK,
+        UnsubscribeStatus.OK if ok else UnsubscribeStatus.FAILED,
+        url,
+        http_status=resp.status_code,
+        error=error,
+    )
 
 
 def _client() -> httpx.Client:

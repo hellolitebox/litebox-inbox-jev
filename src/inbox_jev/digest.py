@@ -24,7 +24,7 @@ from .config import Action, CategoriesConfig, DigestLanguage, Mode
 from .db import MAX_ERROR_ATTEMPTS, Message, MessageStatus, Run, Unsubscribe, now
 from .gmail import ThreadMessage
 from .system_labels import INBOX, SENT
-from .unsubscribe import UnsubscribeStatus
+from .unsubscribe import UnsubscribeStatus, describe_http_status
 
 log = logging.getLogger(__name__)
 
@@ -447,9 +447,20 @@ def _unsubscribe_sections(t: DigestMessages, unsubs: Sequence[Unsubscribe]) -> l
         *_section(
             t["unsubscribe_failed"].format(n=len(failed)),
             failed,
-            lambda u: f"• {esc(u.list_key)}: {esc(u.error or u.http_status or '', 80)}",
+            lambda u: f"• {esc(u.list_key)}: {esc(_unsubscribe_error(u), 160)}",
         ),
     ]
+
+
+def _unsubscribe_error(u: Unsubscribe) -> str:
+    """A failed unsubscribe's reason for the digest: its error, or `HTTP <status> <reason>` when
+    the row has a status but its error doesn't start with one. Rows stored before the error was
+    `unsubscribe.describe_http_failure` hold the raw response body, sender-controlled text (a
+    JSON object, an HTML page), so it is not shown."""
+    if u.http_status is None:
+        return u.error or ""
+    status = describe_http_status(u.http_status)
+    return u.error if u.error and u.error.startswith(status) else status
 
 
 def _labeled_for_review(m: Message) -> bool:
