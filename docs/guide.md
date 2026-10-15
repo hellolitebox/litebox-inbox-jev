@@ -71,10 +71,11 @@ spot phishing:
   message;
 - which websites the links really go to (just the site names, never the full links);
 - whether Gmail's own checks confirm which domain (web address) the email was sent from. For an
-  email that reached you through one of your company's own groups, these are the checks on the
-  person who wrote to the group, as Google recorded them when the group received it, not on the
-  group: the group always passes, because it is yours. When that record is missing, can't be trusted
-  or is about someone other than that person, Jev is told the checks are unknown.
+  email that reached you through one of your company's own groups (when whoever runs Inbox Jev has
+  set that up), these are the checks on the person who wrote to the group, not on the group: the
+  group always passes, because it is yours. They come from Google's signed record of who really sent
+  it, written when the group received the email. When that record is missing, can't be trusted or is
+  about someone other than that person, Jev is told the checks are unknown, never that they passed.
 
 Passing those checks only proves where the email was sent from, not that it is honest: phishing
 often comes from the attacker's own domain. What gives phishing away is a mismatch, like a notice
@@ -242,6 +243,14 @@ fixed stays where you put it, unless the account later moves to full mode. Be ca
 thing: teaching it that a sender is `Jev/Marketing` or `Jev/Outreach` means their future emails can
 be unsubscribed, and `Jev/Spam` means they go straight to Spam.
 
+Emails that come through a group (Gmail shows "via" and the group's name next to the sender) need
+care. For one of your company's own groups that whoever runs Inbox Jev has set up, your fix is about
+the person who wrote to the group, not the group: teaching it that a stranger's email to `hello@` is
+`Jev/Spam` doesn't send the rest of `hello@`'s mail to Spam. For any other group, your fix is about
+the group itself, so all of that group's future emails would get the kind you chose. To mark one
+email from such a group as spam, use Gmail's "Report spam" or "Report phishing" and leave the `Jev/`
+label alone.
+
 Rules can also be set by hand from the command line, by sender or by whole domain (see the
 [README](../README.md#commands)).
 
@@ -249,9 +258,16 @@ Rules can also be set by hand from the command line, by sender or by whole domai
 
 **Why didn't it mark this phishing email as spam?** Spam needs Jev to be about 90% sure. Below that,
 the email stays in your inbox with `Jev/Review`; and a well-made phishing email can fool Jev into
-thinking it is real. Don't click anything in it. Use Gmail's "Report phishing", and change its
-`Jev/` label to `Jev/Spam` so the next email from that address goes to Spam (phishing often changes
-address, so also tell whoever runs Inbox Jev).
+thinking it is real. The bar is high on purpose: real notices from document, e-signature and tax
+services look a lot like phishing, and a lower bar would send some of them to Spam. Don't click
+anything in it. Use Gmail's "Report phishing", and change its `Jev/` label to `Jev/Spam`, or, if it
+already has `Jev/Spam` next to `Jev/Review`, remove `Jev/Review` (see
+[How it learns from you](#how-it-learns-from-you)): leaving both on teaches it nothing. You can
+still do it once the email is in the Spam folder. Then the next email from that address goes to Spam
+(in a gentler mode it only gets the label). Phishing often changes address, so also tell whoever
+runs Inbox Jev: when the domain it came from is the attacker's own, they can send everything from
+that domain to Spam. If it came through a group, read the note on groups in
+[How it learns from you](#how-it-learns-from-you) first.
 
 **Why is a newsletter in my inbox?** Usually Jev wasn't sure enough: look for `Jev/Review`. Swap the
 label for `Jev/Newsletters` (or just remove `Jev/Review` if the guess was right) and future issues
@@ -312,10 +328,10 @@ The notification on your phone shows just the headline and how many emails were 
 
 - **What Jev sees**: for each email, your address, the sender, recipients, subject and date, the
   first 3,000 characters of the text, whether it is a mailing list (and its "bulk mail" marker, when
-  it has one), whether you have written to the sender before, and the clues listed above (link site
-  names, Gmail's checks, a fake "RE:"). For an email sent through one of your company's own groups
-  (when whoever runs Inbox Jev has set that up), also who actually wrote it and the group's address.
-  Never attachments.
+  it has one), whether you have written to the sender before, and the clues listed above (the site
+  names of the links anywhere in the email, Gmail's checks, a fake "RE:"). For an email sent through
+  one of your company's own groups (when whoever runs Inbox Jev has set that up), also who actually
+  wrote it and the group's address. Never attachments.
 - **What is stored**: a record per email with the sender, subject, date, the kind Jev chose, how
   sure it was and what was done; the unsubscribes, with the link or address each one used; the rules
   it learned; and, for each company domain, how far the sent-mail search got (dates and Gmail's

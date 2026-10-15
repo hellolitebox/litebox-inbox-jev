@@ -144,6 +144,47 @@ To clean up an existing inbox, run one pass with a longer window:
 `3m`, `1y`). Every email reprocessed by that run counts as processed today, so that day's digest
 shows the whole backlog, including re-listed "needs reply" and low-confidence emails.
 
+## Phishing that reaches the inbox
+
+Jev gets phishing signals (`reply_without_thread`, `link_domains`, `sender_auth`) and the spam
+criteria look for mismatches, but no rule spams on them, and `spam` needs 0.90, like the
+unsubscribing categories ([§4.7](how-it-decides.md#47-what-jev-receives),
+[ADR 0042](decisions/0042-phishing-signals-for-jev.md)). Phishing Jev is less sure of stays in the
+inbox with `Jev/Review` by design. Don't lower `spam`'s `min_confidence` to catch it: genuine
+document, e-signature and tax-portal notices sit close to it, and a lower bar moves them to Spam.
+
+- **The user's fix**: "Report phishing" in Gmail and, within 7 days, change the email's `Jev/` label
+  to `Jev/Spam`, or, if Jev already suggested `Jev/Spam` (it is there next to `Jev/Review`), remove
+  `Jev/Review` (it still counts once the email is in Spam). Leaving both labels on teaches nothing.
+  The next pass learns a `correction` rule to `spam` on the exact resolved sender
+  ([§3.7](how-it-decides.md#37-corrections-user-edits-and-restore)): its next emails skip Jev and
+  are moved to Spam in `act` on an account that acts on `spam` (`act_categories`), only labeled
+  otherwise. A sender in `decide_each_email` gets no rule
+  ([ADR 0045](decisions/0045-senders-decided-per-email.md)).
+- **Group-relayed phishing**: for a group on the account's `group_domains`, the sender is the author
+  (`X-Original-Sender`), so the rule is on the author, never the group, and Jev's `sender_auth` is
+  the author's from Google's ARC record, or all `none`, never the group's pass
+  ([ADR 0050](decisions/0050-group-relayed-mail-carries-its-authors-authentication.md)). For any
+  other group that rewrites `From` to its own address (Gmail's "via"), the sender is the group
+  address: a `Jev/Spam` correction there sends everything the group relays to Spam. Undo it with
+  `inbox-jev rules delete -a you@example.com group@example.com`, and list the group's domain in
+  `group_domains` if it is a Workspace you control
+  ([§3.4](how-it-decides.md#34-groups-and-mailing-lists)).
+- **Phishing that rotates addresses** on its own domain:
+  `inbox-jev rules set -a you@example.com @attacker.example spam`. Never for a public mail provider,
+  an ESP's shared sending domain or a domain you also get real mail from: a `@domain` rule covers
+  every address on that exact domain (not its subdomains) that has no rule of its own.
+- **Authentication fails closed**: Gmail's `Authentication-Results` is parsed strictly per RFC 8601
+  ([ADR 0043](decisions/0043-authentication-results-parsed-per-rfc-8601.md)) and a group author's
+  ARC record only in Google's current layout. If Gmail or Google Groups change what they write,
+  those emails lose their verdicts: unverified, so never unsubscribed, and `none` for Jev. A trusted
+  group's mail also falls back to the group address as sender, since the author is only recovered
+  when the group's own DMARC passes (`signals.original_sender`): rules and corrections then key on
+  the group, and a `Jev/Spam` correction spams everything it relays. The symptom is unsubscribes
+  stopping for senders that used to pass: only emails that would have been unsubscribed get the
+  `messages` row's `downgraded_to_spam` column ("unsubscribe skipped: unverified") set, the others
+  show nothing. See "Known gaps" in the spec.
+
 ## Changing categories
 
 ### Your own categories

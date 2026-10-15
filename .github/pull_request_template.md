@@ -8,7 +8,9 @@
 
 <!-- `scripts/check.sh` (ruff, mdformat, mypy, pytest counts). A bug fix: the new test run
 without the fix, and how it failed. A change to classification (categories.yaml
-criteria, classifier state, body extraction) or to a destructive path (archive, spam,
+criteria, classifier state, body extraction, the phishing signals Jev receives), to what
+verifies a sender (DMARC, ARC and group trust in signals.py: dmarc_passed,
+relay_author_auth, original_sender, resolve_relay) or to a destructive path (archive, spam,
 unsubscribe, unsubscribe-retry) also needs the read-only real-mail check (docs/development.md,
 "Checking a branch against real mail"): paste the output of `scripts/check_branch.sh`
 (From/Subject truncated, never bodies), or say why it isn't needed.

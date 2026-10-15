@@ -33,7 +33,7 @@ agent spawned to do either must be given it.
 | `python-design-patterns` | any `.py` | KISS, separation of concerns, duplication vs. abstraction, coupling |
 | `python-project-structure` | any `.py` | module boundaries and public API (`policy` pure, I/O in `gmail`/`triage` and the modules split from them) |
 | `python-type-safety` | any `.py` | names, enums vs. loose strings, `Any` where a type exists (mypy covers annotations and `None`) |
-| `python-error-handling` | any `.py` | exception scope, partial failures in a run, errors that hide or abort |
+| `python-error-handling` | any `.py` | exception scope, partial failures in a run, errors that hide or abort; parsers of sender-controlled input (`signals.py` headers, `body.py` links, `unsubscribe.py`) fail closed, to unknown, never to a pass |
 | `python-resilience` | `gmail.py`, `body.py`, `sent_scan.py`, `classifier.py`, `unsubscribe.py`, `triage.py`, `jev_guard.py`, `scan_rows.py`, `unsubscribe_retry.py`, `digest.py` | retries, backoff, timeouts on Gmail/Jev/HTTP calls |
 | `python-resource-management` | those I/O modules, `db.py` | sessions, HTTP clients, files: context managers and cleanup |
 | `python-observability` | those I/O modules, `logs.py`, `cli.py` | structured logs (and never email bodies), what a failure leaves behind |

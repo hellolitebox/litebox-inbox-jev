@@ -34,14 +34,17 @@ Claude Code, a long task gets a finish line it can wait on:
 
 ## Checking a branch against real mail
 
-Changes to classification (`categories.yaml` criteria, `classifier.py` state, body extraction) or to
-destructive actions (archive, spam, unsubscribe) must be checked against real mail before merging,
-not only with unit tests. [`scripts/dry_classify.py`](../scripts/dry_classify.py) runs in the app
-container on the server, with the branch's code and `categories.yaml`. For each email it prints the
-category stored in the DB, then the branch's category, confidence, outcome (REVIEW / ARCHIVE / KEEP
-/ SPAM, group / unsubscribe flags) and top-3 probabilities, with From and Subject truncated. It
-calls Jev (one classification per email) and the sent-mail search, but never modifies Gmail, opens
-SQLite read-only and commits nothing.
+Changes to classification (`categories.yaml` criteria, `classifier.py` state, body extraction, the
+phishing signals Jev receives: `link_domains`, `reply_without_thread`, `sender_auth`), to what
+verifies a sender (DMARC, ARC and group trust in `signals.py`: `dmarc_passed`, `relay_author_auth`,
+`original_sender`, `resolve_relay`) or to destructive actions (archive, spam, unsubscribe) must be
+checked against real mail before merging, not only with unit tests.
+[`scripts/dry_classify.py`](../scripts/dry_classify.py) runs in the app container on the server,
+with the branch's code and `categories.yaml`. For each email it prints the category stored in the
+DB, then the branch's category, confidence, outcome (REVIEW / ARCHIVE / KEEP / SPAM, group /
+unsubscribe flags) and top-3 probabilities, with From and Subject truncated. It calls Jev (one
+classification per email) and the sent-mail search, but never modifies Gmail, opens SQLite read-only
+and commits nothing.
 
 [`scripts/check_branch.sh`](../scripts/check_branch.sh), run on the server from the deployment
 checkout, does the whole thing: it fetches the branch into a throwaway worktree next to the

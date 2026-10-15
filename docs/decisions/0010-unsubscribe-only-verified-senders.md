@@ -1,6 +1,7 @@
 # 0010. Unsubscribe only from verified senders, via `List-Unsubscribe`
 
-- Status: Accepted
+- Status: Accepted (how Gmail's `dmarc=pass` is read: amended by
+  [0043](0043-authentication-results-parsed-per-rfc-8601.md))
 - Date: 2026-10-13
 - PR: initial design; #7; #12 (cold outreach, rule path); #13 (topmost `Authentication-Results`)
 

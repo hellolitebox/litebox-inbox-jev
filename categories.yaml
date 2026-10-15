@@ -17,7 +17,8 @@
 # action:
 #   keep                 stay in the inbox
 #   archive              remove from inbox
-#   archive_unsubscribe  remove from inbox and unsubscribe (only with dmarc=pass + List-Unsubscribe
+#   archive_unsubscribe  remove from inbox and unsubscribe (only with dmarc=pass in Gmail's own
+#                        Authentication-Results, parsed strictly, + List-Unsubscribe,
 #                        and never through a group or discussion list; otherwise it keeps its
 #                        category and label and is only archived, never unsubscribed or spammed.
 #                        See docs/how-it-decides.md, section 3.3)
@@ -141,6 +142,11 @@ categories:
       service whose sender passes DMARC and whose links go to that service's own brand
       domains (they can differ from the sending domain); that is action_required or
       transactional.
+    # sender_auth, link_domains and reply_without_thread in the criteria are the phishing signals
+    # inbox-jev adds to Jev's input (docs/how-it-decides.md, 4.7; ADR 0042). No rule spams on them:
+    # phishing Jev answers below min_confidence stays in the inbox with the review label, and the
+    # user's correction to Jev/Spam makes a sender rule. Lowering the bar also sends genuine
+    # document, e-signature and tax-portal notices to Spam.
     action: spam
     min_confidence: 0.90
 

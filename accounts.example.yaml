@@ -25,6 +25,11 @@ accounts:
     # you control (subdomains are included). Public providers (country domains too, e.g.
     # yahoo.com.ar), googlegroups.com and public suffixes from the Public Suffix List (co.uk,
     # gouv.fr, com.ai, wa.gov.au, github.io) are rejected, and the file then fails to load.
+    # For a trusted group, rules and corrections (a Jev/Spam fix on relayed phishing too) key on
+    # the author, never the group, and the author's SPF/DKIM/DMARC come from Google's ARC record
+    # (unknown without a trusted one, never the group's own pass; docs/how-it-decides.md, 4.2).
+    # An untrusted group that rewrites From to its own address (Gmail's "via") is keyed on that
+    # address: its corrections cover all its mail.
     # Optional (default: none).
     group_domains:
       - example.com

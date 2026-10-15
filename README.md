@@ -69,23 +69,36 @@ for each new inbox email:
    `text/plain` part is just a "view this in your browser" stub) and `previous_contact`: whether you
    ever wrote to the sender or a person at their domain, from a search over your sent mail (emails
    sent only to machine addresses, like `noreply@` or a notification's `…@bounce.linkedin.com` reply
-   address, don't count). It answers with a category and its probabilities, "needs a reply" and the
-   tags.
+   address, don't count). It also gets three phishing signals, each only when it says something: a
+   reply or forward subject with no `In-Reply-To`/`References` (`reply_without_thread`), the
+   registrable domains the body's links point to (`link_domains`, never a full URL) and Gmail's SPF,
+   DKIM and DMARC verdicts (`sender_auth`; for a trusted group's author, Google's ARC record of the
+   message the group received, unknown without a trusted one, never the group's own pass). The spam
+   criteria treat a pass as proof of the sending domain only and look for mismatches
+   ([§4.7](docs/how-it-decides.md#47-what-jev-receives),
+   [ADR 0042](docs/decisions/0042-phishing-signals-for-jev.md)). It answers with a category and its
+   probabilities, "needs a reply" and the tags.
 4. **Policy** turns the answer into actions, and the **mode** decides how much of that is applied:
    - at or above a category's `min_confidence`, its action applies;
    - below it, the email is still archived when Jev's top answer is an archive category and the
      archive categories together reach 0.90 (the *archive group*: never unsubscribes or spams; an
      email that "expects a reply" stays unless it's a stranger's pitch or a no-reply notification
      with no keep signal);
-   - otherwise nothing destructive happens: `Jev/Review` plus the suggested label.
+   - otherwise nothing destructive happens: `Jev/Review` plus the suggested label. Phishing that Jev
+     calls spam below 0.90 lands here by design, already labeled `Jev/Spam`: the user removing
+     `Jev/Review` (or changing another suggested label to `Jev/Spam`) makes a sender rule
+     ([the guide](docs/guide.md#when-it-gets-it-wrong),
+     [operations](docs/operations.md#phishing-that-reaches-the-inbox)).
 
 An unsubscribe is irreversible, so it only happens in `act` mode (and `act_categories`), for
-*marketing* and *cold_outreach* at their own 0.90 confidence, when the sender passes DMARC and sends
-a `List-Unsubscribe` header (links in the body are never followed), never through a group or
-discussion list, never for cold outreach from someone you have written to, never for a sender in
-`decide_each_email` unless a manual rule decides, once per list and at most
-`MAX_UNSUBSCRIBES_PER_RUN` per run. It uses RFC 8058 one-click, else `mailto:`, else leaves a manual
-link in the digest. Sender rules and `inbox-jev unsubscribe-retry` go through the same checks
+*marketing* and *cold_outreach* at their own 0.90 confidence, when the sender passes DMARC (in
+Gmail's own `Authentication-Results`, parsed strictly per RFC 8601: a header that doesn't parse
+verifies nothing, [§4.2](docs/how-it-decides.md#42-dmarc)) and sends a `List-Unsubscribe` header
+(links in the body are never followed), never through a group or discussion list, never for cold
+outreach from someone you have written to, never for a sender in `decide_each_email` unless a manual
+rule decides, once per list and at most `MAX_UNSUBSCRIBES_PER_RUN` per run. It uses RFC 8058
+one-click, else `mailto:`, else leaves a manual link in the digest. Sender rules and
+`inbox-jev unsubscribe-retry` go through the same checks
 ([§3.3](docs/how-it-decides.md#33-unsubscribe-conditions); in plain language:
 [What it unsubscribes you from](docs/guide.md#what-it-unsubscribes-you-from-and-what-it-never-does)).
 Google Groups on a domain you list in the account's `group_domains` (opt-in: only domains whose
@@ -178,8 +191,9 @@ click, the corrections learned (sender and categories), and errors. What it show
 
 ## Privacy
 
-Email headers and the first `BODY_CHARS` characters of each body are sent to the TypeSafe API. Email
-bodies are not stored in the database or logged, only sender, subject and the classification.
+Email headers and the first `BODY_CHARS` characters of each body are sent to the TypeSafe API, with
+the domains (never the URLs) of the links anywhere in the body and Gmail's SPF/DKIM/DMARC verdicts.
+Email bodies are not stored in the database or logged, only sender, subject and the classification.
 `previous_contact` runs Gmail searches over your sent mail and reads the To/Cc/Bcc headers (never
 the body) of matching sent emails: up to 10 for an address, up to 25 per run for a domain. Its
 result is logged on each "message processed" line but not stored in the DB. That line also carries

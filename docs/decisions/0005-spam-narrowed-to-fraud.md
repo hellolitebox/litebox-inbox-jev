@@ -1,6 +1,7 @@
 # 0005. Spam means fraud; unverified marketing keeps its category
 
-- Status: Accepted
+- Status: Accepted (what makes an email phishing, now that passing authentication is not legitimacy:
+  refined by [0042](0042-phishing-signals-for-jev.md))
 - Date: 2026-10-12
 - PR: #7 (QA round 1, finding 1)
 

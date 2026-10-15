@@ -1895,8 +1895,15 @@ Behaviour found while writing this spec, documented as it is today:
   on a normal host, a ticketing system's `support+123@`) are not detected: they still make a known
   contact. Being wrong there keeps more mail, the safe side.
 - The phishing signals only inform Jev ([ADR 0042](decisions/0042-phishing-signals-for-jev.md)): no
-  rule spams on them. `reply_without_thread` is also set for a genuine forward from a client that
-  leaves out `In-Reply-To` and `References`, so the criteria present it as one sign among others.
+  rule spams on them, and `spam` keeps its 0.90 bar, so phishing Jev answers below it stays in the
+  inbox with `Jev/Review` ([3.2](#32-confidence-outcomes-jev-path)); when Jev's answer was `spam` it
+  already has `Jev/Spam`, so the user's correction is removing `Jev/Review` (keeping both teaches
+  nothing). That correction is a rule on the exact resolved sender
+  ([3.7](#37-corrections-user-edits-and-restore)): the author for a trusted group, the group address
+  for any other group that rewrites `From` to its own (Gmail's "via"; it then spams all the group's
+  relayed mail, [3.4](#34-groups-and-mailing-lists)); phishing that changes address escapes it.
+  `reply_without_thread` is also set for a genuine forward from a client that leaves out
+  `In-Reply-To` and `References`, so the criteria present it as one sign among others.
   `link_domains` sees the link as written: an ESP that rewrites every link through its click tracker
   shows only the tracker's domain, and a lure's single link can fall outside the 8 most frequent
   domains of a long newsletter. In plain-text parts only `http://` and `https://` URLs are found
@@ -1914,8 +1921,11 @@ Behaviour found while writing this spec, documented as it is today:
   it can still add a `dkim=pass` or turn SPF into `none`, neither of which verifies a sender.
 - The grammar is strict (an allowlist): if Gmail starts writing something it doesn't accept (a new
   SPF, DKIM or DMARC result word, a trailing `;`), those emails lose their verdicts, unverified and
-  never unsubscribed, until the grammar is widened. Every shape Gmail wrote on 400 recent production
-  emails parses (`test_real_gmail_header_shapes_parse`).
+  never unsubscribed, until the grammar is widened. A trusted group's mail also falls back to the
+  group address as sender (`original_sender` needs the group's own `dmarc_pass`), so rules and
+  corrections key on the group: a `Jev/Spam` correction then spams everything it relays. Only emails
+  that would have been unsubscribed show it (`unsubscribe_skipped_unverified`). Every shape Gmail
+  wrote on 400 recent production emails parses (`test_real_gmail_header_shapes_parse`).
 - A trusted group's author is authenticated from Google's ARC record ([4.2](#42-dmarc)), which
   relies on Google's layout: Google Groups' two identical records just below Gmail's own delivery
   set, all three sealed by `google.com`, the records' `header.from` being exactly

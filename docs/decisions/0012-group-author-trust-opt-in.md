@@ -1,6 +1,8 @@
 # 0012. Trust a group's original author only for `group_domains`
 
-- Status: Accepted
+- Status: Accepted (once the author is the sender, its `dmarc_pass` and Jev's `sender_auth` are the
+  author's, from Google's ARC record: amended by
+  [0050](0050-group-relayed-mail-carries-its-authors-authentication.md))
 - Date: 2026-10-13
 - PR: #13 (QA round 1 blocker; round 2 findings on public providers and suffixes)
 

@@ -1,6 +1,9 @@
 # 0022. DMARC passes only on Gmail's own Authentication-Results
 
-- Status: Accepted
+- Status: Accepted (the header parsed per RFC 8601: amended by
+  [0043](0043-authentication-results-parsed-per-rfc-8601.md); ARC read for a trusted group's author,
+  on Gmail's own `arc=pass`: amended by
+  [0050](0050-group-relayed-mail-carries-its-authors-authentication.md))
 - Date: 2026-10-13
 - PR: #21
 

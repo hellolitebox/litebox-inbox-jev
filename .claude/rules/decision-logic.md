@@ -32,15 +32,17 @@ decided and [`docs/decisions/`](../../docs/decisions/README.md) holds the ADRs s
 this rule covers are the decision logic: `categories.yaml` (categories, actions, thresholds,
 criteria, archive group, needs_reply, tags, auto_rule), `policy.py`, `triage.py` (pipeline,
 `previous_contact`, user edits, the `run` unsubscribe path), `unsubscribe_retry.py`, `jev_guard.py`
-(when a pass stops asking Jev, whose fault a refusal is), `rules.py`, `corrections.py`,
-`signals.py`, `psl.py` and the vendored `public_suffix_list.dat`, `unsubscribe.py`, the classifier
-state and questions (`classifier.py`), body extraction (`body.py`), the sent-mail search and its
-cache (`Gmail.has_written_to`, `sent_scan.py`, `scan_rows.py`), `config.py` (`FREE_MAIL`,
-`PUBLIC_GROUP_HOSTS`, `group_domains` normalisation and rejection, `decide_each_email` and
-`Account.decides_each_email`, the `act_categories` and `archive_group_reply_keep_probability`
-validators, the `Settings` defaults `MODE`, `LOOKBACK`, `MAX_MESSAGES_PER_RUN`,
-`MAX_UNSUBSCRIBES_PER_RUN`, `BODY_CHARS`) and the `cli.py` commands that change decisions or stored
-state (`restore`, `reprocess`, `rules set` / `rules delete`, `unsubscribe-retry`).
+(when a pass stops asking Jev, whose fault a refusal is), `rules.py`, `corrections.py`, `signals.py`
+(Gmail's `Authentication-Results` parsed per RFC 8601, a trusted group author's ARC record, group
+trust, the phishing signals), `psl.py` and the vendored `public_suffix_list.dat`, `unsubscribe.py`,
+the classifier state and questions (`classifier.py`), body extraction and link domains (`body.py`),
+the sent-mail search and its cache (`Gmail.has_written_to`, `sent_scan.py`, `scan_rows.py`),
+`config.py` (`FREE_MAIL`, `PUBLIC_GROUP_HOSTS`, `group_domains` normalisation and rejection,
+`decide_each_email` and `Account.decides_each_email`, the `act_categories` and
+`archive_group_reply_keep_probability` validators, the `Settings` defaults `MODE`, `LOOKBACK`,
+`MAX_MESSAGES_PER_RUN`, `MAX_UNSUBSCRIBES_PER_RUN`, `BODY_CHARS`) and the `cli.py` commands that
+change decisions or stored state (`restore`, `reprocess`, `rules set` / `rules delete`,
+`unsubscribe-retry`).
 
 ## Every change to it, in the same PR
 
@@ -85,12 +87,21 @@ not once the PR is polished.
   `triage.record_attempt`. `run` and `unsubscribe-retry` (`unsubscribe_retry.retry_unsubscribes`)
   both do; `tests/test_safety_gates.py` runs the same scenarios through every path, so a new path
   goes there.
+- Text the sender chooses never becomes a verdict. `Authentication-Results` and
+  `ARC-Authentication-Results` are read only through `signals`' strict RFC 8601 parse, and
+  `ARC-Seal` and `ARC-Message-Signature` through its strict RFC 6376 tag-list parse; both fail
+  closed: a header it can't read is unknown, never a pass, and a relayed author without Google's
+  trusted ARC record is unknown, never the group's pass (ADR 0043, 0050). Jev gets link domains,
+  never a URL's path or query (ADR 0042).
 
 ## Real mail before merging
 
-A change to classification (`categories.yaml` criteria, `classifier.py` state, body extraction) or
-to a destructive action (archive, spam, unsubscribe, `unsubscribe-retry`) is checked against real
-mail before merging, not only with unit tests: `scripts/check_branch.sh` on the server, read-only
-(`docs/development.md` → "Checking a branch against real mail"). The PR's "Verification" gets the
-per-email check on recent mail and, for a classification change, the `--reference --quiet` summary
-with the branch's accuracy next to the stored baseline. Never post email bodies.
+A change to classification (`categories.yaml` criteria, `classifier.py` state, body extraction, the
+signals Jev receives: `link_domains`, `reply_without_thread`, `sender_auth`), to what verifies a
+sender (DMARC, ARC and group trust in `signals.py`: `dmarc_passed`, `relay_author_auth`,
+`original_sender`, `resolve_relay`) or to a destructive action (archive, spam, unsubscribe,
+`unsubscribe-retry`) is checked against real mail before merging, not only with unit tests:
+`scripts/check_branch.sh` on the server, read-only (`docs/development.md` → "Checking a branch
+against real mail"). The PR's "Verification" gets the per-email check on recent mail and, for a
+classification change, the `--reference --quiet` summary with the branch's accuracy next to the
+stored baseline. Never post email bodies.

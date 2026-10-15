@@ -71,8 +71,12 @@ deleted messages), idempotency across runs (no double labels/unsubscribes), beha
 databases, error handling that hides failures or aborts a whole run.
 
 **Security & privacy**: secrets never committed or logged (API keys, OAuth tokens, client secrets);
-no email bodies in logs or DB; SSRF and redirects on unsubscribe URLs; header spoofing
-(Authentication-Results, List-Unsubscribe); injection (Gmail queries, Slack mrkdwn, SQL);
+no email bodies in logs or DB, and no link URLs (paths, queries) sent to Jev: `link_domains` only;
+SSRF and redirects on unsubscribe URLs; header spoofing (Authentication-Results and
+ARC-Authentication-Results read only through `signals`' strict RFC 8601 parse, ARC-Seal and
+ARC-Message-Signature through its strict RFC 6376 tag-list parse, failing closed to unknown, never
+to a pass, and never the group's pass for a relayed author, ADR 0043 and 0050; `X-Original-Sender`
+trusted only for `group_domains`; List-Unsubscribe); injection (Gmail queries, Slack mrkdwn, SQL);
 least-privilege OAuth scopes; file permissions on tokens; untrusted email content reaching shell or
 eval; new dependencies (maintained? pinned sensibly?).
 
@@ -82,7 +86,10 @@ must still be able to undo.
 
 **Real-mail check** (`docs/development.md`, "Checking a branch against real mail"; the rule in
 `.claude/rules/decision-logic.md`): if the PR changes classification (`categories.yaml` criteria,
-the classifier state or questions, `body.extract_body`) or a destructive path (archive, spam,
+the classifier state or questions, `body.extract_body`, the signals Jev receives:
+`body.extract_link_domains`, `signals.sender_auth`, `reply_without_thread`, `relay_author_auth`),
+what verifies a sender (DMARC, ARC and group trust in `signals.py`: `dmarc_passed`,
+`relay_author_auth`, `original_sender`, `resolve_relay`) or a destructive path (archive, spam,
 unsubscribe, `unsubscribe-retry`), the PR body must include the output of `scripts/check_branch.sh`
 (`dry_classify.py` on real mail, read-only) or an explicit reason it isn't needed, borne out by the
 diff. Missing: **major**. Output that contains email bodies: **blocker**. A classification change
