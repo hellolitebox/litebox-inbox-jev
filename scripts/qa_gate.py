@@ -244,20 +244,24 @@ def post_status(repo: str, sha: str, verdict: Verdict, url: str) -> None:
     gh_api(f"repos/{repo}/statuses/{sha}", *fields)
 
 
-_FIELD_FLAGS = frozenset({"-f", "-F"})
+# The value-less options in the commands this script runs. Any other option is assumed to take the
+# next word as its value (`-f state=…`, `-H "Authorization: …"`, `--jq …`), so a new one is dropped
+# with its value: an unknown option costs the error line an operand, never leaks a value.
+_BARE_FLAGS = frozenset({"--paginate", "--slurp", "--no-tags", "--quiet", "--write-tree"})
 
 
 def describe_command(cmd: Sequence[str]) -> str:
     """A failed command as the error line names it: the program, the subcommand and its operands
-    (the API path, the remote and refs fetched), without options or the `-f` fields' values."""
+    (the API path, the remote and refs fetched). Every option is dropped, and so is the next word
+    unless the option is in `_BARE_FLAGS` or carries its value inline (`--opt=value`)."""
     words: list[str] = []
     skip_next = False
     for word in cmd:
         if skip_next:
             skip_next = False
-        elif word in _FIELD_FLAGS:
-            skip_next = True
-        elif not word.startswith("-"):
+        elif word.startswith("-"):
+            skip_next = word not in _BARE_FLAGS and "=" not in word
+        else:
             words.append(word)
     return " ".join(words)
 

@@ -364,10 +364,35 @@ def test_main_fails_the_run_when_git_fails(monkeypatch, capsys):
             ],
             "gh api repos/o/r/statuses/abc",
         ),
+        (
+            ["gh", "api", "repos/o/r/statuses/abc", "-F", "state=success"],
+            "gh api repos/o/r/statuses/abc",
+        ),
+        (
+            ["gh", "api", "-f", "state=success", "repos/o/r/statuses/abc"],
+            "gh api repos/o/r/statuses/abc",
+        ),
+        (["git", "merge-tree", "--write-tree", "aaa", "bbb"], "git merge-tree aaa bbb"),
+        (["gh", "api", "--method=POST", "repos/o/r/x"], "gh api repos/o/r/x"),
+        (["gh", "api", "--jq", ".[0].body", "repos/o/r/x"], "gh api repos/o/r/x"),
     ],
 )
 def test_describe_command_names_the_operands_not_the_options(cmd, expected):
     assert qa_gate.describe_command(cmd) == expected
+
+
+@pytest.mark.parametrize("flag", ["--paginate", "--slurp", "--no-tags", "--quiet", "--write-tree"])
+def test_describe_command_keeps_the_operand_after_a_value_less_option(flag):
+    assert qa_gate.describe_command(["git", "x", flag, "operand"]) == "git x operand"
+
+
+def test_describe_command_never_prints_a_header_value():
+    """An option the script doesn't use today still has its value dropped, so a header added
+    later can't put a token in the error line."""
+    cmd = ["gh", "api", "-H", "Authorization: token x", "repos/o/r/x"]
+    described = qa_gate.describe_command(cmd)
+    assert "token x" not in described
+    assert described == "gh api repos/o/r/x"
 
 
 def git(cwd: Path, *args: str, check: bool = True) -> str:
