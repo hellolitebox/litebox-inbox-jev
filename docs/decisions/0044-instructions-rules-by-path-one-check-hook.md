@@ -92,9 +92,11 @@ reads it, instead of pattern-matching:
 - A `git switch` / `git checkout` earlier in the command moves the current branch of its worktree,
   as `cd` moves the directory: `git checkout main && git push` from a feature branch is refused, and
   `git switch -c fix/x && git push -u origin HEAD` from `main` passes. A switch counts as done only
-  through `&&`: after `;` it may have failed, so the branch before it is judged too. A
-  `git checkout` counts only to a local branch or `main`, never as a file restore (`-p`, a pathspec,
-  a deleted file).
+  through `&&`: after `;` it may have failed, so the branch before it is judged too. Inside a
+  command substitution a `;` or a newline ends only the substitution's own chain, so the usual
+  `git switch -c x && git commit -m "$(cat <<'EOF' … EOF)" && git push -u origin HEAD` passes, and a
+  heredoc line is never read as a switch. A `git checkout` counts only to a local branch or `main`,
+  never as a file restore (`-p`, a pathspec, a deleted file).
 
 The decision is unchanged: a guardrail, not a security boundary. What still slips past it
 (`bash -c`, `eval`, `xargs`, a refspec in a variable…) is listed in its docstring, and the ruleset

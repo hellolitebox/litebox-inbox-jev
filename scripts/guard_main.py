@@ -45,7 +45,12 @@ and the message then suggests passing a PR or commit body as a file (`--body-fil
 push` from a feature branch is refused, and `git switch -c fix/x && git push -u origin HEAD` from
 `main` passes. A switch counts as done only for what follows it through `&&`: after `;`, a newline,
 a pipe, `||` or `&` it may have failed, so a push is judged against the branch before it as well
-(`git checkout -b fix/x; git push -u origin HEAD` from `main` is refused). A switch whose branch the
+(`git checkout -b fix/x; git push -u origin HEAD` from `main` is refused). Inside a command
+substitution those end only the substitution's own chain, as bash runs it (`git switch -c x && git
+commit -m "$(cat <<'EOF' … EOF)" && git push -u origin HEAD` from `main` passes), and the
+substitution's end is one for the switches in it, since the command around it runs whatever their
+status. A heredoc line is never read as a switch, since that would move the branch the real push is
+judged against (a PR body's `git checkout main`), and ends no chain. A switch whose branch the
 command doesn't name (`git switch -`, `--detach`) leaves it unknown; `--track origin/x` switches to
 `x`. Since `git checkout` also restores files, it counts as a switch only to a local branch of that
 worktree, or to `main`: no name, several, anything after `--`, `-p` / `--patch`, a pathspec
@@ -250,8 +255,14 @@ class Segment(NamedTuple):
     text: str
     heredoc: bool = False
     ends_chain: bool = False
-    """Whether what follows it runs whatever its exit status (after `;`, `|`, `||`, `&`, a
-    newline, or where the structure can't be read), rather than only once it succeeded (`&&`)."""
+    """Whether what follows it at its depth runs whatever its exit status (after `;`, `|`, `||`,
+    `&`, a newline, the end of a substitution, or where the structure can't be read), rather than
+    only once it succeeded (`&&`). A heredoc line ends no chain: whether the commands around it
+    run doesn't depend on it."""
+    depth: int = 0
+    """How many command substitutions it is nested in (`a "$(b)"`: `b` at 1). A chain end inside a
+    substitution ends only the substitution's own chain: in `a && b "$(c; d)" && e`, `e` still
+    runs only if `a` succeeded."""
 
 
 class _Splitter:
@@ -292,12 +303,18 @@ class _Splitter:
     def _emit(self, text: str) -> None:
         self._buffers[-1].append(text)
 
+    @property
+    def _depth(self) -> int:
+        return len(self._buffers) - 1
+
     def _flush(self, *, ends_chain: bool = False) -> None:
-        """End the segment being read; `ends_chain` when the next command runs whatever its exit
-        status. An operator right after a subshell (`(a); b`) ends the subshell's last command."""
+        """End the segment being read; `ends_chain` when the next command at this depth runs
+        whatever its exit status. An operator right after a subshell (`(a); b`) or the end of a
+        substitution ending in a heredoc ends the command read last."""
         buffer = self._buffers[-1]
         if buffer:
-            self._segments.append(Segment("".join(buffer), ends_chain=ends_chain))
+            segment = Segment("".join(buffer), ends_chain=ends_chain, depth=self._depth)
+            self._segments.append(segment)
             buffer.clear()
         elif ends_chain and self._segments:
             self._segments[-1] = self._segments[-1]._replace(ends_chain=True)
@@ -389,8 +406,8 @@ class _Splitter:
             self._prev = char
             self._after_and = char == "&"
         elif char in {";", "|", ")"} or (char == "&" and not self._is_redirection()):
-            self._i += 1
-            self._flush(ends_chain=char != ")")
+            self._i += 1  # a `)` here is a stray one or a `case` pattern's: no subshell opened it
+            self._flush(ends_chain=True)
             self._prev = char
         else:
             return False
@@ -472,11 +489,15 @@ class _Splitter:
         return False
 
     def _substitution(self, closer: str) -> None:
-        """Read a command substitution into segments of its own; leave a placeholder for it."""
+        """Read a command substitution into segments of its own; leave a placeholder for it.
+
+        Its end ends its chain: the command around it runs whatever the substitution's status
+        (`git commit -m "$(git switch -c x)" && git push` pushes even if the switch failed).
+        """
         self._buffers.append([])
         self._prev = ""  # a command starts here: `$(# a comment` …
         self._unquoted(closer)
-        self._flush()
+        self._flush(ends_chain=True)
         self._buffers.pop()
         self._emit(_SUBSTITUTION)
 
@@ -539,8 +560,10 @@ class _Splitter:
         self._heredocs.clear()
 
     def _extend_blind(self, text: str, *, heredoc: bool) -> None:
+        """Add `text` split blind; a heredoc's line ends no chain, so each part of it ends none."""
         self._segments.extend(
-            Segment(part, heredoc, ends_chain=True) for part in _BLIND_SEGMENTS.split(text)
+            Segment(part, heredoc, ends_chain=not heredoc, depth=self._depth)
+            for part in _BLIND_SEGMENTS.split(text)
         )
 
 
@@ -904,7 +927,8 @@ class _Branches:
 
     def __init__(self) -> None:
         self._possible: dict[Path | None, frozenset[str | None]] = {}
-        self._before: dict[Path | None, frozenset[str | None]] = {}  # switched since `settle`
+        # Per (depth, worktree) switched in since its `settle`: the branches before those switches.
+        self._before: dict[tuple[int, Path | None], frozenset[str | None]] = {}
         self._keys: dict[Path, Path | None] = {}
 
     def _key(self, cwd: Path | None) -> Path | None:
@@ -920,16 +944,18 @@ class _Branches:
             self._possible[key] = frozenset({current_branch(cwd)})
         return self._possible[key]
 
-    def switch(self, cwd: Path | None, branch: str | None) -> None:
+    def switch(self, cwd: Path | None, branch: str | None, depth: int) -> None:
+        """`cwd`'s worktree switched to `branch` by a command `depth` substitutions deep."""
         key = self._key(cwd)
-        self._before[key] = self._before.get(key, frozenset()) | self._branches(key, cwd)
+        slot = (depth, key)
+        self._before[slot] = self._before.get(slot, frozenset()) | self._branches(key, cwd)
         self._possible[key] = frozenset({branch})
 
-    def settle(self) -> None:
-        """What follows runs even if the switches since the last `settle` failed."""
-        for key, before in self._before.items():
-            self._possible[key] |= before
-        self._before.clear()
+    def settle(self, depth: int) -> None:
+        """What follows at `depth` runs even if the switches made since their last `settle` at
+        `depth` or deeper failed."""
+        for slot in [slot for slot in self._before if slot[0] >= depth]:
+            self._possible[slot[1]] |= self._before.pop(slot)
 
     def current(self, cwd: Path | None) -> list[str]:
         """The branches that may be checked out in `cwd`, unknown ones left out."""
@@ -944,7 +970,7 @@ def reason_to_block(command: str, cwd: Path | None) -> str | None:
         if reason is not None:
             return reason + (_HEREDOC_HINT if segment.heredoc else "")
         if segment.ends_chain:
-            branches.settle()
+            branches.settle(segment.depth)
     return None
 
 
@@ -962,9 +988,12 @@ def _judge(
     if git is None:
         return _reason_for(program, args), cwd
     directory = _git_directory(cwd, git)
-    switch = branch_switch(git, directory)
+    # A heredoc line is judged as a push, which refuses more, but never read as a switch, which
+    # would move the branch the real push after it is judged against (a PR body's `git checkout
+    # main`).
+    switch = None if segment.heredoc else branch_switch(git, directory)
     if switch is not None:
-        branches.switch(directory, switch.branch)
+        branches.switch(directory, switch.branch, segment.depth)
     elif git.subcommand == "push" and PROTECTED_BRANCH in push_targets(
         git.args, partial(branches.current, directory)
     ):

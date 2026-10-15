@@ -402,6 +402,17 @@ def test_a_switch_to_main_earlier_in_the_command_is_seen_by_the_push(command, tm
         "git checkout --track origin/feat/y && git push",
         "git checkout -b fix/x &&\n  git push -u origin HEAD",
         'git switch -c fix/x && git commit -m "$(cat msg)" && git push -u origin HEAD',
+        # A `;`, a newline or a heredoc line inside a substitution ends no outer chain: the push
+        # still runs only if the switch succeeded (QA round 2 on #8).
+        "git checkout -b feat/x && git commit -m \"$(cat <<'EOF'\nSubject\n\nBody line one.\n"
+        'Co-Authored-By: A <a@example.com>\nEOF\n)" && git push -u origin HEAD',
+        "git checkout -b feat/x && git add -A && git commit -m \"$(cat <<'EOF'\nSubject\nEOF\n)\" "
+        "&& git push -u origin HEAD 2>&1 | tail -5",
+        'git switch -c q && git commit -m "$(echo a; echo b)" && git push -u origin HEAD',
+        'git switch -c q && git commit -m "$(echo a\necho b)" && git push -u origin HEAD',
+        # A `;` inside a substitution unsettles only the switches made inside it.
+        'git switch -c a && echo "$(git switch -c b; git push)"',
+        # Outside a substitution a `;` after the switch still ends the chain (below).
         "git switch -c fix/x; git switch -c fix/y && git push",  # pushed only if fix/y is
         # A branch the command doesn't name is unknown: only an explicit `main` is refused.
         "git switch - && git push",
@@ -424,6 +435,10 @@ def test_a_switch_away_from_main_earlier_in_the_command_is_seen_by_the_push(comm
         "(git switch -c fix/x); git push -u origin HEAD",
         "git switch -c a && git switch -c b; git push",
         "git switch -c fix/x; git switch -c fix/y; git push",
+        # Inside a substitution too, a `;` lets the push run after a failed switch, and the
+        # command around a substitution runs whatever the substitution's status.
+        'echo "$(git checkout -b fix/x; git push -u origin HEAD)"',
+        'git commit -m "$(git switch -c fix/x)" && git push -u origin HEAD',
     ],
 )
 def test_a_switch_that_may_have_failed_leaves_the_old_branch_possible(command, tmp_path):
@@ -627,12 +642,24 @@ def test_segments_read_backslashes_as_bash_does(command, segments):
 
 
 def test_segments_mark_the_lines_of_a_heredocs_body():
+    """A heredoc line can't make the command around it go on past a failure: it ends no chain."""
     assert guard_main.segments("cat <<E && b\nc ; d\nE\ne") == [
         guard_main.Segment("cat <<E "),
         guard_main.Segment(" b", ends_chain=True),
-        guard_main.Segment("c ", heredoc=True, ends_chain=True),
-        guard_main.Segment(" d", heredoc=True, ends_chain=True),
+        guard_main.Segment("c ", heredoc=True),
+        guard_main.Segment(" d", heredoc=True),
         guard_main.Segment("e"),
+    ]
+
+
+def test_segments_give_a_substitutions_commands_its_depth():
+    assert guard_main.segments('a && b "$(c; d <<E\nx\nE\n)" && e') == [
+        guard_main.Segment("a "),
+        guard_main.Segment("c", ends_chain=True, depth=1),
+        guard_main.Segment(" d <<E", ends_chain=True, depth=1),
+        guard_main.Segment("x", heredoc=True, ends_chain=True, depth=1),  # the substitution's end
+        guard_main.Segment(' b "$(…)" '),
+        guard_main.Segment(" e"),
     ]
 
 
@@ -647,12 +674,31 @@ def test_segments_mark_the_lines_of_a_heredocs_body():
         ("a && \\\nb", [False, False]),
         ("(a); b", [True, False]),
         ("(a) && b", [False, False, False]),
-        ('a "$(b)" && c', [False, False, False]),  # a substitution ends no chain
+        # A substitution's end ends its own chain (at its depth), never the outer one.
+        ('a "$(b)" && c', [True, False, False]),
+        ('a "$(b; c)" && d', [True, True, False, False]),
         ("a 'b; c", [True, True]),  # blind
+        # A stray `)` (bash rejects it) or a `case` pattern's ends the chain too.
+        ("a ) b", [True, False]),
     ],
 )
 def test_segments_say_whether_what_follows_runs_whatever_their_status(command, ends):
     assert [segment.ends_chain for segment in guard_main.segments(command)] == ends
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh pr create --body \"$(cat <<'EOF'\nRun:\ngit checkout main\nEOF\n)\" && git push",
+        "cat > /tmp/body.md <<'EOF'\ngit switch main\nEOF\ngit push origin HEAD",
+        "git commit -F - <<'EOF' && git push\ngit checkout main\nEOF",
+    ],
+)
+def test_a_heredoc_line_switches_no_branch(command, tmp_path):
+    """A heredoc line is text more often than a script: it is judged as a push, never read as a
+    switch, which would move the branch the real push is judged against (QA round 2 on #8)."""
+    on_feature = repo_with_branches(tmp_path / "r", "feat/x", "main")
+    assert guard_main.reason_to_block(command, on_feature) is None
 
 
 def test_a_refusal_in_a_heredoc_suggests_a_body_file():
