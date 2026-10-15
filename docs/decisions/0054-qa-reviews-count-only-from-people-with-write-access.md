@@ -15,18 +15,19 @@ right `Head:` line, and turn the required check green on a pull request nobody r
 ## Decision
 
 `scripts/qa_gate.py` counts a `## QA review` comment only when its author has write access to the
-repo or more (`admin`, `maintain`, `write`), asked once per login through
-`repos/{repo}/collaborators/{login}/permission` (the workflow's token can read it: it needs only the
-metadata permission every `GITHUB_TOKEN` has). Anyone else's review-looking comment is ignored, so
-an earlier real review (or none) decides. A login GitHub doesn't know (404) is untrusted; any other
-failure of that call fails the run, as every other `gh api` failure already does, so a transient
-error is visible and re-run, never a verdict.
+repo or more (`admin` or `write`; the endpoint reports `maintain` as `write`), asked once per login
+through `repos/{repo}/collaborators/{login}/permission` (the workflow's token can read it: it needs
+only the metadata permission every `GITHUB_TOKEN` has). Anyone else's review-looking comment is
+ignored, so an earlier real review (or none) decides. A login GitHub doesn't know (404) is
+untrusted; any other failure of that call fails the run, as every other `gh api` failure already
+does, so a transient error is visible and re-run, never a verdict.
 
 ## Alternatives considered
 
-- **`author_association` alone**: a member whose org membership is private shows as `CONTRIBUTOR` to
-  some tokens, which could leave every real review uncounted and block every merge. It stays as the
-  fallback only.
+- **`author_association`**, alone or as a fallback when the permission call fails: a member whose
+  org membership is private shows as `CONTRIBUTOR` to some tokens, which could leave real reviews
+  uncounted, and `MEMBER`/`COLLABORATOR` include accounts with only read access. As a fallback it
+  ran only on transient errors, where it widened trust and could silently drop a real review.
 - **A fixed list of logins**: correct today, wrong as soon as a maintainer joins or leaves, and kept
   in a second place besides the repo's own access.
 - **GitHub's own reviews instead of comments** (an approving review required by the ruleset): the QA
