@@ -16,9 +16,11 @@ right `Head:` line, and turn the required check green on a pull request nobody r
 
 `scripts/qa_gate.py` counts a `## QA review` comment only when its author has write access to the
 repo or more (`admin`, `maintain`, `write`), asked once per login through
-`repos/{repo}/collaborators/{login}/permission`. Anyone else's review-looking comment is ignored, so
-an earlier real review (or none) decides. If that permission can't be read, the comment's
-`author_association` decides instead (`OWNER`, `MEMBER` or `COLLABORATOR`).
+`repos/{repo}/collaborators/{login}/permission` (the workflow's token can read it: it needs only the
+metadata permission every `GITHUB_TOKEN` has). Anyone else's review-looking comment is ignored, so
+an earlier real review (or none) decides. A login GitHub doesn't know (404) is untrusted; any other
+failure of that call fails the run, as every other `gh api` failure already does, so a transient
+error is visible and re-run, never a verdict.
 
 ## Alternatives considered
 

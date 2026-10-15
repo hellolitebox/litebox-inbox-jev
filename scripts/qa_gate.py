@@ -34,9 +34,8 @@ REVIEW_HEADING = "## QA review"
 VERDICT_RE = re.compile(r"\*\*Verdict:\s*(APPROVED|CHANGES_REQUESTED)\*\*")
 HEAD_RE = re.compile(r"^Head:\s*`?([0-9a-f]{7,40})`?\s*$", re.MULTILINE)
 # Repo permissions that make a commenter's QA review count (ADR 0054).
-TRUSTED_PERMISSIONS = frozenset({"admin", "maintain", "write"})
-# The fallback when a permission can't be read: GitHub's `author_association` of the comment.
-TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+# The endpoint's legacy `permission` field reports maintain as write and triage as read.
+TRUSTED_PERMISSIONS = frozenset({"admin", "write"})
 # How many `update-branch` merges on top of the reviewed commit still count as that commit.
 MAX_UPDATE_DEPTH = 5
 
@@ -84,15 +83,14 @@ def parse_review(body: str, url: str = "") -> Review:
 
 
 def latest_review(
-    comments: list[dict[str, Any]], is_trusted: Callable[[str, str | None], bool]
+    comments: list[dict[str, Any]], is_trusted: Callable[[str], bool]
 ) -> Review | None:
     """The newest comment that starts with the QA heading and whose author `is_trusted`;
     `comments` is oldest first. A review-looking comment by anyone else is ignored."""
     for comment in reversed(comments):
         body = comment.get("body") or ""
         login = (comment.get("user") or {}).get("login") or ""
-        association = comment.get("author_association")
-        if body.startswith(REVIEW_HEADING) and login and is_trusted(login, association):
+        if body.startswith(REVIEW_HEADING) and login and is_trusted(login):
             return parse_review(body, comment.get("html_url") or "")
     return None
 
@@ -143,21 +141,23 @@ def make_is_update_of(repo: str, base: str) -> Callable[[str, str], bool]:
     return is_update_of
 
 
-def make_is_trusted(repo: str) -> Callable[[str, str | None], bool]:
-    """`is_trusted(login, association)` over the GitHub API: the user has write access to `repo`
-    or more (`TRUSTED_PERMISSIONS`), asked once per login. `author_association` alone shows a
-    member whose org membership is private as a mere contributor, so it is only the fallback
-    when the permission can't be read (`TRUSTED_ASSOCIATIONS`)."""
+def make_is_trusted(repo: str) -> Callable[[str], bool]:
+    """`is_trusted(login)` over the GitHub API: the user has write access to `repo` or more
+    (`TRUSTED_PERMISSIONS`), asked once per login. A login GitHub doesn't know (404) is
+    untrusted; any other failure of the call fails the run (`main` exits 1, to be re-run), so a
+    transient error never decides a verdict. Not `author_association`, which shows a member whose
+    org membership is private as a mere contributor."""
     known: dict[str, bool] = {}
 
-    def is_trusted(login: str, association: str | None) -> bool:
+    def is_trusted(login: str) -> bool:
         if login not in known:
             try:
-                permission = gh_api(f"repos/{repo}/collaborators/{login}/permission")
-            except subprocess.CalledProcessError:
-                known[login] = association in TRUSTED_ASSOCIATIONS
-            else:
-                known[login] = permission.get("permission") in TRUSTED_PERMISSIONS
+                answer = gh_api(f"repos/{repo}/collaborators/{login}/permission")
+            except subprocess.CalledProcessError as exc:
+                if "HTTP 404" not in (exc.stderr or ""):
+                    raise
+                answer = {}
+            known[login] = answer.get("permission") in TRUSTED_PERMISSIONS
         return known[login]
 
     return is_trusted

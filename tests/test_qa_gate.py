@@ -27,7 +27,7 @@ def review(verdict="APPROVED", head=HEAD, round_=1, author=MAINTAINER):
 
 def latest_review(comments):
     """`qa_gate.latest_review` with only MAINTAINER trusted."""
-    return latest_review_by(comments, lambda login, association: login == MAINTAINER)
+    return latest_review_by(comments, lambda login: login == MAINTAINER)
 
 
 def never(head, reviewed):
@@ -80,15 +80,7 @@ def test_a_review_by_someone_without_write_access_is_ignored():
 
 
 @pytest.mark.parametrize(
-    ("permission", "trusted"),
-    [
-        ("admin", True),
-        ("maintain", True),
-        ("write", True),
-        ("triage", False),
-        ("read", False),
-        ("none", False),
-    ],
+    ("permission", "trusted"), [("admin", True), ("write", True), ("read", False), ("none", False)]
 )
 def test_trust_is_write_access_asked_once_per_login(monkeypatch, permission, trusted):
     asked = []
@@ -99,28 +91,28 @@ def test_trust_is_write_access_asked_once_per_login(monkeypatch, permission, tru
 
     monkeypatch.setattr(qa_gate, "gh_api", gh_api)
     is_trusted = qa_gate.make_is_trusted("o/r")
-    assert is_trusted("ana", "NONE") is trusted  # the permission decides, not the association
-    assert is_trusted("ana", "MEMBER") is trusted
+    assert is_trusted("ana") is trusted
+    assert is_trusted("ana") is trusted
     assert asked == ["repos/o/r/collaborators/ana/permission"]
 
 
-@pytest.mark.parametrize(
-    ("association", "trusted"),
-    [
-        ("OWNER", True),
-        ("MEMBER", True),
-        ("COLLABORATOR", True),
-        ("CONTRIBUTOR", False),
-        ("NONE", False),
-        (None, False),
-    ],
-)
-def test_an_unreadable_permission_falls_back_to_the_association(monkeypatch, association, trusted):
+def _failing(stderr):
     def gh_api(path, *args):
-        raise qa_gate.subprocess.CalledProcessError(1, ["gh", "api", path], stderr="HTTP 403")
+        raise qa_gate.subprocess.CalledProcessError(1, ["gh", "api", path], stderr=stderr)
 
-    monkeypatch.setattr(qa_gate, "gh_api", gh_api)
-    assert qa_gate.make_is_trusted("o/r")("ana", association) is trusted
+    return gh_api
+
+
+def test_an_unknown_login_is_untrusted(monkeypatch):
+    monkeypatch.setattr(qa_gate, "gh_api", _failing("gh: Not Found (HTTP 404)"))
+    assert qa_gate.make_is_trusted("o/r")("ghost") is False
+
+
+def test_a_failed_permission_call_fails_the_run(monkeypatch):
+    """A transient error never decides a verdict: the call's failure reaches `main` (exit 1)."""
+    monkeypatch.setattr(qa_gate, "gh_api", _failing("gh: Bad Gateway (HTTP 502)"))
+    with pytest.raises(qa_gate.subprocess.CalledProcessError):
+        qa_gate.make_is_trusted("o/r")("ana")
 
 
 def test_stale_head_is_pending():
