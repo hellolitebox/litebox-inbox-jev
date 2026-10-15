@@ -32,6 +32,32 @@ Claude Code, a long task gets a finish line it can wait on:
 `/goal scripts/check.sh passes and the PR is open` for an implementation,
 `/goal PR <n> is merged by /ship or 5 rounds are exhausted` for the loop.
 
+## Releasing
+
+A release publishes the package to PyPI (`uv tool install inbox-jev`,
+[ADR 0053](decisions/0053-installable-from-pypi-with-a-home-folder.md)). The version lives only in
+`pyproject.toml`.
+
+1. Bump `[project] version` in a pull request (`uv lock` updates `uv.lock` with it) and merge it
+   through `/ship`.
+2. Tag the merge commit and push the tag:
+   `git tag v<version> origin/main && git push origin v<version>`.
+3. The `Release` workflow (`.github/workflows/release.yml`) checks that the tagged commit is on
+   `main` and that the tag matches the version, runs `scripts/check.sh`, builds the wheel and sdist,
+   installs the wheel outside the checkout as a smoke test (the command runs, the default files it
+   ships are there) and publishes with PyPI's trusted publishing: no token is stored anywhere.
+
+One-time setup, before the first release, by the owner of the PyPI account:
+
+- On PyPI, *Your projects → Publishing → Add a new pending publisher*: project `inbox-jev`, owner
+  `hellolitebox`, repository `litebox-inbox-jev`, workflow `release.yml`, environment `pypi`.
+- On GitHub, *Settings → Environments → New environment* `pypi`; add yourself as a required reviewer
+  so each publish waits for an approval, and under *Deployment branches and tags* choose *Selected
+  branches and tags* with one tag rule, `v*`, so nothing but a version tag can deploy to it.
+
+Publishing makes the source public (the sdist and the wheel carry it), whatever the repo's own
+visibility.
+
 ## Checking a branch against real mail
 
 Changes to classification (`categories.yaml` criteria, `classifier.py` state, body extraction, the

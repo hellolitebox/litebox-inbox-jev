@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from datetime import timedelta
@@ -16,7 +17,7 @@ import typer
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from . import __version__, labels, logs, onboarding, rules, triage
+from . import __version__, labels, logs, onboarding, rules, schedule, triage
 from . import digest as digest_mod
 from . import gmail as gmail_mod
 from . import slack as slack_mod
@@ -35,16 +36,21 @@ from .config import (
     validate_accounts,
 )
 from .db import Message, MessageStatus, SenderRule, now, open_sessions
+from .paths import home
 
 app = typer.Typer(no_args_is_help=True, help="Triage Gmail with TypeSafe Jev.")
 auth_app = typer.Typer(no_args_is_help=True, help="Manage Gmail OAuth tokens.")
 rules_app = typer.Typer(no_args_is_help=True, help="Per-sender rules (skip Jev).")
 labels_app = typer.Typer(no_args_is_help=True, help="Manage Jev labels in Gmail.")
 senders_app = typer.Typer(no_args_is_help=True, help="Maintain stored senders.")
+schedule_app = typer.Typer(
+    no_args_is_help=True, help="Run inbox-jev on a schedule on this computer (launchd, systemd)."
+)
 app.add_typer(auth_app, name="auth")
 app.add_typer(rules_app, name="rules")
 app.add_typer(labels_app, name="labels")
 app.add_typer(senders_app, name="senders")
+app.add_typer(schedule_app, name="schedule")
 
 log = logging.getLogger("inbox_jev")
 
@@ -84,7 +90,7 @@ def _settings(*, announce: bool = False) -> Settings:
     Only the timer-driven commands announce: their JSON logs then say which image produced them.
     Interactive commands print tables, and the line would land before them on stdout.
     """
-    settings = Settings()
+    settings = Settings.load()
     logs.setup(settings.log_level)
     if announce:
         log.info("starting", extra={"revision": os.environ.get(REVISION_ENV, "unknown")})
@@ -98,7 +104,11 @@ def _accounts(settings: Settings, cfg: CategoriesConfig, only: str | None) -> li
     same way, before it opens the database or touches Gmail (exit 2, one message listing every
     problem).
     """
-    accounts = load_accounts(settings.accounts_file)
+    try:
+        accounts = load_accounts(settings.accounts_file)
+    except FileNotFoundError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
     try:
         validate_accounts(accounts, cfg)
     except ConfigError as exc:
@@ -222,6 +232,65 @@ def auth_status(account: AccountOpt = None) -> None:
             typer.echo(f"{acc.email}: authorized, with no expiry date from Google")
     if problems:
         raise typer.Exit(1)
+
+
+def _scheduler() -> schedule.Scheduler:
+    try:
+        return schedule.detect()
+    except schedule.ScheduleError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
+
+
+@schedule_app.command("install")
+def schedule_install() -> None:
+    """Triage every 10 minutes (and send the digest daily at 08:00 when Slack is set up), with
+    this home's settings. Replaces an earlier schedule. Refuses on a server deployment."""
+    s = _settings()
+    scheduler = _scheduler()
+    root = home()
+    try:
+        written = schedule.install(
+            scheduler,
+            schedule.jobs(digest=bool(s.slack_bot_token)),
+            root,
+            command=schedule.executable(),
+            places=schedule.Places.default(),
+        )
+    except schedule.ScheduleError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
+    except (OSError, subprocess.CalledProcessError) as exc:
+        typer.echo(
+            f"couldn't schedule it: {schedule.failure(exc)}. Part of it may be loaded: "
+            "`inbox-jev schedule status` shows what is, and `inbox-jev schedule install` again "
+            "starts over.",
+            err=True,
+        )
+        raise typer.Exit(1) from exc
+    typer.echo(f"Scheduled with {scheduler.value} for {root}:")
+    for path in written:
+        typer.echo(f"  {path}")
+    if warning := schedule.linger_warning(scheduler):
+        typer.echo(f"warning: {warning}", err=True)
+
+
+@schedule_app.command("remove")
+def schedule_remove() -> None:
+    """Stop and remove the schedule `schedule install` set up (a pass under way stops too)."""
+    removed = schedule.remove(_scheduler(), places=schedule.Places.default())
+    typer.echo("\n".join(f"Removed {path}" for path in removed) or "Nothing was scheduled.")
+
+
+@schedule_app.command("status")
+def schedule_status() -> None:
+    """Show which inbox-jev jobs are scheduled on this computer (exits 1 when none)."""
+    found = schedule.installed(_scheduler(), places=schedule.Places.default())
+    if not found:
+        typer.echo("Not scheduled: `inbox-jev schedule install`.")
+        raise typer.Exit(1)
+    for path in found:
+        typer.echo(str(path))
 
 
 @app.command()

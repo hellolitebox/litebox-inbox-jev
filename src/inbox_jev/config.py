@@ -11,7 +11,9 @@ from typing import Annotated
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
 
+from .paths import bundled, home
 from .psl import is_public_suffix
 from .signals import ADDRESS, DOMAIN, domain_of, on_domain
 
@@ -188,6 +190,20 @@ class Action(StrEnum):
     SPAM = "spam"
 
 
+DEFAULT_CATEGORIES_FILE = Path("categories.yaml")
+
+
+def _sqlite_under(url: str, root: Path) -> str:
+    """`url` with a relative SQLite database file taken from `root`; any other URL as is."""
+    parsed = make_url(url)
+    database = parsed.database
+    if parsed.get_backend_name() != "sqlite" or not database or database == ":memory:":
+        return url
+    if Path(database).is_absolute():
+        return url
+    return parsed.set(database=str(root / database)).render_as_string(hide_password=False)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -198,13 +214,47 @@ class Settings(BaseSettings):
     google_client_secrets_file: Path = Path("secrets/client_secret.json")
     google_tokens_dir: Path = Path("secrets/tokens")
     accounts_file: Path = Path("accounts.yaml")
-    categories_file: Path = Path("categories.yaml")
+    categories_file: Path = DEFAULT_CATEGORIES_FILE
     mode: Mode = Mode.DRY_RUN
     lookback: str = "2d"
     max_messages_per_run: int = Field(default=200, ge=1)
     max_unsubscribes_per_run: int = Field(default=20, ge=0)  # 0 never unsubscribes
     body_chars: int = Field(default=3000, ge=1)
     log_level: LogLevel = LogLevel.INFO
+
+    @classmethod
+    def load(cls) -> Settings:
+        """The settings from the home's `.env` (and the environment), with every relative path
+        taken from the home (`paths.home`)."""
+        root = home()
+        # `_env_file` is pydantic-settings' init argument, which its stubs don't declare.
+        return cls(_env_file=root / ".env").under(root)  # type: ignore[call-arg]
+
+    def under(self, root: Path) -> Settings:
+        """These settings with relative paths, and a relative SQLite database, under `root`.
+
+        A categories file named `categories.yaml`, the default, falls back to the one the package
+        ships when `root` has none, so an install that never customised it gets the new defaults
+        on upgrade. That holds when `CATEGORIES_FILE=categories.yaml` is set too, as `init`'s
+        `.env` (from `.env.example`) and compose do: the name decides, not whether it was set.
+        Any other name, or an absolute path, is used as is and never falls back.
+        """
+
+        def at(path: Path) -> Path:
+            return path if path.is_absolute() else root / path
+
+        categories = at(self.categories_file)
+        if not categories.exists() and self.categories_file == DEFAULT_CATEGORIES_FILE:
+            categories = bundled(DEFAULT_CATEGORIES_FILE.name)
+        return self.model_copy(
+            update={
+                "database_url": _sqlite_under(self.database_url, root),
+                "google_client_secrets_file": at(self.google_client_secrets_file),
+                "google_tokens_dir": at(self.google_tokens_dir),
+                "accounts_file": at(self.accounts_file),
+                "categories_file": categories,
+            }
+        )
 
     @field_validator("lookback")
     @classmethod
@@ -440,5 +490,7 @@ def find_account(accounts: list[Account], email: str) -> Account | None:
 
 def load_accounts(path: Path) -> list[Account]:
     if not path.exists():
-        raise FileNotFoundError(f"{path} not found — copy accounts.example.yaml to {path}")
+        raise FileNotFoundError(
+            f"{path} not found: run `inbox-jev init`, or copy accounts.example.yaml to it"
+        )
     return AccountsConfig.model_validate(yaml.safe_load(path.read_text())).accounts

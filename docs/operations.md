@@ -7,6 +7,14 @@ deploys. What the tool does is in the [README](../README.md); how it decides, in
 
 ## Deploy (Docker + systemd timers)
 
+A server runs the image CI builds, from a checkout of this repo. (On your own computer, the package
+from PyPI and `inbox-jev schedule install` do the same with launchd or systemd user units: see the
+README's Setup. Never both for the same account: `schedule install`, and `init`'s schedule step,
+refuse on a host with `/etc/systemd/system/inbox-jev-triage.timer`. systemd user units run only
+while their user is logged in unless lingering is on, `loginctl enable-linger $USER`; `install`
+warns when it is off.) The image sets `INBOX_JEV_HOME=/app`, so every relative path in `.env` is
+taken from `/app`, where compose mounts `accounts.yaml`, `secrets/` and `data/`.
+
 ```bash
 git clone <repo> /opt/inbox-jev && cd /opt/inbox-jev
 # copy .env, accounts.yaml, secrets/client_secret.json and secrets/tokens/*.json from your laptop,
@@ -202,6 +210,11 @@ newsletters are archived, and so on. Tune it, in your own copy (below), to how y
 sorted. The brand names in its criteria (HubSpot, Calendly, Typeform, SafeSend…) are examples that
 help Jev recognise a kind of email, not rules: no code matches on them, and you can drop or replace
 them.
+
+An installed copy (`uv tool install inbox-jev`) reads the defaults from the package, so an upgrade
+brings their changes, until you put your own `categories.yaml` in its configuration folder
+(`~/.config/inbox-jev/`, or `INBOX_JEV_HOME`): from then on it reads yours. Start from the shipped
+one (`categories.yaml` in this repo, at the version you run).
 
 Don't edit the tracked file on a deployment: `scripts/deploy.sh` checks out each release over it.
 Keep your own copy next to it instead:

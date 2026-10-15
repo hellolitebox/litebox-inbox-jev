@@ -1,4 +1,4 @@
-"""`inbox-jev init`: a guided first setup, from a fresh checkout to a first dry run.
+"""`inbox-jev init`: a guided first setup, from a fresh install or checkout to a first dry run.
 
 Every step checks what is already configured and keeps it, so running the wizard again adds an
 account or fixes one step without redoing the others. Each install brings its own Google OAuth
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,6 +29,7 @@ from typesafe_sdk import (
 )
 
 from . import gmail as gmail_mod
+from . import schedule
 from . import slack as slack_mod
 from .classifier import describe_jev_error
 from .config import (
@@ -40,10 +42,11 @@ from .config import (
     find_account,
 )
 from .files import write_private
+from .paths import HOME_ENV, bundled, home
 from .signals import ADDRESS, domain_of
 
-ENV_FILE = Path(".env")
-ENV_EXAMPLE = Path(".env.example")
+ENV_FILE = ".env"
+ENV_EXAMPLE = ".env.example"
 
 GOOGLE_PAGES = {
     "project": "https://console.cloud.google.com/projectcreate",
@@ -194,12 +197,13 @@ def set_env_values(text: str, values: Mapping[str, str]) -> str:
 
 
 def update_env_file(path: Path, values: Mapping[str, str]) -> None:
-    """Set `values` in the .env at `path` (created from `.env.example` next to it if missing)."""
+    """Set `values` in the .env at `path`. A missing one starts from the `.env.example` next to
+    it (a checkout's), else from the one the package ships."""
     if path.exists():
         text = path.read_text()
     else:
-        example = path.with_name(ENV_EXAMPLE.name)
-        text = example.read_text() if example.exists() else ""
+        example = path.with_name(ENV_EXAMPLE)
+        text = (example if example.exists() else bundled(ENV_EXAMPLE)).read_text()
     write_private(path, set_env_values(text, values))
 
 
@@ -361,32 +365,70 @@ def _step(title: str) -> None:
 
 
 def wizard(downloads: Path | None = None) -> bool:
-    """Run the setup steps in order, in the checkout (the current directory); True when the user
-    wants a first dry run now. `downloads` is where Google's client JSON is looked for
-    (~/Downloads by default)."""
+    """Run the setup steps in order, in the home (`paths.home`); True when the user wants a
+    first dry run now. `downloads` is where Google's client JSON is looked for (~/Downloads by
+    default)."""
+    root = home()
+    env_file = root / ENV_FILE
     typer.secho("inbox-jev setup", bold=True)
+    typer.echo(f"Configuration and data go in {root} (set {HOME_ENV} to use another folder).")
     typer.echo("Each step keeps what is already configured. Ctrl-C stops; run it again later.")
-    if not ENV_FILE.exists():
-        update_env_file(ENV_FILE, {})
-        _ok(f"created {ENV_FILE} from {ENV_EXAMPLE}")
-    settings = Settings()
-    _typesafe_step(settings, ENV_FILE)
+    if not env_file.exists():
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        update_env_file(env_file, {})
+        _ok(f"created {env_file}")
+    settings = Settings.load()
+    _typesafe_step(settings, env_file)
     _google_client_step(settings, downloads or Path.home() / "Downloads")
-    slack_token = _slack_step(settings, ENV_FILE)
+    slack_token = _slack_step(settings, env_file)
     _accounts_step(settings, slack_token)
+    _schedule_step(root, digest=bool(slack_token))
     _step("Done")
     if settings.mode is Mode.DRY_RUN:
         typer.echo(
-            f"MODE is dry_run in {ENV_FILE}: Jev's decisions are recorded, Gmail is untouched."
+            f"MODE is dry_run in {env_file}: Jev's decisions are recorded, Gmail is untouched."
         )
     else:
-        typer.echo(f"MODE is {settings.mode.value} in {ENV_FILE} (README.md → Modes).")
+        typer.echo(f"MODE is {settings.mode.value} in {env_file} (README.md → Modes).")
     typer.echo(
         "Next: `inbox-jev stats` and `inbox-jev digest --dry-print` show what it decided; set\n"
-        "MODE=label when the categories look right (README.md → Modes); docs/operations.md runs\n"
-        "it on a schedule."
+        "MODE=label when the categories look right (README.md → Modes)."
     )
     return typer.confirm("Run a first dry run on your 30 newest inbox emails now?", default=True)
+
+
+def _schedule_step(root: Path, *, digest: bool) -> None:
+    _step("5. Run it on a schedule (optional)")
+    typer.echo(
+        "  Only if this computer is where inbox-jev runs: a triage pass every 10 minutes while it\n"
+        "  is on" + (", and the digest every day at 08:00" if digest else "") + ". Skip it if\n"
+        "  you will deploy to a server (docs/operations.md): two copies must never triage the\n"
+        "  same account."
+    )
+    if not typer.confirm("  Schedule it here?", default=False):
+        typer.echo("  Later: `inbox-jev schedule install`.")
+        return
+    try:
+        scheduler = schedule.detect()
+        written = schedule.install(
+            scheduler,
+            schedule.jobs(digest=digest),
+            root,
+            command=schedule.executable(),
+            places=schedule.Places.default(),
+        )
+    except schedule.ScheduleError as exc:
+        _problem(f"couldn't schedule it: {exc}")
+        return
+    except (OSError, subprocess.CalledProcessError) as exc:
+        _problem(
+            f"couldn't schedule it: {schedule.failure(exc)}; `inbox-jev schedule install` "
+            "tries again"
+        )
+        return
+    _ok(f"scheduled with {scheduler.value}: {', '.join(p.name for p in written)}")
+    if warning := schedule.linger_warning(scheduler):
+        _problem(warning)
 
 
 def _typesafe_step(settings: Settings, env_file: Path) -> None:

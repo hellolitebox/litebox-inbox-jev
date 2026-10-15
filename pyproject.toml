@@ -4,7 +4,20 @@ version = "0.1.0"
 description = "Triage your Gmail inbox with TypeSafe Jev: label, archive, and auto-unsubscribe from marketing."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Litebox" }]
+keywords = ["gmail", "email", "inbox", "triage", "unsubscribe", "typesafe", "jev"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Communications :: Email",
+]
 dependencies = [
     "typesafe-sdk>=0.7.4",
     "google-api-python-client>=2.150",
@@ -34,12 +47,34 @@ dev = [
 [project.scripts]
 inbox-jev = "inbox_jev.cli:app"
 
+[project.urls]
+Homepage = "https://github.com/hellolitebox/litebox-inbox-jev"
+Documentation = "https://github.com/hellolitebox/litebox-inbox-jev#readme"
+Issues = "https://github.com/hellolitebox/litebox-inbox-jev/issues"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/inbox_jev"]
+
+# The repo's default files, shipped in the wheel for an install run outside a checkout
+# (`paths.bundled`; ADR 0053). A checkout reads them from the repo root instead.
+[tool.hatch.build.targets.wheel.force-include]
+"categories.yaml" = "inbox_jev/defaults/categories.yaml"
+"accounts.example.yaml" = "inbox_jev/defaults/accounts.example.yaml"
+".env.example" = "inbox_jev/defaults/.env.example"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/inbox_jev",
+    "categories.yaml",
+    "accounts.example.yaml",
+    ".env.example",
+    "README.md",
+    "LICENSE",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -108,4 +143,4 @@ branch = true
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
-fail_under = 96  # total was 96.43% when set; raise it as coverage grows, never lower it
+fail_under = 97  # total was 97.95% when set; raise it as coverage grows, never lower it

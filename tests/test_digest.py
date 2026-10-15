@@ -462,7 +462,7 @@ def _cli_settings(tmp_path, monkeypatch, accounts: Path, **fields) -> Settings:
         categories_file=ROOT / "categories.yaml",
         **fields,
     )
-    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr(cli.Settings, "load", classmethod(lambda cls: settings))
     monkeypatch.setattr(cli.logs, "setup", lambda level: None)
     return settings
 

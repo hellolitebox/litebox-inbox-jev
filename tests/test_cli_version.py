@@ -53,7 +53,7 @@ def test_version_does_not_shadow_subcommands():
 def _stub_digest(monkeypatch):
     """`digest` with no accounts: settings, categories and DB never touched."""
     settings = Settings(_env_file=None, typesafe_api_key="x", database_url="sqlite:///:memory:")
-    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr(cli.Settings, "load", classmethod(lambda cls: settings))
     monkeypatch.setattr(cli, "load_categories", lambda path: None)
     monkeypatch.setattr(cli, "open_sessions", lambda url: nullcontext())
     monkeypatch.setattr(cli, "_accounts", lambda s, cfg, only: [])

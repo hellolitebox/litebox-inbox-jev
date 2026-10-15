@@ -520,7 +520,7 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    s = Settings()
+    s = Settings.load()
     cfg = load_categories(args.categories or s.categories_file)
     all_accounts = load_accounts(s.accounts_file)
     try:

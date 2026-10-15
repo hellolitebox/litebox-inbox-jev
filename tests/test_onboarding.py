@@ -3,6 +3,7 @@
 import json
 import os
 import stat
+import subprocess
 from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
@@ -326,8 +327,9 @@ def test_a_file_the_append_cant_extend_is_left_untouched(tmp_path):
 
 @pytest.fixture
 def checkout(tmp_path, monkeypatch):
-    """An empty checkout (only .env.example) as the current directory, no settings in the
-    environment, no browser and no network; `calls` records what the wizard did outside."""
+    """An empty checkout (its pyproject.toml and .env.example) as the current directory, no
+    settings in the environment, no browser and no network; `calls` records what the wizard did
+    outside."""
     for name in (
         "TYPESAFE_API_KEY",
         "SLACK_BOT_TOKEN",
@@ -338,6 +340,7 @@ def checkout(tmp_path, monkeypatch):
     ):
         monkeypatch.delenv(name, raising=False)
     (tmp_path / ".env.example").write_text((ROOT / ".env.example").read_text())
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "inbox-jev"\n')
     downloads = tmp_path / "Downloads"
     downloads.mkdir()
     monkeypatch.chdir(tmp_path)
@@ -388,6 +391,7 @@ def test_the_wizard_sets_up_an_empty_checkout(checkout):
         "es",  # digest language
         "y",  # keep acme.com mail
         "n",  # another account
+        "n",  # no schedule here
         "n",  # dry run now
     )
     result = CliRunner().invoke(cli.app, ["init"], input=answers)
@@ -417,24 +421,25 @@ def test_the_wizard_sets_up_an_empty_checkout(checkout):
 
 def test_running_it_again_keeps_everything_and_asks_no_secret(checkout):
     root, calls = checkout
-    first = _answers("ts_good", "n", "", "n", "me@gmail.com", "n", "n")
+    first = _answers("ts_good", "n", "", "n", "me@gmail.com", "n", "n", "n")
     assert CliRunner().invoke(cli.app, ["init"], input=first).exit_code == 0
     calls["keys"].clear()
     calls["authorized"].clear()
     before = {p: p.read_text() for p in (root / ".env", root / "accounts.yaml")}
 
-    again = _answers("y", "n", "me@gmail.com", "n", "n")  # keep key, no Slack, same account
+    # keep the key, no Slack, the same account, no more accounts, no schedule, no dry run
+    again = _answers("y", "n", "me@gmail.com", "n", "n", "n")
     result = CliRunner().invoke(cli.app, ["init"], input=again)
     assert result.exit_code == 0, result.output
     assert calls == {"keys": [], "launched": [], "authorized": []}
     assert "already authorized" in result.output
-    assert "already in accounts.yaml" in result.output
+    assert f"already in {(root / 'accounts.yaml').resolve()}" in result.output
     assert {p: p.read_text() for p in before} == before
 
 
 def test_a_free_mail_account_is_not_allowlisted_and_has_no_digest(checkout):
     root, _ = checkout
-    answers = _answers("ts_good", "n", "", "n", "me@gmail.com", "n", "n")
+    answers = _answers("ts_good", "n", "", "n", "me@gmail.com", "n", "n", "n")
     assert CliRunner().invoke(cli.app, ["init"], input=answers).exit_code == 0
     [acc] = load_accounts(root / "accounts.yaml")
     assert (acc.allow_domains, acc.slack_user_id) == ([], None)
@@ -447,7 +452,7 @@ def test_a_failed_authorization_adds_no_account(checkout, monkeypatch):
         raise RuntimeError("Authorized other@acme.com, expected me@acme.com")
 
     monkeypatch.setattr(onboarding.gmail_mod, "authorize", deny)
-    answers = _answers("ts_good", "n", "", "n", "me@acme.com", "n", "n")
+    answers = _answers("ts_good", "n", "", "n", "me@acme.com", "n", "n", "n")
     result = CliRunner().invoke(cli.app, ["init"], input=answers)
     assert result.exit_code == 0, result.output
     assert "authorization failed" in result.output
@@ -458,7 +463,7 @@ def test_a_failed_authorization_adds_no_account(checkout, monkeypatch):
 def test_the_wizard_starts_an_empty_accounts_file(checkout):
     root, _ = checkout
     (root / "accounts.yaml").write_text("")
-    answers = _answers("ts_good", "n", "", "n", "me@gmail.com", "n", "n")
+    answers = _answers("ts_good", "n", "", "n", "me@gmail.com", "n", "n", "n")
     result = CliRunner().invoke(cli.app, ["init"], input=answers)
     assert result.exit_code == 0, result.output
     assert [acc.email for acc in load_accounts(root / "accounts.yaml")] == ["me@gmail.com"]
@@ -467,7 +472,7 @@ def test_the_wizard_starts_an_empty_accounts_file(checkout):
 def test_the_wizard_prints_the_entry_for_an_accounts_file_it_cant_read(checkout):
     root, _ = checkout
     (root / "accounts.yaml").write_text("accounts: [unclosed\n")
-    answers = _answers("ts_good", "n", "", "n", "me@gmail.com", "n", "n")
+    answers = _answers("ts_good", "n", "", "n", "me@gmail.com", "n", "n", "n")
     result = CliRunner().invoke(cli.app, ["init"], input=answers)
     assert result.exit_code == 0, result.output
     assert "fix it or add this by hand" in result.output
@@ -479,7 +484,7 @@ def test_an_invalid_client_file_is_asked_for_again(checkout):
     root, _ = checkout
     web = _write_json(root / "web.json", {"web": DESKTOP_CLIENT["installed"]})
     answers = _answers("ts_good", "n", str(web), str(root / "Downloads" / "client_secret_123.json"))
-    answers += _answers("n", "me@gmail.com", "n", "n")
+    answers += _answers("n", "me@gmail.com", "n", "n", "n")
     result = CliRunner().invoke(cli.app, ["init"], input=answers)
     assert result.exit_code == 0, result.output
     assert "Web application client" in result.output
@@ -493,7 +498,7 @@ def test_an_unreachable_typesafe_can_be_saved_unchecked(checkout, monkeypatch):
         raise CheckUnavailableError("TypeSafe can't be reached (connection)")
 
     monkeypatch.setattr(onboarding, "check_typesafe_key", offline)
-    answers = _answers("ts_good", "y", "n", "", "n", "me@gmail.com", "n", "n")
+    answers = _answers("ts_good", "y", "n", "", "n", "me@gmail.com", "n", "n", "n")
     assert CliRunner().invoke(cli.app, ["init"], input=answers).exit_code == 0
     assert "\nTYPESAFE_API_KEY=ts_good\n" in (root / ".env").read_text()
 
@@ -501,7 +506,7 @@ def test_an_unreachable_typesafe_can_be_saved_unchecked(checkout, monkeypatch):
 def test_init_ends_with_a_dry_run_when_asked(checkout, monkeypatch):
     runs = []
     monkeypatch.setattr(cli, "run", lambda **kwargs: runs.append(kwargs))
-    answers = _answers("ts_good", "n", "", "n", "me@gmail.com", "n", "y")
+    answers = _answers("ts_good", "n", "", "n", "me@gmail.com", "n", "n", "y")
     result = CliRunner().invoke(cli.app, ["init"], input=answers)
     assert result.exit_code == 0, result.output
     assert runs == [{"account": None, "mode": cli.Mode.DRY_RUN, "limit": 30, "lookback": None}]
@@ -537,6 +542,7 @@ def test_slack_retries_a_refused_token_and_asks_for_a_member_id_it_cant_find(che
         "other@gmail.com",
         "",  # no member ID for it
         "n",  # no more accounts
+        "n",  # no schedule here
         "n",  # no dry run
     )
     result = CliRunner().invoke(cli.app, ["init"], input=answers)
@@ -637,8 +643,109 @@ def test_the_wizard_warns_about_an_authorization_google_will_end(checkout, monke
         return tokens_dir / f"{email}.json"
 
     monkeypatch.setattr(onboarding.gmail_mod, "authorize", authorize)
-    answers = _answers("ts_good", "n", "", "n", "me@gmail.com", "n", "n")
+    answers = _answers("ts_good", "n", "", "n", "me@gmail.com", "n", "n", "n")
     result = CliRunner().invoke(cli.app, ["init"], input=answers)
     assert result.exit_code == 0, result.output
     assert "end inbox-jev's access to me@gmail.com on 2099-10-22" in result.output
     assert "Publish app" in result.output
+
+
+# --- An installed copy, and the schedule step (ADR 0053) -------------------------------------
+
+
+def test_an_installed_copy_sets_up_its_own_home(checkout, monkeypatch):
+    root, _ = checkout
+    home = root / "config" / "inbox-jev"
+    monkeypatch.setenv("INBOX_JEV_HOME", str(home))
+    answers = _answers("ts_good", "n", "", "n", "me@gmail.com", "n", "n", "n")
+    result = CliRunner().invoke(cli.app, ["init"], input=answers)
+    assert result.exit_code == 0, result.output
+    assert f"Configuration and data go in {home}" in result.output
+    assert _mode(home) == 0o700
+    env = (home / ".env").read_text()
+    assert "TYPESAFE_API_KEY=ts_good" in env and "MODE=dry_run" in env  # the shipped example
+    assert check_client_secrets(home / "secrets" / "client_secret.json")
+    assert [acc.email for acc in load_accounts(home / "accounts.yaml")] == ["me@gmail.com"]
+    assert not (root / ".env").exists() and not (root / "accounts.yaml").exists()
+
+
+def test_the_wizard_schedules_it_when_asked(checkout, monkeypatch):
+    root, _ = checkout
+    installed = []
+
+    def install(scheduler, jobs, home, *, command, places):
+        installed.append((scheduler, [j.name for j in jobs], home))
+        return [Path("io.github.inbox-jev.triage.plist")]
+
+    monkeypatch.setattr(
+        onboarding.schedule, "detect", lambda: onboarding.schedule.Scheduler.LAUNCHD
+    )
+    monkeypatch.setattr(onboarding.schedule, "executable", lambda: Path("/bin/inbox-jev"))
+    monkeypatch.setattr(onboarding.schedule, "install", install)
+    answers = _answers("ts_good", "n", "", "n", "me@gmail.com", "n", "y", "n")
+    result = CliRunner().invoke(cli.app, ["init"], input=answers)
+    assert result.exit_code == 0, result.output
+    assert installed == [(onboarding.schedule.Scheduler.LAUNCHD, ["triage"], root.resolve())]
+    assert "scheduled with launchd" in result.output
+
+
+def test_a_schedule_that_cant_be_set_up_doesnt_stop_the_wizard(checkout, monkeypatch):
+    def unsupported():
+        raise onboarding.schedule.ScheduleError("only macOS (launchd) and Linux with systemd")
+
+    monkeypatch.setattr(onboarding.schedule, "detect", unsupported)
+    answers = _answers("ts_good", "n", "", "n", "me@gmail.com", "n", "y", "n")
+    result = CliRunner().invoke(cli.app, ["init"], input=answers)
+    assert result.exit_code == 0, result.output
+    assert "couldn't schedule it: only macOS" in result.output
+
+
+def test_a_failing_scheduler_command_says_to_try_again(checkout, monkeypatch):
+    def install(scheduler, jobs, home, *, command, places):
+        raise subprocess.CalledProcessError(5, ["launchctl"], stderr="Bootstrap failed: 5\n")
+
+    monkeypatch.setattr(
+        onboarding.schedule, "detect", lambda: onboarding.schedule.Scheduler.LAUNCHD
+    )
+    monkeypatch.setattr(onboarding.schedule, "executable", lambda: Path("/bin/inbox-jev"))
+    monkeypatch.setattr(onboarding.schedule, "install", install)
+    answers = _answers("ts_good", "n", "", "n", "me@gmail.com", "n", "y", "n")
+    result = CliRunner().invoke(cli.app, ["init"], input=answers)
+    assert result.exit_code == 0, result.output
+    assert "(Bootstrap failed: 5)" in result.output
+    assert "`inbox-jev schedule install` tries again" in result.output
+
+
+def test_the_wizard_wont_schedule_on_a_server_deployment(checkout, monkeypatch):
+    """The server's triage timer refuses the schedule inside `schedule.install`, so the wizard
+    can't install a second triager next to it."""
+    root, _ = checkout
+    server_timer = root / "inbox-jev-triage.timer"
+    server_timer.write_text("")
+    places = onboarding.schedule.Places(
+        launch_agents=root / "LaunchAgents",
+        systemd_user=root / "systemd",
+        server_timer=server_timer,
+    )
+    ran: list[list[str]] = []
+    monkeypatch.setattr(
+        onboarding.schedule, "detect", lambda: onboarding.schedule.Scheduler.LAUNCHD
+    )
+    monkeypatch.setattr(onboarding.schedule, "executable", lambda: Path("/bin/inbox-jev"))
+    monkeypatch.setattr(onboarding.schedule.Places, "default", classmethod(lambda cls: places))
+    monkeypatch.setattr(onboarding.schedule, "_run", lambda args: ran.append(list(args)))
+    answers = _answers("ts_good", "n", "", "n", "me@gmail.com", "n", "y", "n")
+    result = CliRunner().invoke(cli.app, ["init"], input=answers)
+    assert result.exit_code == 0, result.output
+    assert "triage the same mail twice" in result.output
+    assert ran == []
+    assert not places.launch_agents.exists()
+
+
+def test_a_command_with_no_accounts_file_says_to_run_init(tmp_path, monkeypatch):
+    monkeypatch.setenv("INBOX_JEV_HOME", str(tmp_path))
+    monkeypatch.delenv("ACCOUNTS_FILE", raising=False)
+    monkeypatch.setattr(cli.logs, "setup", lambda level: None)
+    result = CliRunner().invoke(cli.app, ["auth", "status"])
+    assert result.exit_code == 2
+    assert "run `inbox-jev init`" in result.output

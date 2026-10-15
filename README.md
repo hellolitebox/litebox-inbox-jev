@@ -130,9 +130,15 @@ that correction then decides the email too ([the guide](docs/guide.md#how-it-lea
 ## Setup
 
 ```bash
-uv sync --extra dev          # exact versions from uv.lock
-uv run inbox-jev init        # guided setup, then an optional first dry run
+uv tool install inbox-jev    # or: pipx install inbox-jev (Python 3.11+)
+inbox-jev init               # guided setup, then an optional first dry run
 ```
+
+An installed copy keeps its configuration and data in `~/.config/inbox-jev/` (`.env`,
+`accounts.yaml`, `secrets/`, `data/`); set `INBOX_JEV_HOME` to use another folder. Run from a
+checkout of this repo (`uv sync --extra dev`, then `uv run inbox-jev init`), it uses the checkout
+instead, as a server deployment does
+([ADR 0053](docs/decisions/0053-installable-from-pypi-with-a-home-folder.md)).
 
 `inbox-jev init` asks for what it needs, checks each value before saving it and keeps what is
 already configured, so running it again adds an account or fixes one step
@@ -149,6 +155,17 @@ already configured, so running it again adds an account or fixes one step
 4. **Accounts**: for each Gmail address, the browser authorization (token → `secrets/tokens/`) and
    an entry in `accounts.yaml` with your digest's member ID and language and, for a company domain,
    that domain in `allow_domains`. The other options are in `accounts.example.yaml`.
+5. **Schedule** (optional): on the computer where it will run, a triage pass every 10 minutes and
+   the digest daily at 08:00, with launchd (macOS) or systemd user units (Linux):
+   `inbox-jev schedule install`. On Linux, systemd runs user timers only while you are logged in: on
+   a headless machine, or to keep it running after you log out, enable lingering once
+   (`loginctl enable-linger $USER`; `install` warns when it is off). Skip this step when you deploy
+   to a server ([Running it in production](#running-it-in-production)): two copies must never triage
+   the same account, and `install` refuses on a server that runs the deployment's timer.
+
+The categories are the [defaults](categories.yaml) shipped with the package, updated with it. To
+tune them, copy them to `categories.yaml` in the configuration folder (or point `CATEGORIES_FILE` at
+your copy; [Your own categories](docs/operations.md#your-own-categories)).
 
 `uv run pre-commit install` adds gitleaks, ruff and mdformat before every commit if you develop.
 
@@ -198,6 +215,7 @@ uv run inbox-jev digest --dry-print
 | Command | What it does |
 | -- | -- |
 | `inbox-jev init` | Guided setup: TypeSafe key, Google OAuth client, Slack, accounts, first dry run |
+| `inbox-jev schedule install` / `schedule status` / `schedule remove` | Run it on this computer: triage every 10 minutes, the digest daily at 08:00 (launchd or systemd user units) |
 | `inbox-jev auth add EMAIL` | Authorize a Gmail account (opens the browser; token → `secrets/tokens/`) |
 | `inbox-jev auth status [-a EMAIL]` | Which accounts are missing an authorization, or have one Google will end (a time-limited grant), with the fixes ([Gmail authorization](docs/operations.md#gmail-authorization)) |
 | `inbox-jev run [-a EMAIL] [--mode M] [--limit N] [--lookback 30d]` | One triage pass (what the timer runs) |
