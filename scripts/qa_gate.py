@@ -31,7 +31,7 @@ import json
 import re
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -244,6 +244,24 @@ def post_status(repo: str, sha: str, verdict: Verdict, url: str) -> None:
     gh_api(f"repos/{repo}/statuses/{sha}", *fields)
 
 
+_FIELD_FLAGS = frozenset({"-f", "-F"})
+
+
+def describe_command(cmd: Sequence[str]) -> str:
+    """A failed command as the error line names it: the program, the subcommand and its operands
+    (the API path, the remote and refs fetched), without options or the `-f` fields' values."""
+    words: list[str] = []
+    skip_next = False
+    for word in cmd:
+        if skip_next:
+            skip_next = False
+        elif word in _FIELD_FLAGS:
+            skip_next = True
+        elif not word.startswith("-"):
+            words.append(word)
+    return " ".join(words)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Set a PR's qa-verdict status from QA's review.")
     parser.add_argument("--repo", required=True, help="owner/name")
@@ -261,7 +279,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.dry_run:
             post_status(args.repo, head, verdict, review.url if review else "")
     except subprocess.CalledProcessError as e:
-        print(f"{' '.join(e.cmd[:3])} failed: {e.stderr.strip()}", file=sys.stderr)
+        print(f"{describe_command(e.cmd)} failed: {e.stderr.strip()}", file=sys.stderr)
         return 1
     return 0
 

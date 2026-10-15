@@ -316,7 +316,8 @@ def test_main_keeps_a_trusted_approval_only_across_a_clean_merge(monkeypatch, cl
 
 
 def test_main_fails_the_run_when_git_fails(monkeypatch, capsys):
-    """A git error is never read as a verdict: the job fails (exit 1) and names the command."""
+    """A git error is never read as a verdict: the job fails (exit 1) and names the command and the
+    refs it was fetching."""
     calls = []
     monkeypatch.setattr(qa_gate, "gh_api", _gh_for_an_update_merge(calls))
 
@@ -325,8 +326,48 @@ def test_main_fails_the_run_when_git_fails(monkeypatch, capsys):
 
     monkeypatch.setattr(qa_gate, "git", failing_git)
     assert qa_gate.main(["--repo", "o/r", "--pr", "7"]) == 1
-    assert "git fetch --no-tags failed: fatal: no remote" in capsys.readouterr().err
+    assert (
+        "git fetch origin refs/pull/7/head refs/heads/main failed: fatal: no remote"
+        in capsys.readouterr().err
+    )
     assert not any(path.startswith("repos/o/r/statuses/") for path, _ in calls), "nothing posted"
+
+
+@pytest.mark.parametrize(
+    ("cmd", "expected"),
+    [
+        (
+            [
+                "git",
+                "fetch",
+                "--no-tags",
+                "--quiet",
+                "origin",
+                "refs/pull/7/head",
+                "refs/heads/main",
+            ],
+            "git fetch origin refs/pull/7/head refs/heads/main",
+        ),
+        (
+            ["gh", "api", "repos/o/r/issues/7/comments", "--paginate", "--slurp"],
+            "gh api repos/o/r/issues/7/comments",
+        ),
+        (
+            [
+                "gh",
+                "api",
+                "repos/o/r/statuses/abc",
+                "-f",
+                "state=success",
+                "-f",
+                "context=qa-verdict",
+            ],
+            "gh api repos/o/r/statuses/abc",
+        ),
+    ],
+)
+def test_describe_command_names_the_operands_not_the_options(cmd, expected):
+    assert qa_gate.describe_command(cmd) == expected
 
 
 def git(cwd: Path, *args: str, check: bool = True) -> str:
