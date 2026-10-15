@@ -142,6 +142,22 @@ BLOCKED = [
     # `$((…) )` is a substitution holding a subshell, not arithmetic.
     "echo $((git push origin main) )",
     "echo $( (git push origin main) )",
+    # Arithmetic holding a substitution runs its command (QA round 1 on #8).
+    "echo $(( $(git push origin main) + 1 ))",
+    "echo $(( `git push origin main` + 1 ))",
+    'echo "$(( $(git push origin main) ))"',
+    # A redirection is no argument, wherever it stands, and a quoted `>` is no redirection.
+    "2>/dev/null git push origin main",
+    "git push origin main>log",
+    "git push origin main 2>>log",
+    "gh pr merge 1 --body '>' --admin",
+    "gh pr merge 1 --body \\> --admin",
+    "gh pr merge 1 >out --admin",
+    # `--admin=<value>` turns it on unless the value is false (QA round 1 on inbox-jev#4).
+    "gh pr merge 12 --admin=true",
+    "gh pr merge 12 --admin=1",
+    "gh pr merge 12 --admin=TRUE",
+    "gh pr merge 12 --squash --admin=t",
 ]
 ALLOWED = [
     "gh pr merge 12 --squash --delete-branch",
@@ -209,6 +225,9 @@ ALLOWED = [
     "echo \"$((1<<2))\"\ngit commit -m 'A & git push origin main'",
     "echo $(( (1<<2) + 1 ))\ngit commit -m 'A & git push origin main'",
     "echo $(echo $((1<<2)))\ngit commit -m 'A & git push origin main'",
+    "gh pr merge 12 --admin=false --squash",
+    "gh pr merge 12 --squash --admin=0",
+    "git push origin feat/x>log 2>&1",
     "ls",
     "",
 ]
@@ -227,6 +246,11 @@ CURRENT_BRANCH_PUSHES = [
     'git push origin HEAD:"$(git branch --show-current)"',
     "git push origin $(git branch --show-current):refs/heads/$(git branch --show-current)",
     "echo C:\\\\\ngit push",
+    # A redirection is no refspec (QA round 1 on #8).
+    "git push origin 2>&1",
+    "git push 2>/dev/null",
+    "git push origin >push.log 2>&1",
+    "git push origin &>push.log",
 ]
 
 
@@ -237,6 +261,34 @@ def git(cwd: Path, *args: str) -> None:
 def repo(path: Path, branch: str) -> Path:
     path.mkdir()
     git(path, "init", "-q", "-b", branch)
+    return path
+
+
+def commit(path: Path, *files: str) -> None:
+    for name in files:
+        (path / name).parent.mkdir(parents=True, exist_ok=True)
+        (path / name).write_text(name)
+    git(path, "add", "-A")
+    git(
+        path,
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@x.io",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "x",
+    )
+
+
+def repo_with_branches(path: Path, branch: str, *others: str) -> Path:
+    """A repository on `branch`, with one commit and the local branches `others`."""
+    repo(path, branch)
+    commit(path, "src/a.py")
+    for other in others:
+        git(path, "branch", other)
     return path
 
 
@@ -324,6 +376,14 @@ def test_substitution_refspec_on_a_feature_branch_passes(tmp_path):
         "git switch --create=main && git push",
         "git switch -cmain && git push",
         "git -C . switch main && git push",
+        # `main` counts even where it isn't a local branch yet (git creates it from origin/main).
+        "git checkout main && git push",
+        "git checkout --track origin/main && git push",
+        "git switch -t origin/main && git push",
+        # A redirection hides no switch (QA round 1 on #8).
+        "git checkout main 2>&1 && git push",
+        "git checkout main >/dev/null 2>&1; git push",
+        "git switch main 2>/dev/null; git push",
     ],
 )
 def test_a_switch_to_main_earlier_in_the_command_is_seen_by_the_push(command, tmp_path):
@@ -335,17 +395,41 @@ def test_a_switch_to_main_earlier_in_the_command_is_seen_by_the_push(command, tm
     [
         "git switch -c fix/x && git push -u origin HEAD",
         "git checkout -b fix/x origin/main && git push",
-        "git switch feat/y; git push",
+        "git switch feat/y && git push",
         "git checkout feat/y && git push origin HEAD",
+        "git checkout feat/y 2>&1 && git push origin HEAD",
         "git switch --orphan=gh-pages && git push",
+        "git checkout --track origin/feat/y && git push",
+        "git checkout -b fix/x &&\n  git push -u origin HEAD",
+        'git switch -c fix/x && git commit -m "$(cat msg)" && git push -u origin HEAD',
+        "git switch -c fix/x; git switch -c fix/y && git push",  # pushed only if fix/y is
         # A branch the command doesn't name is unknown: only an explicit `main` is refused.
         "git switch - && git push",
+        "git checkout - && git push",
         "git switch --detach v1 && git push",
-        "git checkout --track origin/feat/y && git push",
     ],
 )
 def test_a_switch_away_from_main_earlier_in_the_command_is_seen_by_the_push(command, tmp_path):
-    assert guard_main.reason_to_block(command, repo(tmp_path / "r", "main")) is None
+    on_main = repo_with_branches(tmp_path / "r", "main", "feat/y")
+    assert guard_main.reason_to_block(command, on_main) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git checkout -b fix/x; git push -u origin HEAD",
+        "git switch -c fix/x\ngit push -u origin HEAD",
+        "git switch -c fix/x || git push -u origin HEAD",
+        "git switch -c fix/x | cat; git push -u origin HEAD",
+        "(git switch -c fix/x); git push -u origin HEAD",
+        "git switch -c a && git switch -c b; git push",
+        "git switch -c fix/x; git switch -c fix/y; git push",
+    ],
+)
+def test_a_switch_that_may_have_failed_leaves_the_old_branch_possible(command, tmp_path):
+    """After `;`, a newline, a pipe or `||` the push runs even if the switch failed (`fix/x`
+    taken), so the branch before the switch is judged too (QA round 1 on #8)."""
+    assert guard_main.reason_to_block(command, repo(tmp_path / "r", "main")) is not None
 
 
 @pytest.mark.parametrize(
@@ -355,11 +439,22 @@ def test_a_switch_away_from_main_earlier_in_the_command_is_seen_by_the_push(comm
         "git checkout -- feat/y && git push",
         "git checkout feat/y -- a.txt && git push",
         "git checkout feat/y a.txt && git push",
+        # Forms the hook can't read as a branch keep the current one (QA round 1 on #8).
+        "git checkout && git push",
+        "git checkout -p && git push",
+        "git checkout --patch feat/y && git push",
+        "git checkout src/b.py && git push",  # deleted from the worktree
+        "git checkout '*.py' && git push",
+        "git checkout ':(top)src' && git push",
+        "git checkout remote-only && git push",  # no local branch of that name
+        "git switch && git push",
+        "git switch feat/y extra && git push",
     ],
 )
 def test_a_checkout_of_files_switches_no_branch(command, tmp_path):
-    on_main = repo(tmp_path / "r", "main")
-    (on_main / "README.md").write_text("x")
+    on_main = repo_with_branches(tmp_path / "r", "main", "feat/y")
+    commit(on_main, "README.md", "src/b.py")
+    (on_main / "src" / "b.py").unlink()
     assert guard_main.reason_to_block(command, on_main) is not None
 
 
@@ -370,11 +465,20 @@ def test_a_switch_moves_the_branch_of_its_own_directory_only(tmp_path):
     def blocked(command: str, cwd: Path) -> bool:
         return guard_main.reason_to_block(command, cwd) is not None
 
-    assert not blocked(f"git -C {on_main} switch feat/y; git push", on_main)
-    assert blocked(f"git -C {on_feature} switch feat/y; git push", on_main)
-    assert blocked(f"cd {on_feature} && git switch main; git push", on_main)
+    assert not blocked(f"git -C {on_main} switch feat/y && git push", on_main)
+    assert blocked(f"git -C {on_feature} switch feat/y && git push", on_main)
+    assert blocked(f"cd {on_feature} && git switch main && git push", on_main)
     assert not blocked(f"git switch main; cd {on_feature} && git push", on_main)
     assert not blocked("cd a && git switch feat/y && cd ../a && git push", tmp_path)
+
+
+def test_a_switch_moves_the_branch_of_its_whole_worktree(tmp_path):
+    """A switch in a subdirectory moves the branch of the repository (QA round 1 on #8)."""
+    on_feature = repo_with_branches(tmp_path / "r", "feat/x", "main")
+    command = "cd src && git checkout main && cd .. && git push"
+    assert guard_main.reason_to_block(command, on_feature) is not None
+    assert guard_main.reason_to_block("git -C src switch main && git push", on_feature) is not None
+    assert guard_main.reason_to_block("cd src && git push", on_feature) is None
 
 
 @pytest.mark.parametrize(
@@ -383,7 +487,15 @@ def test_a_switch_moves_the_branch_of_its_own_directory_only(tmp_path):
         (["switch", "feat/x"], guard_main.BranchSwitch("feat/x")),
         (["switch", "-c", "x", "origin/main"], guard_main.BranchSwitch("x")),
         (["switch", "-c"], guard_main.BranchSwitch(None)),
-        (["switch"], guard_main.BranchSwitch(None)),
+        (["switch"], None),
+        (["switch", "-"], guard_main.BranchSwitch(None)),
+        (["checkout", "-"], guard_main.BranchSwitch(None)),
+        (["checkout"], None),
+        (["checkout", "main"], guard_main.BranchSwitch("main")),
+        (["checkout", "feat/x"], None),  # not known as a branch without a repository
+        (["checkout", "-t", "origin/feat/x"], guard_main.BranchSwitch("feat/x")),
+        (["switch", "--track=direct", "origin/feat/x"], guard_main.BranchSwitch("feat/x")),
+        (["checkout", "--pathspec-from-file=f"], None),
         (["checkout", "-bx"], guard_main.BranchSwitch("x")),
         (["checkout", "--orphan=x"], guard_main.BranchSwitch("x")),
         (["checkout", "-d", "v1"], guard_main.BranchSwitch(None)),
@@ -478,6 +590,8 @@ def test_command_words_skip_assignments_and_wrappers():
         ("a $((1<<2)) b\nc", ["a $((1<<2)) b", "c"]),  # arithmetic is one word
         ("a $((b) ) c", ["b", " ", "a $(…) c"]),  # `) )`: a substitution and a subshell
         ("a $((1", ["a $", "", "1"]),  # left open: blind
+        ("a $(( $(b) + 1 )) c", ["b", " $(…) + 1 ", "a $(…) c"]),  # a command in arithmetic
+        ("a $(( `b` )) c", ["b", " $(…) ", "a $(…) c"]),
     ],
 )
 def test_segments_split_outside_quotes_only(command, segments):
@@ -515,11 +629,30 @@ def test_segments_read_backslashes_as_bash_does(command, segments):
 def test_segments_mark_the_lines_of_a_heredocs_body():
     assert guard_main.segments("cat <<E && b\nc ; d\nE\ne") == [
         guard_main.Segment("cat <<E "),
-        guard_main.Segment(" b"),
-        guard_main.Segment("c ", heredoc=True),
-        guard_main.Segment(" d", heredoc=True),
+        guard_main.Segment(" b", ends_chain=True),
+        guard_main.Segment("c ", heredoc=True, ends_chain=True),
+        guard_main.Segment(" d", heredoc=True, ends_chain=True),
         guard_main.Segment("e"),
     ]
+
+
+@pytest.mark.parametrize(
+    ("command", "ends"),
+    [
+        ("a && b", [False, False]),
+        ("a; b", [True, False]),
+        ("a || b | c |& d & e", [True, True, True, True, False]),
+        ("a\nb", [True, False]),
+        ("a &&\n b", [False, False]),  # the list goes on past the newline
+        ("a && \\\nb", [False, False]),
+        ("(a); b", [True, False]),
+        ("(a) && b", [False, False, False]),
+        ('a "$(b)" && c', [False, False, False]),  # a substitution ends no chain
+        ("a 'b; c", [True, True]),  # blind
+    ],
+)
+def test_segments_say_whether_what_follows_runs_whatever_their_status(command, ends):
+    assert [segment.ends_chain for segment in guard_main.segments(command)] == ends
 
 
 def test_a_refusal_in_a_heredoc_suggests_a_body_file():
@@ -533,6 +666,26 @@ def test_a_refusal_in_a_heredoc_suggests_a_body_file():
     plain = guard_main.reason_to_block("git push origin main", None)
     assert plain is not None
     assert "--body-file" not in plain
+
+
+@pytest.mark.parametrize(
+    ("segment", "words"),
+    [
+        ("git push origin 2>&1", ["git", "push", "origin"]),
+        ("git push origin > log 2> err", ["git", "push", "origin"]),
+        ("2>/dev/null git push", ["git", "push"]),
+        ("git push origin main>log", ["git", "push", "origin", "main"]),
+        ("a&>log b", ["a", "b"]),
+        ("a {fd}>f 3<&- 2>>e <<<'x y' <<-EOF b", ["a", "b"]),
+        ("echo '>' \\> \">\" b", ["echo", ">", ">", ">", "b"]),
+        ("echo 'a b' c\\ d", ["echo", "a b", "c d"]),
+        ("echo 'a b", ["echo", "a", "b"]),  # a quote left open: on whitespace
+        ("echo 'a > b c", ["echo", "a", "c"]),
+        ("echo a\\", ["echo", "a\\"]),  # a lone backslash at the end
+    ],
+)
+def test_command_words_drop_redirections(segment, words):
+    assert guard_main.command_words(segment) == words
 
 
 def test_coproc_name_before_a_compound_command_is_no_command():

@@ -7,7 +7,8 @@ r"""Claude Code `PreToolUse` hook: refuse the Bash commands the workflow forbids
 (`tool_name`, `tool_input.command`, `cwd`). CLAUDE.md says the same in prose; the hook makes it
 hold whatever a session or a subagent decides:
 
-- `gh pr merge … --admin` bypasses the ruleset (CI, `qa-verdict`, resolved threads);
+- `gh pr merge … --admin` bypasses the ruleset (CI, `qa-verdict`, resolved threads), and so does
+  `--admin=<value>` for any value but a false one (`--admin=true`, `=1`);
 - `git push` to `main`: production deploys from `main`, which changes only through a PR. A push
   with no refspec, or of `HEAD`, goes to the current branch, read from the directory the push
   runs in (the call's `cwd`, moved by a `cd` before it in the command or by `git -C`); `--tags`
@@ -29,18 +30,29 @@ backquote, in `"…"` too) is judged as commands of its own, and the command aro
 a push destination that is one whole substitution (`git push -u origin "$(git branch
 --show-current)"`, `HEAD:$(…)`, `refs/heads/$(…)`) is taken for the current branch, while one that
 only contains one (`HEAD:backup/$(date +%F)`) is a branch of its own. An arithmetic expansion
-(`$((1<<2))`, closed by `))`) runs nothing and is one word; `$((…) )` is a substitution holding a
-subshell, as bash reads it. Where the shell structure can't be read it splits on every operator,
-quotes or not, which refuses more, never less: each line of a heredoc's body (its continuations
-joined), and a command with a quote, `$(` or subshell left open (bash runs nothing past it). A
-heredoc line is refused like a command, and the message then suggests passing a PR or commit body
-as a file (`--body-file`, `git commit -F`). The current branch is read from the directory before
-the command runs, then moved by a `git switch` or `git checkout` earlier in the command in that
-directory, as `cd` moves the directory: `git checkout main; git push` from a feature branch is
-refused, and `git switch -c fix/x && git push -u origin HEAD` from `main` passes. A switch whose
-branch the command doesn't name (`git switch -`, `--detach`, `--track` without `-c`) leaves it
-unknown, and `git checkout <path>` (an existing path, or anything after `--`) switches nothing. Only
-`git` and `gh` in command position count (the first word, after `do`, `then`, `coproc` (its name
+(`$((1<<2))`, closed by `))`) runs nothing and is one word, unless it holds a `$(` or a backquote,
+whose command runs (`$(( $(git push origin main) + 1 ))`) and is judged; `$((…) )` is a
+substitution holding a subshell, as bash reads it. Redirections (`2>&1`, `> log`, `main>log`,
+`<<EOF`) are dropped from a command's words wherever they stand, so they hide no switch or refspec
+(`git push origin 2>&1` is a push of the current branch); a quoted or escaped `>` is a word. Where
+the shell structure can't be read it splits on every operator, quotes or not, which refuses more,
+never less: each line of a heredoc's body (its continuations joined), and a command with a quote,
+`$(` or subshell left open (bash runs nothing past it). A heredoc line is refused like a command,
+and the message then suggests passing a PR or commit body as a file (`--body-file`,
+`git commit -F`). The current branch is read from git before the command runs, then moved by a
+`git switch` or `git checkout` earlier in the command in the same worktree (its root, so a switch in
+`src/` counts for a push from the root), as `cd` moves the directory: `git checkout main && git
+push` from a feature branch is refused, and `git switch -c fix/x && git push -u origin HEAD` from
+`main` passes. A switch counts as done only for what follows it through `&&`: after `;`, a newline,
+a pipe, `||` or `&` it may have failed, so a push is judged against the branch before it as well
+(`git checkout -b fix/x; git push -u origin HEAD` from `main` is refused). A switch whose branch the
+command doesn't name (`git switch -`, `--detach`) leaves it unknown; `--track origin/x` switches to
+`x`. Since `git checkout` also restores files, it counts as a switch only to a local branch of that
+worktree, or to `main`: no name, several, anything after `--`, `-p` / `--patch`, a pathspec
+(`'*.py'`), a deleted file or a remote-only branch switches nothing, which keeps the push judged
+against the current branch (a branch created earlier in the same command isn't known yet, so a
+checkout back to it is read as a file restore, which refuses more, never less). Only `git` and
+`gh` in command position count (the first word, after `do`, `then`, `coproc` (its name
 skipped in `coproc NAME { …; }`) and the other reserved words, `VAR=value` and the wrappers `sudo`,
 `env`, `time`, `nohup`, `exec`, `timeout`, `nice` and `command` with their options, `sudo -u root`,
 `timeout`'s duration and `nice -n 5` included; `command -v git` only looks `git` up and runs
@@ -60,7 +72,7 @@ import re
 import shlex
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from functools import partial
 from pathlib import Path
 from typing import NamedTuple, TextIO
@@ -140,7 +152,12 @@ _SWITCH_CREATE_OPTIONS = {
     "checkout": frozenset({"-b", "-B", "--orphan"}),
 }
 # Their options that check out no branch, or one the command doesn't name.
-_SWITCH_UNKNOWN_OPTIONS = frozenset({"--detach", "-d", "-t", "--track"})
+_SWITCH_UNKNOWN_OPTIONS = frozenset({"-", "--detach", "-d"})
+# Their options that create a branch named after the remote-tracking one given
+# (`--track origin/feat/x` → `feat/x`).
+_SWITCH_TRACK_OPTIONS = frozenset({"-t", "--track"})
+# `git checkout` options with which it restores files and switches no branch.
+_CHECKOUT_FILE_OPTIONS = ("-p", "--patch", "--pathspec-from-file")
 _GH_API_OPTIONS_WITH_VALUE = frozenset(
     {
         "-X",
@@ -213,6 +230,14 @@ _WORD_BOUNDARIES = frozenset({"", " ", "\t", "\n", ";", "&", "|", "(", ")"})
 _WORD_END = frozenset(" \t\n;&|()<>")
 _TWO_CHAR_OPERATORS = frozenset({("&", "&"), ("|", "|"), ("|", "&")})
 _ARITHMETIC = "$(("
+# A redirection word as written: an optional fd (`2`, `{fd}`) or `&`, the operator, and its target
+# when it is in the same word (`2>&1`, `>/dev/null`); without one, the target is the next word.
+# What may come before a `<` / `>` in the same redirection word: an fd or `&`, and operator
+# characters (`2>>`, `<<<`, `>&`).
+_REDIRECTION_PREFIX = re.compile(r"(?:\d+|\{[A-Za-z_]\w*\}|&)?[<>]*&?")
+_REDIRECTION = re.compile(
+    r"^(?:\d+|\{[A-Za-z_]\w*\}|&)?(?:<<<|<<-?|<>|>>|>\||>&|<&|>|<)(?P<target>.*)\Z", re.DOTALL
+)
 
 
 class _UnbalancedError(Exception):
@@ -224,6 +249,9 @@ class Segment(NamedTuple):
 
     text: str
     heredoc: bool = False
+    ends_chain: bool = False
+    """Whether what follows it runs whatever its exit status (after `;`, `|`, `||`, `&`, a
+    newline, or where the structure can't be read), rather than only once it succeeded (`&&`)."""
 
 
 class _Splitter:
@@ -249,6 +277,8 @@ class _Splitter:
         # The unquoted, unescaped character read last, `_WORD_TEXT` after an escape, a quoted
         # string or a substitution, "" at the start of a command: what `#` and `&` look back at.
         self._prev = ""
+        # Whether an `&&` was read last, so a newline after it continues the list (`a &&\n b`).
+        self._after_and = False
 
     def split(self) -> list[Segment]:
         self._unquoted(closer=None)
@@ -262,11 +292,15 @@ class _Splitter:
     def _emit(self, text: str) -> None:
         self._buffers[-1].append(text)
 
-    def _flush(self) -> None:
+    def _flush(self, *, ends_chain: bool = False) -> None:
+        """End the segment being read; `ends_chain` when the next command runs whatever its exit
+        status. An operator right after a subshell (`(a); b`) ends the subshell's last command."""
         buffer = self._buffers[-1]
         if buffer:
-            self._segments.append(Segment("".join(buffer)))
+            self._segments.append(Segment("".join(buffer), ends_chain=ends_chain))
             buffer.clear()
+        elif ends_chain and self._segments:
+            self._segments[-1] = self._segments[-1]._replace(ends_chain=True)
 
     def _at_continuation(self) -> bool:
         return self._text.startswith(_CONTINUATION, self._i)
@@ -290,10 +324,12 @@ class _Splitter:
                 self._i += len(_CONTINUATION)  # deleted; what came before still counts
             elif self._quote_or_substitution(char):
                 self._prev = _WORD_TEXT
+                self._after_and = False
             elif not self._operator(char):
                 self._emit(char)
                 self._i += 1
                 self._prev = char
+                self._after_and = self._after_and and char in {" ", "\t"}
         if closer is not None:
             raise _UnbalancedError
 
@@ -337,7 +373,7 @@ class _Splitter:
                 self._prev = _WORD_TEXT
         elif char == "\n":
             self._i += 1
-            self._flush()
+            self._flush(ends_chain=not self._after_and)
             self._prev = char
             self._heredoc_bodies()
         elif char == "(":  # a subshell; `$(` is a substitution, read before this
@@ -349,11 +385,12 @@ class _Splitter:
             self._prev = ")"
         elif (char, after) in _TWO_CHAR_OPERATORS:
             self._i += 2
-            self._flush()
+            self._flush(ends_chain=char != "&")
             self._prev = char
+            self._after_and = char == "&"
         elif char in {";", "|", ")"} or (char == "&" and not self._is_redirection()):
             self._i += 1
-            self._flush()
+            self._flush(ends_chain=char != ")")
             self._prev = char
         else:
             return False
@@ -408,7 +445,8 @@ class _Splitter:
 
         As bash reads it: `$((` opens one only if the parenthesis closing its inner `(` is followed
         by `)`, so `$((1<<2))` is arithmetic (its `<<` no heredoc) and `$((git push) )` a
-        substitution holding a subshell. An arithmetic expansion runs no command.
+        substitution holding a subshell. One that holds a `$(` or a backquote runs the command in
+        it (`$(( $(git push) + 1 ))`), so it is left to the substitution reader, which judges it.
         """
         if not self._text.startswith(_ARITHMETIC, self._i):
             return False
@@ -424,7 +462,10 @@ class _Splitter:
                 if not self._text.startswith("))", index):
                     return False
                 end = index + 2
-                self._emit(self._text[self._i : end])
+                span = self._text[self._i : end]
+                if "$(" in span[len(_ARITHMETIC) :] or "`" in span:
+                    return False
+                self._emit(span)
                 self._i = end
                 return True
             index += 1
@@ -498,7 +539,9 @@ class _Splitter:
         self._heredocs.clear()
 
     def _extend_blind(self, text: str, *, heredoc: bool) -> None:
-        self._segments.extend(Segment(part, heredoc) for part in _BLIND_SEGMENTS.split(text))
+        self._segments.extend(
+            Segment(part, heredoc, ends_chain=True) for part in _BLIND_SEGMENTS.split(text)
+        )
 
 
 def segments(command: str) -> list[Segment]:
@@ -517,15 +560,75 @@ def segments(command: str) -> list[Segment]:
         joined = _BLIND_CONTINUATION.sub(r"\1", command)
         if joined != command:
             parts += _BLIND_SEGMENTS.split(joined)
-        return [Segment(part) for part in parts]
+        return [Segment(part, ends_chain=True) for part in parts]
+
+
+def _raw_words(segment: str) -> list[str]:
+    """`segment` split on unquoted, unescaped whitespace, each word as written (quotes kept).
+
+    An unquoted `<` or `>` also starts a word unless only an fd (`2`, `{fd}`) or `&` comes before it
+    in its word, as bash reads `main>log` as the word `main` and the redirection `>log`. Raises
+    ValueError when a quote is left open, as `shlex.split` does.
+    """
+    words: list[str] = []
+    word: list[str] = []
+    quote = ""
+    i = 0
+    while i < len(segment):
+        char = segment[i]
+        if char == "\\" and quote != "'":
+            word.append(segment[i : i + 2])
+            i += 2
+            continue
+        if quote:
+            quote = "" if char == quote else quote
+        elif char in {"'", '"'}:
+            quote = char
+        elif char in {"<", ">"} and word and not _REDIRECTION_PREFIX.fullmatch("".join(word)):
+            before = "".join(word)
+            carried = "&" if before.endswith("&") and char == ">" else ""  # `a&>f`
+            words.append(before.removesuffix(carried))
+            word = [carried] if carried else []
+        elif char.isspace():
+            if word:
+                words.append("".join(word))
+                word = []
+            i += 1
+            continue
+        word.append(char)
+        i += 1
+    if quote:
+        raise ValueError("a quote is left open")
+    if word:
+        words.append("".join(word))
+    return words
+
+
+def _without_redirections(raw_words: list[str]) -> list[str]:
+    """`raw_words` without their redirections (`2>&1`, `> f`, `&>>log`, `<<EOF`): only an unquoted,
+    unescaped operator is one, so `--body '>'` keeps its words."""
+    result: list[str] = []
+    skip = False
+    for word in raw_words:
+        if skip:
+            skip = False
+            continue
+        match = _REDIRECTION.match(word)
+        if match is None:
+            result.append(word)
+        else:
+            skip = not match.group("target")  # `> f`: the target is the next word
+    return result
 
 
 def _words(segment: str) -> list[str]:
-    """`segment` as shell words, unquoted; split on whitespace when a quote is left open."""
+    """`segment` as shell words, unquoted and without redirections; split on whitespace when a
+    quote is left open."""
     try:
-        return shlex.split(segment)
-    except ValueError:  # the segment was cut inside a quote
-        return [word for word in (raw.strip("'\"") for raw in segment.split()) if word]
+        return [" ".join(shlex.split(word)) for word in _without_redirections(_raw_words(segment))]
+    except ValueError:  # the segment was cut inside a quote, or after a lone backslash
+        raw = _without_redirections(segment.split())
+        return [word for word in (part.strip("'\"") for part in raw) if word]
 
 
 def command_words(segment: str) -> list[str]:
@@ -612,12 +715,13 @@ def git_subcommand(args: list[str]) -> GitCommand | None:
 
 def branch_switch(git: GitCommand, cwd: Path | None) -> BranchSwitch | None:
     """The branch `git` checks out in `cwd` (its `-C` directories applied), or None when it changes
-    no branch.
+    no branch, or the hook can't tell that it does (the current branch then stays as it was).
 
-    `switch X` and `checkout X` → `X`; `switch -c X` / `checkout -b X` (`-C`, `-B`, `--orphan`, the
-    `--create=X` and `-cX` forms too) → `X`, whatever start point follows. `-`, `--detach`, or
-    `--track` without a name → an unknown branch. `checkout` also restores files: anything after
-    `--`, more than one positional, or one that names an existing path in `cwd` switches nothing.
+    `switch X` → `X`; `switch -c X` / `checkout -b X` (`-C`, `-B`, `--orphan`, the `--create=X` and
+    `-cX` forms too) → `X`, whatever start point follows; `--track origin/X` without one → `X`.
+    `-` or `--detach` → an unknown branch. `checkout X` is a switch only when `X` is a local branch
+    in `cwd`, or `main`: `checkout` also restores files, so no name, more than one, anything after
+    `--`, `-p` / `--patch`, a pathspec (`'*.py'`) or any other word switches nothing.
     """
     create_options = _SWITCH_CREATE_OPTIONS.get(git.subcommand)
     if create_options is None:
@@ -627,13 +731,35 @@ def branch_switch(git: GitCommand, cwd: Path | None) -> BranchSwitch | None:
         return created
     args, paths = _split_at(git.args, "--")
     names = positionals(args, frozenset())
-    if git.subcommand == "checkout" and (
-        paths or len(names) > 1 or (names and cwd is not None and (cwd / names[0]).exists())
-    ):
+    checkout = git.subcommand == "checkout"
+    if checkout and (paths or any(word.startswith(_CHECKOUT_FILE_OPTIONS) for word in args)):
         return None
-    if "-" in args or not _SWITCH_UNKNOWN_OPTIONS.isdisjoint(args) or len(names) != 1:
+    if not _SWITCH_UNKNOWN_OPTIONS.isdisjoint(args):
         return BranchSwitch(None)
-    return BranchSwitch(names[0])
+    if len(names) != 1:
+        return None
+    name = names[0]
+    if any(word.partition("=")[0] in _SWITCH_TRACK_OPTIONS for word in args):
+        return BranchSwitch(name.partition("/")[2] or name)
+    if checkout and name != PROTECTED_BRANCH and not _is_local_branch(cwd, name):
+        return None
+    return BranchSwitch(name)
+
+
+def _is_local_branch(cwd: Path | None, name: str) -> bool:
+    """Whether `name` is a branch of the repository in `cwd`; False when that can't be read."""
+    if cwd is None:
+        return False
+    try:
+        subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--verify", "--quiet", f"refs/heads/{name}"],
+            capture_output=True,
+            check=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
+    return True
 
 
 def _created_branch(args: list[str], options: frozenset[str]) -> BranchSwitch | None:
@@ -657,17 +783,18 @@ def _split_at(words: list[str], separator: str) -> tuple[list[str], list[str]]:
     return words[:i], words[i + 1 :]
 
 
-def push_targets(args: list[str], current_branch: Callable[[], str | None]) -> list[str]:
+def push_targets(args: list[str], current_branches: Callable[[], Iterable[str]]) -> list[str]:
     """The branches a `git push` with `args` pushes to, as far as the command says.
 
     `origin main` → `["main"]`; `origin HEAD:main`, `refs/heads/main`, `HEAD:heads/main`, `:main`
     (a delete) → the same; `origin feat/x main` → both. No refspec, or `HEAD` (`@`), means the
-    current branch, read lazily through `current_branch` (None when it can't be known, which then
-    names no target), except with `--tags`, which then pushes only tags. A destination that is one
-    whole command substitution (`"$(git branch --show-current)"`, `HEAD:$(…)`,
-    `refs/heads/$(…)`) is taken for the current branch too, which is what such a substitution
-    almost always prints; one that only contains a substitution (`HEAD:backup/$(date +%F)`) names a
-    branch of its own, never `main`. `--all`, `--branches` and `--mirror` → `["main"]`.
+    current branch, read lazily through `current_branches`: every branch that may be checked out
+    (none when it can't be known), except with `--tags`, which then pushes only tags. A
+    destination that is one whole command substitution (`"$(git branch --show-current)"`,
+    `HEAD:$(…)`, `refs/heads/$(…)`) is taken for the current branch too, which is what such a
+    substitution almost always prints; one that only contains a substitution
+    (`HEAD:backup/$(date +%F)`) names a branch of its own, never `main`. `--all`,
+    `--branches` and `--mirror` → `["main"]`.
     """
     if not _PUSH_ALL_BRANCHES.isdisjoint(args):
         return [PROTECTED_BRANCH]
@@ -682,9 +809,7 @@ def push_targets(args: list[str], current_branch: Callable[[], str | None]) -> l
         _, _, destination = spec.rpartition(":")
         destination = _branch_name(destination.removeprefix("+"))
         if destination in _CURRENT_BRANCH_NAMES or destination == _SUBSTITUTION:
-            branch = current_branch()
-            if branch is not None:
-                targets.append(branch)
+            targets.extend(current_branches())
         else:
             targets.append(destination)
     return targets
@@ -751,63 +876,119 @@ def _git_directory(cwd: Path | None, git: GitCommand) -> Path | None:
     return cwd
 
 
+def _toplevel(cwd: Path) -> Path | None:
+    """The root of the worktree `cwd` is in, or None when it isn't in one."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    root = result.stdout.strip()
+    return Path(root).resolve() if root else None
+
+
 class _Branches:
-    """The branch checked out in each directory as the command goes: read from git, unless a
-    `git switch` / `git checkout` earlier in the command moved it."""
+    """The branches that may be checked out in each worktree as the command goes: the one git
+    reports, unless a `git switch` / `git checkout` earlier in the command moved it.
+
+    A worktree is keyed by its root, so `cd src && git checkout main && cd .. && git push` sees the
+    switch. A switch is certain for what runs after it only through `&&`: once a `;`, a newline, a
+    pipe, `||` or `&` follows, it may have failed (`git checkout -b x; git push` with `x` taken), so
+    the branches from before it stay possible too (`settle`).
+    """
 
     def __init__(self) -> None:
-        self._switched: dict[Path | None, str | None] = {}
+        self._possible: dict[Path | None, frozenset[str | None]] = {}
+        self._before: dict[Path | None, frozenset[str | None]] = {}  # switched since `settle`
+        self._keys: dict[Path, Path | None] = {}
 
-    @staticmethod
-    def _key(cwd: Path | None) -> Path | None:
-        return None if cwd is None else cwd.resolve()
+    def _key(self, cwd: Path | None) -> Path | None:
+        if cwd is None:
+            return None
+        resolved = cwd.resolve()
+        if resolved not in self._keys:
+            self._keys[resolved] = _toplevel(resolved) or resolved
+        return self._keys[resolved]
+
+    def _branches(self, key: Path | None, cwd: Path | None) -> frozenset[str | None]:
+        if key not in self._possible:
+            self._possible[key] = frozenset({current_branch(cwd)})
+        return self._possible[key]
 
     def switch(self, cwd: Path | None, branch: str | None) -> None:
-        self._switched[self._key(cwd)] = branch
-
-    def current(self, cwd: Path | None) -> str | None:
         key = self._key(cwd)
-        return self._switched[key] if key in self._switched else current_branch(cwd)
+        self._before[key] = self._before.get(key, frozenset()) | self._branches(key, cwd)
+        self._possible[key] = frozenset({branch})
+
+    def settle(self) -> None:
+        """What follows runs even if the switches since the last `settle` failed."""
+        for key, before in self._before.items():
+            self._possible[key] |= before
+        self._before.clear()
+
+    def current(self, cwd: Path | None) -> list[str]:
+        """The branches that may be checked out in `cwd`, unknown ones left out."""
+        return sorted(b for b in self._branches(self._key(cwd), cwd) if b is not None)
 
 
 def reason_to_block(command: str, cwd: Path | None) -> str | None:
     """Why `command` must not run, or None when the hook has no opinion."""
     branches = _Branches()
     for segment in segments(command):
-        words = command_words(segment.text)
-        if not words:
-            continue
-        program, args = words[0], words[1:]
-        if program == "cd":
-            cwd = _directory(cwd, args[0]) if len(args) == 1 else None
-            continue
-        git = git_subcommand(args) if _is_program(program, "git") else None
-        if git is not None:
-            directory = _git_directory(cwd, git)
-            switch = branch_switch(git, directory)
-            if switch is not None:
-                branches.switch(directory, switch.branch)
-            elif git.subcommand == "push" and PROTECTED_BRANCH in push_targets(
-                git.args, partial(branches.current, directory)
-            ):
-                return _PUSH_REASON + (_HEREDOC_HINT if segment.heredoc else "")
-            continue
-        reason = _reason_for(program, args)
+        reason, cwd = _judge(segment, cwd, branches)
         if reason is not None:
             return reason + (_HEREDOC_HINT if segment.heredoc else "")
+        if segment.ends_chain:
+            branches.settle()
     return None
+
+
+def _judge(
+    segment: Segment, cwd: Path | None, branches: _Branches
+) -> tuple[str | None, Path | None]:
+    """Why `segment` must not run (or None), and the directory the next segment runs in."""
+    words = command_words(segment.text)
+    if not words:
+        return None, cwd
+    program, args = words[0], words[1:]
+    if program == "cd":
+        return None, _directory(cwd, args[0]) if len(args) == 1 else None
+    git = git_subcommand(args) if _is_program(program, "git") else None
+    if git is None:
+        return _reason_for(program, args), cwd
+    directory = _git_directory(cwd, git)
+    switch = branch_switch(git, directory)
+    if switch is not None:
+        branches.switch(directory, switch.branch)
+    elif git.subcommand == "push" and PROTECTED_BRANCH in push_targets(
+        git.args, partial(branches.current, directory)
+    ):
+        return _PUSH_REASON, cwd
+    return None, cwd
 
 
 def _reason_for(program: str, args: list[str]) -> str | None:
     """Why the simple command `program args` (not a `git` one) must not run, or None."""
     if _is_program(program, "gh"):
-        if args[:2] == ["pr", "merge"] and "--admin" in args:
+        if args[:2] == ["pr", "merge"] and any(map(_is_admin_flag, args)):
             return (
                 "`gh pr merge --admin` bypasses the ruleset: fix the failing gate through the loop"
             )
         if args[:1] == ["api"] and writes_rulesets(args[1:]):
             return "never weaken the ruleset: changes to it are the maintainer's, by hand"
     return None
+
+
+def _is_admin_flag(word: str) -> bool:
+    """Whether `word` turns on `gh pr merge`'s `--admin`: bare, or `--admin=<value>` with any
+    value but the false ones gh's flag parser reads (`=true`, `=1`, `=TRUE`, an invalid one)."""
+    option, equals, value = word.partition("=")
+    return option == "--admin" and not (equals and value.lower() in {"false", "f", "0"})
 
 
 def main(stdin: TextIO | None = None) -> int:
