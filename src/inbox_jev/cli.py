@@ -16,7 +16,7 @@ import typer
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from . import __version__, labels, logs, rules, triage
+from . import __version__, labels, logs, onboarding, rules, triage
 from . import digest as digest_mod
 from . import gmail as gmail_mod
 from . import slack as slack_mod
@@ -185,12 +185,43 @@ def _parse_since(value: str) -> timedelta:
     return timedelta(hours=n) if unit == "h" else timedelta(days=n)
 
 
+@app.command()
+def init() -> None:
+    """Set up this checkout step by step: TypeSafe key, Google OAuth client, Slack, accounts.
+
+    Run it from the checkout. Each step keeps what is already configured, so running it again
+    adds an account or fixes one step; it ends with an optional first dry run.
+    """
+    if onboarding.wizard():
+        run(account=None, mode=Mode.DRY_RUN, limit=30, lookback=None)
+
+
 @auth_app.command("add")
 def auth_add(email: str) -> None:
     """Open the browser to authorize EMAIL and store its refresh token."""
     s = _settings()
     path = gmail_mod.authorize(s.google_client_secrets_file, s.google_tokens_dir, email)
     typer.echo(f"Saved token to {path}")
+    onboarding.warn_if_expiring(s.google_tokens_dir, email)
+
+
+@auth_app.command("status")
+def auth_status(account: AccountOpt = None) -> None:
+    """Show each account's Gmail authorization: missing, or ending because Google gave a
+    time-limited grant (with the fixes). Exits 1 if any account has one of those problems."""
+    s = _settings()
+    accounts = _accounts(s, load_categories(s.categories_file), account)
+    problems = False
+    for acc in accounts:
+        if not gmail_mod.token_path(s.google_tokens_dir, acc.email).exists():
+            problems = True
+            typer.echo(f"{acc.email}: not authorized: run `inbox-jev auth add {acc.email}`")
+        elif onboarding.warn_if_expiring(s.google_tokens_dir, acc.email):
+            problems = True
+        else:
+            typer.echo(f"{acc.email}: authorized, with no expiry date from Google")
+    if problems:
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -285,8 +316,17 @@ def digest(
     with open_sessions(s.database_url) as sessions, slack_mod.client() as http:
 
         def send(acc: Account) -> None:
+            expires = gmail_mod.refresh_token_expiry(s.google_tokens_dir, acc.email)
             with _digest_gmail(s, acc.email) as gmail, sessions() as session:
-                built = digest_mod.build(session, cfg, acc, hours, gmail=gmail, preview=preview)
+                built = digest_mod.build(
+                    session,
+                    cfg,
+                    acc,
+                    hours,
+                    gmail=gmail,
+                    preview=preview,
+                    authorization_expires=expires,
+                )
             if dry_print and blocks:
                 typer.echo(json.dumps({"blocks": built.blocks()}, ensure_ascii=False, indent=2))
                 return

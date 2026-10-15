@@ -85,13 +85,15 @@ class Wording:
 @dataclass(frozen=True)
 class Digest:
     """Everything the digest says, in order. Strings are mrkdwn and escaped, except `title`
-    and `notification` (plain text) and the table's labels (raw text)."""
+    and `notification` (plain text) and the table's labels (raw text). `alerts` go first, right
+    under the context: problems that stop inbox-jev soon, whatever else happened."""
 
     title: str
     context: str
     hero: str
     notification: str
     wording: Wording
+    alerts: Sequence[str] = ()
     needs_you: Sequence[Group] = ()
     review: Sequence[str] = ()
     totals_title: str = ""
@@ -112,7 +114,7 @@ class Digest:
     def text(self) -> str:
         """The digest as one mrkdwn message: what `--dry-print` prints, and what is sent when
         Slack rejects the blocks."""
-        parts = [f"*{self.title}*\n{self.context}", self.hero]
+        parts = [f"*{self.title}*\n{self.context}", *self.alerts, self.hero]
         parts += [_group_text(g, self.wording) for g in self.needs_you]
         if self.review:
             parts.append("\n".join(self.review))
@@ -128,6 +130,7 @@ class Digest:
         blocks: list[Block] = [
             {"type": "header", "text": _plain(_cut(self.title, MAX_HEADER))},
             _context(self.context),
+            *(_section(alert) for alert in self.alerts),
             _section(self.hero),
             *(_section(_fit(g, self.wording)) for g in self.needs_you),
         ]

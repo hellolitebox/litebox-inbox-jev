@@ -9,7 +9,8 @@ deploys. What the tool does is in the [README](../README.md); how it decides, in
 
 ```bash
 git clone <repo> /opt/inbox-jev && cd /opt/inbox-jev
-# copy .env, accounts.yaml, secrets/client_secret.json and secrets/tokens/*.json from your laptop
+# copy .env, accounts.yaml, secrets/client_secret.json and secrets/tokens/*.json from your laptop,
+# where `uv run inbox-jev init` set them up (the Google authorization needs a browser)
 # (and your own categories file if .env's CATEGORIES_FILE names one: see "Your own categories")
 # The container runs as APP_UID:APP_GID. Make sure .env sets both (see .env.example): an older
 # .env without them falls back to 1000:1000 and the app gets PermissionError on data/ and secrets/.
@@ -292,7 +293,9 @@ It is one Slack message laid out with Block Kit (`src/inbox_jev/slack.py`), read
 phone:
 
 1. A header, "📬 Inbox Jev · Thursday, Oct 15" (the UTC date), and a small grey line with the
-   account, the period and the mode.
+   account, the period and the mode. Under it, only when Google will end the account's Gmail
+   authorization (a time-limited grant, see [Gmail authorization](#gmail-authorization)), a ⚠️ alert
+   with the date, how many days are left (or that it already ended) and the fixes.
 2. One bold sentence: how many emails need you ("5 emails need you"), or "Inbox zero — nothing needs
    you today ✨".
 3. What needs you, pending ones only: one group per keep category other than `important` (🔔, e.g.
@@ -351,6 +354,43 @@ or `es`; any other value is rejected when the file is loaded. Category and label
 (`MESSAGES` in `src/inbox_jev/digest.py`); to add a language, add a table there and its code to
 `DigestLanguage` in `config.py` (a test checks every table has every text with the same
 placeholders). Counts inside a sentence ("1 email", "2 emails") have a `one` and an `other` form.
+
+## Gmail authorization
+
+`inbox-jev auth status` lists each account's authorization: missing, or ending on a date Google set,
+with the fixes; it exits 1 when any account has one of those problems.
+
+Google ends an authorization on a set date only for a time-limited grant
+([ADR 0052](decisions/0052-each-install-brings-its-own-oauth-client.md)), which has two causes:
+
+- the OAuth client's consent screen is *External* and in *Testing*: Google limits every grant to 7
+  days;
+- the user chose time-limited access on Google's consent screen, whatever the app's status.
+
+Its token response then says when (`refresh_token_expires_in`), which `auth add` (and `init`) stores
+in the token file as `refresh_token_expires_at`. From then on:
+
+- `auth add` and `init` print "Google will end this authorization on DATE (a time-limited grant)"
+  with both causes and their fixes, and `auth status` repeats it ("already ended" once the date has
+  passed);
+- every digest starts with a ⚠️ alert until the account is authorized again without a limit;
+- once it has ended, each run fails with `invalid_grant`; the run error (in the digest and the
+  alerts) says to run `auth add`, and that weekly failures mean a Testing app.
+
+The fix depends on the cause:
+
+- **A Testing app**: first, in the project of the OAuth client, Google Auth Platform → Audience
+  (<https://console.cloud.google.com/auth/audience>) → **Publish app**, so it is *In production*. It
+  stays unverified, which is fine for your own accounts (Google shows a one-time warning when
+  authorizing: Advanced → Go to the app). An *Internal* app (every account in your Workspace) has no
+  7-day limit either. A token authorized while the app was in Testing keeps its limit after
+  publishing: only a new authorization drops it, so then do as below.
+- **Either cause**: `inbox-jev auth add EMAIL` once per account (on a laptop: it needs a browser),
+  without limiting the access on the consent screen, copy `secrets/tokens/EMAIL.json` to the server
+  as in [Deploy](#deploy-docker--systemd-timers), and check with `inbox-jev auth status`.
+
+A token authorized before this was recorded has no date in its file, so nothing warns ahead: the
+weekly `invalid_grant` is then the sign.
 
 ## Alerts
 

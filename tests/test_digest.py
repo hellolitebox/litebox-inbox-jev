@@ -1148,3 +1148,73 @@ def test_unsubscribe_groups_count_what_they_leave_out():
     assert group.title == f"*❗ Unsubscribe failed ({digest.MAX_ITEMS + 3})*"
     assert (len(group.lines), group.hidden) == (digest.MAX_ITEMS, 3)
     assert digest._unsubscribe_sections(digest.MESSAGES[DigestLanguage.EN], []) == []
+
+
+# --- A Gmail authorization Google will end ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("language", "expected"),
+    [
+        (
+            DigestLanguage.EN,
+            ("*⚠️ Gmail access ends ", "(in 3 days)", "time-limited grant", "Publish app"),
+        ),
+        (
+            DigestLanguage.ES,
+            ("*⚠️ El acceso a Gmail termina el ", "(en 3 días)", "tiempo limitado", "Publish app"),
+        ),
+    ],
+)
+def test_an_ending_authorization_is_the_first_thing_the_digest_says(
+    tmp_path, cfg, language, expected
+):
+    expires = now() + timedelta(days=2, hours=20)
+    with open_sessions(f"sqlite:///{tmp_path / 'digest.db'}") as sessions, sessions() as s:
+        built = digest.build(
+            s, cfg, _account(language), gmail=FakeGmail([]), authorization_expires=expires
+        )
+    [alert] = built.alerts
+    assert all(part in alert for part in expected)
+    assert f"`inbox-jev auth add {ACCOUNT}`" in alert
+    assert "https://console.cloud.google.com/auth/audience" in alert
+    assert "7 days" not in alert and "7 días" not in alert  # the date and days left say it
+    paragraphs = built.text.split("\n\n")
+    assert paragraphs[1] == alert  # right under the title and context, before the headline
+    blocks = built.blocks()
+    assert (blocks[2]["type"], blocks[2]["text"]["text"]) == ("section", alert)
+    assert_valid_block_kit(blocks)
+
+
+def test_an_ended_authorization_says_so(tmp_path, cfg):
+    with open_sessions(f"sqlite:///{tmp_path / 'digest.db'}") as sessions, sessions() as s:
+        built = digest.build(
+            s,
+            cfg,
+            _account(DigestLanguage.EN),
+            gmail=FakeGmail([]),
+            authorization_expires=now() - timedelta(hours=1),
+        )
+    assert "(already ended)" in built.alerts[0]
+
+
+def test_an_authorization_with_no_end_has_no_alert(tmp_path, cfg):
+    with open_sessions(f"sqlite:///{tmp_path / 'digest.db'}") as sessions, sessions() as s:
+        built = digest.build(s, cfg, _account(DigestLanguage.EN), gmail=FakeGmail([]))
+    assert built.alerts == []
+    assert "⚠️ Gmail access" not in built.text
+
+
+def test_cli_digest_reads_when_each_authorization_ends(tmp_path, monkeypatch):
+    accounts = tmp_path / "accounts.yaml"
+    accounts.write_text("accounts:\n  - email: a@acme.com\n  - email: b@acme.com\n")
+    tokens = tmp_path / "tokens"
+    tokens.mkdir()
+    ends = (now() + timedelta(days=5)).isoformat()
+    (tokens / "a@acme.com.json").write_text(json.dumps({"refresh_token_expires_at": ends}))
+    _cli_settings(tmp_path, monkeypatch, accounts, google_tokens_dir=tokens)
+    result = CliRunner().invoke(cli.app, ["digest", "--dry-print"])
+    assert result.exit_code == 0, result.output
+    first, second = result.output.split("*📬 Inbox Jev · ")[1:]
+    assert "⚠️ Gmail access ends" in first and "(in 5 days)" in first
+    assert "⚠️ Gmail access" not in second

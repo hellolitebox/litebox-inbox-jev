@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from .config import Account, Action, CategoriesConfig, DigestLanguage, Mode
 from .db import MAX_ERROR_ATTEMPTS, Message, MessageStatus, Run, Unsubscribe, now
-from .gmail import ThreadMessage
+from .gmail import AUDIENCE_URL, ThreadMessage
 from .rules import decided_per_email
 from .slack import Digest, Group, Totals, Wording
 from .system_labels import INBOX, SENT
@@ -96,6 +96,9 @@ class DigestMessages(TypedDict):
     processed: str
     nothing_processed: str
     pending_check_failed: str
+    authorization_expiring: str
+    authorization_left: PluralForms
+    authorization_ended: str
     no_subject: str
     needs_reply: str
     unsubscribed: str
@@ -166,6 +169,14 @@ MESSAGES: dict[DigestLanguage, DigestMessages] = {
         "pending_check_failed": (
             "_Couldn't check Gmail for what is already handled, so everything is listed._"
         ),
+        "authorization_expiring": (
+            "*⚠️ Gmail access ends {date}* ({when}): Google gave a time-limited grant, and "
+            "triage stops then. If the Google Cloud app is in Testing, open "
+            "<{audience_url}|its Audience page> and click *Publish app*. Then run "
+            "`inbox-jev auth add {account}` again, without limiting the access."
+        ),
+        "authorization_left": {"one": "in {n} day", "other": "in {n} days"},
+        "authorization_ended": "already ended",
         "no_subject": "(no subject)",
         "needs_reply": "*⚡ Needs reply ({n})*",
         "unsubscribed": "*🚫 Unsubscribed ({n})*",
@@ -239,6 +250,14 @@ MESSAGES: dict[DigestLanguage, DigestMessages] = {
         "pending_check_failed": (
             "_No se pudo consultar Gmail para ver qué ya está resuelto: se lista todo._"
         ),
+        "authorization_expiring": (
+            "*⚠️ El acceso a Gmail termina el {date}* ({when}): Google dio un permiso por "
+            "tiempo limitado, y ahí se frena el triage. Si la app de Google Cloud está en Testing, "
+            "abrí <{audience_url}|su página Audience> y tocá *Publish app*. Después corré "
+            "`inbox-jev auth add {account}` otra vez, sin limitar el acceso."
+        ),
+        "authorization_left": {"one": "en {n} día", "other": "en {n} días"},
+        "authorization_ended": "ya terminó",
         "no_subject": "(sin asunto)",
         "needs_reply": "*⚡ Piden respuesta ({n})*",
         "unsubscribed": "*🚫 Desuscripto ({n})*",
@@ -362,12 +381,14 @@ def build(
     *,
     gmail: ThreadReader | None,
     preview: bool = False,
+    authorization_expires: datetime | None = None,
 ) -> Digest:
     """The digest for `account` over the last `hours`, in its `digest_language`.
 
     `gmail` is read to drop the emails already handled (`check_pending`); None (it couldn't be
     opened) or a failed read lists them all, with a line saying so. It has no default, so a
     caller can't skip the check by forgetting it. `preview` marks the title, for a test DM.
+    `authorization_expires` (`gmail.refresh_token_expiry`) puts an alert first, with the fix.
     """
     t = MESSAGES[account.digest_language]
     email = account.email
@@ -425,6 +446,7 @@ def build(
     return Digest(
         title=mark + t["title"].format(date=date),
         context=t["context"].format(account=esc(email), hours=hours, modes=", ".join(modes) or "—"),
+        alerts=_authorization_alert(t, email, authorization_expires, at),
         hero=f"*{headline}*" if waiting else f"*{headline}* ✨",
         notification=f"{mark}{headline} · {plural(t['processed_count'], len(done))}",
         wording=Wording(more=t["more"], see_all=t["see_all"], nothing=t["nothing_processed"]),
@@ -438,6 +460,30 @@ def build(
         errors=Group(error_lines[0], error_lines[1:]) if error_lines else None,
         footer=t["footer"],
     )
+
+
+def _authorization_alert(
+    t: DigestMessages, account: str, expires: datetime | None, at: datetime
+) -> list[str]:
+    """The alert for a Gmail authorization Google will end (a time-limited grant), if any."""
+    if expires is None:
+        return []
+    date = t["date"].format(
+        weekday=t["weekdays"][expires.weekday()],
+        day=expires.day,
+        month=t["months"][expires.month - 1],
+    )
+    alert = t["authorization_expiring"].format(
+        date=date,
+        when=(
+            plural(t["authorization_left"], -(-(expires - at) // timedelta(days=1)))
+            if expires > at
+            else t["authorization_ended"]
+        ),
+        audience_url=AUDIENCE_URL,
+        account=esc(account),
+    )
+    return [alert]
 
 
 def _needs_you(

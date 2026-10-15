@@ -393,6 +393,13 @@ def _retry_due(attempts: int, last_failure: datetime, at: datetime) -> bool:
     return at >= last_failure + backoff
 
 
+# Weekly `invalid_grant` is the signature of a Google app left in Testing (ADR 0052).
+TESTING_APP_HINT = (
+    "; if this happens every 7 days, the Google Cloud app is in Testing: publish it (Google Auth "
+    "Platform → Audience → Publish app) before authorizing again"
+)
+
+
 def describe_run_error(exc: BaseException, account: str) -> str:
     """The `runs.error` text: the exception, or what to do when the Gmail token can't refresh.
 
@@ -410,6 +417,7 @@ def describe_run_error(exc: BaseException, account: str) -> str:
     if detail is not None:
         return (
             f"Gmail token expired or revoked ({detail[:200]}): run `inbox-jev auth add {account}`"
+            f"{TESTING_APP_HINT}"
         )
     if is_token_refresh_error(exc):
         if getattr(exc, "retryable", False):

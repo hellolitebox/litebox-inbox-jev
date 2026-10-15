@@ -63,7 +63,7 @@ def test_expired_token_is_recorded_on_the_run_and_raised(triage_setup, monkeypat
     assert run.finished_at is not None and (run.processed, run.errors) == (0, 0)
     assert run.error == (
         "Gmail token expired or revoked (invalid_grant: Token has been expired or revoked.): "
-        "run `inbox-jev auth add me@acme.com`"
+        "run `inbox-jev auth add me@acme.com`" + triage.TESTING_APP_HINT
     )
     text = _digest(ctx, account)
     assert "1 corrida fallida" in text and "run `inbox-jev auth add me@acme.com`" in text
@@ -103,7 +103,7 @@ _REFRESH_OUTCOMES = [
             {"error": "invalid_grant", "error_description": "Token has been expired or revoked."}
         ).encode(),
         "Gmail token expired or revoked (invalid_grant: Token has been expired or revoked.): "
-        "run `inbox-jev auth add me@acme.com`",
+        "run `inbox-jev auth add me@acme.com`" + triage.TESTING_APP_HINT,
         id="400-invalid-grant",
     ),
 ]
@@ -169,7 +169,7 @@ def test_google_auth_marks_html_5xx_not_retryable_and_json_5xx_retryable(monkeyp
         (
             RefreshError("invalid_grant: Token has been expired or revoked."),
             "Gmail token expired or revoked (invalid_grant: Token has been expired or revoked.): "
-            "run `inbox-jev auth add me@acme.com`",
+            "run `inbox-jev auth add me@acme.com`" + triage.TESTING_APP_HINT,
         ),
         (
             RefreshError('{"unexpected": "<body>"}', {"unexpected": "<body>"}),

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import base64
 import html
+import json
 import logging
-import os
-import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage as MimeMessage
 from pathlib import Path
 from types import TracebackType
@@ -22,6 +22,7 @@ from googleapiclient.discovery import build
 
 from . import signals
 from .body import calendar_method, extract_body, extract_link_domains
+from .files import write_private
 from .sent_scan import (
     RECIPIENT_HEADERS,
     DomainScans,
@@ -39,6 +40,13 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.send",
 ]
+# The URL of a project's consent screen audience, where a Testing app is published.
+AUDIENCE_URL = "https://console.cloud.google.com/auth/audience"
+# Our own key in a token file (google-auth ignores keys it doesn't know): when the refresh token
+# expires, from the `refresh_token_expires_in` Google sends only for a time-limited grant: an app
+# whose consent screen is External and in Testing (7 days), or access the user limited in time on
+# the consent screen (ADR 0052). Absent: it doesn't expire.
+REFRESH_EXPIRES_KEY = "refresh_token_expires_at"
 # Calls per batch HTTP request: Gmail accepts up to 100 but advises at most 50, since larger
 # batches are likely to trigger rate limiting.
 BATCH_SIZE = 50
@@ -83,7 +91,8 @@ def token_path(tokens_dir: Path, email: str) -> Path:
 
 
 def authorize(client_secrets: Path, tokens_dir: Path, email: str) -> Path:
-    """Run the browser OAuth flow for one account and store its refresh token."""
+    """Run the browser OAuth flow for one account and store its refresh token, with the date
+    Google will expire it when it said so (`refresh_token_expiry`)."""
     flow = InstalledAppFlow.from_client_secrets_file(str(client_secrets), SCOPES)
     creds = flow.run_local_server(port=0, login_hint=email, prompt="consent")
     profile = (
@@ -96,58 +105,43 @@ def authorize(client_secrets: Path, tokens_dir: Path, email: str) -> Path:
         raise RuntimeError(f"Authorized {profile['emailAddress']}, expected {email}")
     tokens_dir.mkdir(parents=True, exist_ok=True)
     path = token_path(tokens_dir, email)
-    save_token(path, creds.to_json())
+    expires_in = flow.oauth2session.token.get("refresh_token_expires_in")
+    expires_at = (
+        (datetime.now(UTC) + timedelta(seconds=int(expires_in))).isoformat(timespec="seconds")
+        if expires_in
+        else None
+    )
+    _save_token(path, creds, expires_at)
     return path
 
 
-def save_token(path: Path, data: str) -> None:
-    """Write an OAuth token file atomically, readable by its owner only from the start.
+def _save_token(path: Path, creds: Credentials, refresh_expires_at: str | None) -> None:
+    data = json.loads(creds.to_json())
+    if refresh_expires_at:
+        data[REFRESH_EXPIRES_KEY] = refresh_expires_at
+    write_private(path, json.dumps(data))
 
-    The text goes to a temporary file in the same directory, created with mode 0600
-    (`tempfile.mkstemp`), is flushed to disk and then renamed over `path`. A crash or a full
-    disk leaves the previous token whole (never a truncated file), and the token is never
-    readable by others, not even briefly. The temporary file is removed if anything fails.
-    """
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+
+def refresh_token_expiry(tokens_dir: Path, email: str) -> datetime | None:
+    """When Google expires `email`'s stored refresh token; None when it doesn't (not a
+    time-limited grant), there is no token, or the file can't be read."""
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-        Path(tmp).replace(path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
-    _fsync_dir(path.parent)
-
-
-def _fsync_dir(directory: Path) -> None:
-    """Persist a rename in `directory` (POSIX), best effort.
-
-    The rename has already happened, so this only makes it durable sooner: where a directory
-    can't be opened, or can't be fsynced (EINVAL on some filesystems), it is skipped.
-    """
-    try:
-        fd = os.open(directory, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
-    except OSError as exc:
-        log.debug("fsync of %s skipped: %s", directory, exc)
-    finally:
-        os.close(fd)
+        value = json.loads(token_path(tokens_dir, email).read_text()).get(REFRESH_EXPIRES_KEY)
+        return datetime.fromisoformat(value) if isinstance(value, str) else None
+    except (OSError, ValueError, AttributeError):
+        return None
 
 
 def load_credentials(tokens_dir: Path, email: str) -> Credentials:
-    """The stored token for `email`, refreshed (and saved, `save_token`) if it has expired."""
+    """The stored token for `email`, refreshed (and saved, keeping its expiry) if it has expired."""
     path = token_path(tokens_dir, email)
     if not path.exists():
         raise FileNotFoundError(f"No token for {email}; run `inbox-jev auth add {email}`")
-    creds: Credentials = Credentials.from_authorized_user_file(str(path), SCOPES)
+    info = json.loads(path.read_text())
+    creds: Credentials = Credentials.from_authorized_user_info(info, SCOPES)
     if not creds.valid:
         creds.refresh(Request())
-        save_token(path, creds.to_json())
+        _save_token(path, creds, info.get(REFRESH_EXPIRES_KEY))
     return creds
 
 

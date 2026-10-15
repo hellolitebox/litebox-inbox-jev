@@ -45,7 +45,9 @@ Contents:
    refreshed fails the account's run before anything is touched, with one of three `runs.error`
    texts, depending on how google-auth reports the failure:
 
-   - `invalid_grant` (token expired or revoked): run `inbox-jev auth add EMAIL`;
+   - `invalid_grant` (token expired or revoked): run `inbox-jev auth add EMAIL`, and if it happens
+     every 7 days, publish the Google app first: it is in Testing
+     ([operations](operations.md#gmail-authorization));
    - a failure google-auth marks retryable (a 5xx or `temporarily_unavailable` with a JSON error
      body): "temporary", it will retry next run;
    - any other refresh failure (e.g. a 5xx whose body isn't JSON, such as an HTML error page, which

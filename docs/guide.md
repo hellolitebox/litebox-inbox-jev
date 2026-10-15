@@ -303,6 +303,10 @@ Every morning (08:00 Buenos Aires time by default) you get one Slack message per
 the last 24 hours, in English or Spanish. It is built to be read on your phone in a few seconds,
 most important first:
 
+- **A warning first**, only when Google is about to cut inbox-jev's access to your Gmail: it says on
+  which day, and what to do so it doesn't happen again: allow access once more, this time without a
+  time limit, after whoever set up inbox-jev changes one setting in Google Cloud if that was the
+  cause. Without it, sorting stops that day.
 - **The headline** says how many emails need you, or "Inbox zero" when nothing does.
 - **Action** and **Needs reply**: the `Jev/Action` emails still in your inbox, and the emails
   waiting for your answer that you haven't replied to yet. Each shows its subject (tap it to open

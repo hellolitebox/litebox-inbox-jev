@@ -129,14 +129,44 @@ that correction then decides the email too ([the guide](docs/guide.md#how-it-lea
 
 ## Setup
 
-### 1. Credentials
+```bash
+uv sync --extra dev          # exact versions from uv.lock
+uv run inbox-jev init        # guided setup, then an optional first dry run
+```
+
+`inbox-jev init` asks for what it needs, checks each value before saving it and keeps what is
+already configured, so running it again adds an account or fixes one step
+([ADR 0052](docs/decisions/0052-each-install-brings-its-own-oauth-client.md)):
+
+1. **TypeSafe**: the API key from the TypeSafe dashboard, checked with a request that classifies
+   nothing, saved as `TYPESAFE_API_KEY` in `.env` (created from `.env.example`, owner-only).
+2. **Google**: Gmail access goes through an OAuth client of your own, in a Google Cloud project you
+   control (inbox-jev ships none). The wizard opens the pages and walks through them: enable the
+   Gmail API, set up the consent screen, create a **Desktop app** client and download its JSON,
+   which it finds in `~/Downloads`, checks and copies to `secrets/client_secret.json`.
+3. **Slack** (optional): a bot token (`chat:write`, plus `users:read.email` to find your member ID),
+   checked and saved as `SLACK_BOT_TOKEN`.
+4. **Accounts**: for each Gmail address, the browser authorization (token → `secrets/tokens/`) and
+   an entry in `accounts.yaml` with your digest's member ID and language and, for a company domain,
+   that domain in `allow_domains`. The other options are in `accounts.example.yaml`.
+
+`uv run pre-commit install` adds gitleaks, ruff and mdformat before every commit if you develop.
+
+<details>
+<summary>The same, by hand</summary>
 
 - **TypeSafe**: API key from the TypeSafe dashboard → `TYPESAFE_API_KEY`. `inbox-jev run` fails each
   account's run without it (nothing is touched); the other commands don't need it.
 - **Google**:
   1. In Google Cloud Console, enable the Gmail API.
-  2. Configure the OAuth consent screen. Use *Internal* if all accounts are in your Workspace;
-     otherwise use *External* in testing mode and add each account as a test user.
+  2. Configure the OAuth consent screen (Google Auth Platform). Use *Internal* if all accounts are
+     in your Workspace. Otherwise use *External* and **publish the app** (Audience → Publish app) so
+     it is *In production*; it stays unverified, and Google shows a one-time warning when you
+     authorize (Advanced → Go to your app). Don't leave it in *Testing*: Google expires a Testing
+     app's tokens after 7 days, and every run then fails until you authorize again. When Google will
+     end an authorization (a Testing app, or access you limited in time when allowing it),
+     `auth add`, `auth status` and the digest warn you, with the fix
+     ([Gmail authorization](docs/operations.md#gmail-authorization)).
   3. Create an OAuth client of type **Desktop app** and save its JSON as
      `secrets/client_secret.json`.
 - **Slack** (optional): a bot with the `chat:write` scope → `SLACK_BOT_TOKEN`. Add each person's
@@ -150,10 +180,12 @@ uv run pre-commit install                  # gitleaks, ruff, mdformat before eve
 uv run inbox-jev auth add you@example.com  # opens the browser; token → secrets/tokens/
 ```
 
+</details>
+
 Settings and both YAML files are checked when a command starts, so a typo stops it with a message
 instead of misbehaving later ([Configuration checks](docs/operations.md#configuration-checks)).
 
-### 2. Try it locally
+### Try it locally
 
 ```bash
 uv run inbox-jev run --mode dry_run --limit 30
@@ -165,7 +197,9 @@ uv run inbox-jev digest --dry-print
 
 | Command | What it does |
 | -- | -- |
+| `inbox-jev init` | Guided setup: TypeSafe key, Google OAuth client, Slack, accounts, first dry run |
 | `inbox-jev auth add EMAIL` | Authorize a Gmail account (opens the browser; token → `secrets/tokens/`) |
+| `inbox-jev auth status [-a EMAIL]` | Which accounts are missing an authorization, or have one Google will end (a time-limited grant), with the fixes ([Gmail authorization](docs/operations.md#gmail-authorization)) |
 | `inbox-jev run [-a EMAIL] [--mode M] [--limit N] [--lookback 30d]` | One triage pass (what the timer runs) |
 | `inbox-jev digest [-a EMAIL] [--hours 24] [--dry-print [--blocks]] [--preview]` | Slack digest |
 | `inbox-jev restore -a EMAIL --since 1d [--category marketing]` | Undo: back to inbox, remove labels (emails deleted in Gmail are skipped) |
