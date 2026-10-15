@@ -4,6 +4,11 @@ Short records of the design decisions behind inbox-jev's behaviour: the context,
 alternatives that were rejected and the consequences. The behaviour itself is specified in
 [`docs/how-it-decides.md`](../how-it-decides.md).
 
+The PR numbers of records 0001 to 0053, in the index below and anywhere in the records themselves,
+refer to the pull requests of the repository's private history, before it was published on
+2026-10-15; they aren't public. So do the `(#N)` endings of the commit subjects up to then. The code
+and its commit history are the same. Later records link this repository's pull requests.
+
 Add a record when a PR makes a design decision (a new rule, a guard, a trade-off between safety and
 coverage), in the same PR. Name it `NNNN-short-title.md` with the next number and the sections
 Context, Decision, Alternatives considered, Consequences. Don't rewrite an accepted record when the
