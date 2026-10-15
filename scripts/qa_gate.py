@@ -9,6 +9,9 @@ a commit status on the PR's head, so the repo ruleset can require it:
 - `failure`: the latest review is CHANGES_REQUESTED, or has no Verdict or Head line;
 - `pending`: there is no review yet, or the head moved since the latest review.
 
+Only comments by people with write access to the repo count: it is public, so anyone can post a
+comment that looks like a review (ADR 0054).
+
 Runs from `.github/workflows/qa-gate.yml` on every push to the PR and on every comment. Needs
 `gh` and a token with `statuses: write` (`GH_TOKEN`). Standard library only. Exits 0 once the
 status is posted, whatever its state: the verdict is the status, and the job that runs this only
@@ -30,6 +33,9 @@ CONTEXT = "qa-verdict"
 REVIEW_HEADING = "## QA review"
 VERDICT_RE = re.compile(r"\*\*Verdict:\s*(APPROVED|CHANGES_REQUESTED)\*\*")
 HEAD_RE = re.compile(r"^Head:\s*`?([0-9a-f]{7,40})`?\s*$", re.MULTILINE)
+# Repo permissions that make a commenter's QA review count (ADR 0054).
+# The endpoint's legacy `permission` field reports maintain as write and triage as read.
+TRUSTED_PERMISSIONS = frozenset({"admin", "write"})
 # How many `update-branch` merges on top of the reviewed commit still count as that commit.
 MAX_UPDATE_DEPTH = 5
 
@@ -76,11 +82,15 @@ def parse_review(body: str, url: str = "") -> Review:
     return Review(word, head.group(1) if head else None, url)
 
 
-def latest_review(comments: list[dict[str, Any]]) -> Review | None:
-    """The newest comment that starts with the QA heading; `comments` is oldest first."""
+def latest_review(
+    comments: list[dict[str, Any]], is_trusted: Callable[[str], bool]
+) -> Review | None:
+    """The newest comment that starts with the QA heading and whose author `is_trusted`;
+    `comments` is oldest first. A review-looking comment by anyone else is ignored."""
     for comment in reversed(comments):
         body = comment.get("body") or ""
-        if body.startswith(REVIEW_HEADING):
+        login = (comment.get("user") or {}).get("login") or ""
+        if body.startswith(REVIEW_HEADING) and login and is_trusted(login):
             return parse_review(body, comment.get("html_url") or "")
     return None
 
@@ -131,6 +141,28 @@ def make_is_update_of(repo: str, base: str) -> Callable[[str, str], bool]:
     return is_update_of
 
 
+def make_is_trusted(repo: str) -> Callable[[str], bool]:
+    """`is_trusted(login)` over the GitHub API: the user has write access to `repo` or more
+    (`TRUSTED_PERMISSIONS`), asked once per login. A login GitHub doesn't know (404) is
+    untrusted; any other failure of the call fails the run (`main` exits 1, to be re-run), so a
+    transient error never decides a verdict. Not `author_association`, which shows a member whose
+    org membership is private as a mere contributor."""
+    known: dict[str, bool] = {}
+
+    def is_trusted(login: str) -> bool:
+        if login not in known:
+            try:
+                answer = gh_api(f"repos/{repo}/collaborators/{login}/permission")
+            except subprocess.CalledProcessError as exc:
+                if "HTTP 404" not in (exc.stderr or ""):
+                    raise
+                answer = {}
+            known[login] = answer.get("permission") in TRUSTED_PERMISSIONS
+        return known[login]
+
+    return is_trusted
+
+
 def post_status(repo: str, sha: str, verdict: Verdict, url: str) -> None:
     """Create the `qa-verdict` commit status on `sha`, linking to the review comment."""
     fields = [
@@ -155,7 +187,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         pr = gh_api(f"repos/{args.repo}/pulls/{args.pr}")
         head, base = pr["head"]["sha"], pr["base"]["ref"]
-        review = latest_review(gh_api_list(f"repos/{args.repo}/issues/{args.pr}/comments"))
+        comments = gh_api_list(f"repos/{args.repo}/issues/{args.pr}/comments")
+        review = latest_review(comments, make_is_trusted(args.repo))
         verdict = evaluate(review, head, make_is_update_of(args.repo, base))
         print(f"{CONTEXT} for {head[:7]}: {verdict.state} — {verdict.description}")
         if not args.dry_run:
