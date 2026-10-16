@@ -66,7 +66,9 @@ is to resolve every blocker, major and minor finding on the PR branch, plus any 
    fixed (end with the repo's `Co-Authored-By` trailer if the session provides one) and push with
    `cd "$WT" && git push origin HEAD:"$BR"`. The push moves the head, so the `qa-verdict` status
    goes back to `pending` until QA reviews it: never post anything that starts with `## QA review`
-   yourself.
+   yourself. If you merge `main` in, commit the merge alone and the fixes apart: the gate keeps a
+   verdict across a merge only when its tree is the conflict-free merge of its parents
+   (`scripts/qa_gate.py`, ADR 0055), and QA reads the fixes as their own diff.
 7. Post a reply on the PR with `gh pr comment <n> --body-file <file>`, then remove the worktree
    (`git -C "$ROOT" worktree remove "$WT"`):
 

@@ -177,8 +177,10 @@ Skills: <skills loaded> (unavailable: <none | list>; n/a: <none | list>)
 Verdict is APPROVED only when there are no open blocker/major/minor findings and all checks (local
 and CI) pass. Nits alone do not block.
 
-The `QA gate` workflow (`scripts/qa_gate.py`) turns the latest `## QA review` comment into the
-`qa-verdict` status on the PR head, which the ruleset requires: `APPROVED` with a `Head:` equal to
-the head (or the head merged with `main` by `update-branch`) is `success`; a review for an older
-commit is `pending`; `CHANGES_REQUESTED` is `failure`. So the `Verdict:` and `Head:` lines must be
-exactly as above, and nothing else you post may start with `## QA review`.
+The `QA gate` workflow (`scripts/qa_gate.py`) turns the latest `## QA review` comment by someone
+with write access to the repo (ADR 0054) into the `qa-verdict` status on the PR head, which the
+ruleset requires: `APPROVED` with a `Head:` equal to the head (or the head merged with `main` by
+`update-branch`, each merge's tree exactly the conflict-free `git merge-tree` of its parents, ADR
+0055\) is `success`; a review for an older commit, or a merge with edits of its own or a
+hand-resolved conflict, is `pending`; `CHANGES_REQUESTED` is `failure`. So the `Verdict:` and
+`Head:` lines must be exactly as above, and nothing else you post may start with `## QA review`.

@@ -66,3 +66,40 @@ change, whether or not it touched what they cover.
   blocks.
 - Each instruction file now has a different reader in mind, so `/doctor prompt-audit` is the check
   that they don't contradict each other: run it after editing any of them.
+
+## Addendum (2026-10-15, PR #4): the hook reads the shell
+
+The hook is now litebox-automations' `scripts/guard_main.py`, where review closed the gaps the
+consequences above accept as false negatives. It reads as much of the shell as it needs, as bash
+reads it, instead of pattern-matching:
+
+- It splits only outside quotes, escapes and comments, so `--subject 'Sync Q&A' --admin` is one
+  command.
+- Line continuations are read as bash reads them.
+- Command substitutions are judged as commands of their own. A push destination that is one whole
+  substitution counts as the current branch.
+- `$((…))` arithmetic is one word, unless it holds a `$(` or a backquote, whose command is judged.
+- Redirections (`2>&1`, `> log`, `main>log`) are dropped from a command's words, so they hide no
+  switch or refspec: `git push origin 2>&1` on `main` is refused.
+- `gh pr merge --admin=true` (any value but a false one) counts as `--admin`.
+- A heredoc's body is split blind, and a refusal there points to `--body-file` / `git commit -F`.
+- A lone `&` separates commands.
+- The reserved words (`do`, `then`, `coproc`…) and the wrappers `sudo -u root`, `timeout`, `nice`
+  and `command` are skipped.
+- `--all`, `--branches` and `--mirror` count as a push to `main`, and `--tags` with no refspec as no
+  branch.
+- `@` means `HEAD`, and a `heads/main` destination is `main`.
+- A `git switch` / `git checkout` earlier in the command moves the current branch of its worktree,
+  as `cd` moves the directory: `git checkout main && git push` from a feature branch is refused, and
+  `git switch -c fix/x && git push -u origin HEAD` from `main` passes. A switch counts as done only
+  through `&&`: after `;` it may have failed, so the branch before it is judged too. Inside a
+  command substitution a `;` or a newline ends only the substitution's own chain, so the usual
+  `git switch -c x && git commit -m "$(cat <<'EOF' … EOF)" && git push -u origin HEAD` passes, and a
+  heredoc line is never read as a switch. A `git checkout` counts only to a local branch or `main`,
+  never as a file restore (`-p`, a pathspec, a deleted file).
+
+The decision is unchanged: a guardrail, not a security boundary. What still slips past it
+(`bash -c`, `eval`, `xargs`, a refspec in a variable…) is listed in its docstring, and the ruleset
+on GitHub enforces. For `gh pr merge --admin`, which bypasses the ruleset, the hook is the only
+guard. This is why it reads quoting and escapes as bash does. The two repositories keep the same
+file.

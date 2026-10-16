@@ -4,6 +4,11 @@ Short records of the design decisions behind inbox-jev's behaviour: the context,
 alternatives that were rejected and the consequences. The behaviour itself is specified in
 [`docs/how-it-decides.md`](../how-it-decides.md).
 
+The PR numbers of records 0001 to 0053, in the index below and anywhere in the records themselves,
+refer to the pull requests of the repository's private history, before it was published on
+2026-10-15; they aren't public. So do the `(#N)` endings of the commit subjects up to then. The code
+and its commit history are the same. Later records link this repository's pull requests.
+
 Add a record when a PR makes a design decision (a new rule, a guard, a trade-off between safety and
 coverage), in the same PR. Name it `NNNN-short-title.md` with the next number and the sections
 Context, Decision, Alternatives considered, Consequences. Don't rewrite an accepted record when the
@@ -64,3 +69,5 @@ decision changes: add a new one and mark the old one `Superseded by NNNN`.
 | [0051](0051-no-learned-rules-on-a-lists-own-address.md) | No learned rule decides mail sent as a mailing list's own address | Accepted | #62 |
 | [0052](0052-each-install-brings-its-own-oauth-client.md) | Each install brings its own Google OAuth client; `init` walks through it | Accepted | #63 |
 | [0053](0053-installable-from-pypi-with-a-home-folder.md) | Installable from PyPI, with a home folder and a schedule on the user's computer | Accepted | #64 |
+| [0054](0054-qa-reviews-count-only-from-people-with-write-access.md) | QA reviews count only from people with write access | Accepted | #3 |
+| [0055](0055-an-update-merge-keeps-the-verdict-only-when-git-made-it.md) | An update merge keeps QA's verdict only when git would have made it unchanged | Accepted | #5 |

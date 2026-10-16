@@ -11,7 +11,7 @@ on:
     types: [created, edited]
 
 permissions:
-  contents: read        # commits and compare, for update-branch merges
+  contents: read        # commits, compare and fetch, for update-branch merges
   pull-requests: read   # the PR head and base
   issues: read          # the PR comments
   statuses: write       # the qa-verdict status
@@ -43,8 +43,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # Full history, no working tree beyond the script: to accept an update-branch merge the
+      # script fetches the PR head and the base and checks with `git merge-tree` that the merge
+      # adds nothing of its own, reading objects only (ADR 0055). Which run is trusted: an
+      # `issue_comment` run checks out `main` and runs `main`'s workflow and script, so no PR code
+      # runs there. A `pull_request` run checks out the PR's merge ref and runs the PR's own
+      # workflow and `scripts/qa_gate.py` with `statuses: write` (a fork's PR gets a read-only
+      # token and posts nothing), so a PR that edits the gate is judged by its own copy until the
+      # next review comment re-runs `main`'s. Only the comment-triggered status is authoritative;
+      # for a PR that touches the gate, read that one.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           sparse-checkout: scripts/qa_gate.py
           sparse-checkout-cone-mode: false
       - run: python3 scripts/qa_gate.py --repo "$GITHUB_REPOSITORY" --pr "$PR"

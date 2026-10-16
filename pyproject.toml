@@ -143,4 +143,4 @@ branch = true
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
-fail_under = 97  # total was 97.95% when set; raise it as coverage grows, never lower it
+fail_under = 98  # total was 98.10% when set; raise it as coverage grows, never lower it
