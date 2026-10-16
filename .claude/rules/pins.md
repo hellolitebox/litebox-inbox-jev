@@ -4,6 +4,7 @@ paths:
   - "uv.lock"
   - "Dockerfile"
   - ".github/workflows/ci.yml"
+  - ".github/workflows/release.yml"
   - ".pre-commit-config.yaml"
   - ".mdformat.toml"
 ---
@@ -18,13 +19,15 @@ paths:
 - `mdformat` with its plugins `mdformat-gfm` and `mdformat-frontmatter`: the `dev` extra, and the
   mdformat hook's `rev` and `additional_dependencies`. Its settings are in `.mdformat.toml` (prose
   wrapped at 100 columns, consecutive list numbers, unpadded tables).
-- `uv`: the `ghcr.io/astral-sh/uv` stage tag in the `Dockerfile` and `UV_VERSION` in `ci.yml` (every
-  job's `setup-uv`). Dependabot only updates the Dockerfile tag, and CI's `test` job fails when the
-  two differ. Don't add `[tool.uv] required-version`: Dependabot's bundled uv would refuse to lock
-  and no dependency PRs would be opened.
+- `uv`: the `ghcr.io/astral-sh/uv` stage tag in the `Dockerfile`, and `UV_VERSION` in `ci.yml`
+  (every job's `setup-uv`) and in `release.yml` (the build that publishes to PyPI). Dependabot only
+  updates the Dockerfile tag; CI's `test` job fails when it differs from `ci.yml`'s, and
+  `release.yml`'s isn't checked, so bump it by hand with the other two (`/ship`, "Dependabot lane").
+  Don't add `[tool.uv] required-version`: Dependabot's bundled uv would refuse to lock and no
+  dependency PRs would be opened.
 - Python: the base image (`python:3.x-slim`) must equal `PYTHON_VERSION` in `ci.yml` (the `docker`
-  job checks it), and `requires-python` must equal `MIN_PYTHON_VERSION` (the `test-min-python` job
-  runs the tests on it and checks the two match).
+  job checks it) and in `release.yml` (unchecked: bump it by hand), and `requires-python` must equal
+  `MIN_PYTHON_VERSION` (the `test-min-python` job runs the tests on it and checks the two match).
 - Base images are pinned by tag **and** digest, and GitHub Actions by commit SHA with the version as
   a comment; Dependabot bumps both halves, so keep that shape when editing by hand.
 - The `docker` job builds the image, smoke-tests it as a non-root uid and on `main` pushes it to
