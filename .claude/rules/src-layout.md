@@ -15,4 +15,5 @@ paths:
 - Logs carry ids and counts, never email bodies or addresses that identify people beyond what the
   line needs.
 - Schema changes: the project uses `create_all` with no migrations yet. A change to an existing
-  table needs a migration story (or an explicit note in the PR) for databases already deployed.
+  table needs a migration story for databases already deployed (an explicit migration, or the deploy
+  notes' steps) and a tested way back: `docs/development.md`'s "Python standards", Persistence.
