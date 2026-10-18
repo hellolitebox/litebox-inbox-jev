@@ -42,6 +42,9 @@ def test_the_qa_gate_token_is_minimal():
         "issues": "read",
         "statuses": "write",
     }
+    # A job's own `permissions:` would replace the block above for that job, unseen by it.
+    code = "\n".join(line for line in workflow.splitlines() if not line.lstrip().startswith("#"))
+    assert re.findall(r"^[ \t]*permissions:", code, re.MULTILINE) == ["permissions:"]
 
 
 def test_the_qa_gate_runs_mains_script_and_never_the_prs_code():
