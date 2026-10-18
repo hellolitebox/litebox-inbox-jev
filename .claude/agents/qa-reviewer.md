@@ -78,7 +78,11 @@ ARC-Message-Signature through its strict RFC 6376 tag-list parse, failing closed
 to a pass, and never the group's pass for a relayed author, ADR 0043 and 0050; `X-Original-Sender`
 trusted only for `group_domains`; List-Unsubscribe); injection (Gmail queries, Slack mrkdwn, SQL);
 least-privilege OAuth scopes; file permissions on tokens; untrusted email content reaching shell or
-eval; new dependencies (maintained? pinned sensibly?).
+eval; new dependencies (maintained? pinned sensibly?). A PR that grants `statuses: write` (or any
+permission that can post a commit status) in any workflow but `.github/workflows/qa-gate.yml`, posts
+a `qa-verdict` status from any other workflow or step, or names a job or a check run (created with
+`checks: write`) `qa-verdict`, is a blocker: every workflow's token posts as GitHub Actions, the app
+the ruleset pins `qa-verdict` to, and a `pull_request` workflow runs the PR's own copy (ADR 0056).
 
 **Safety of actions**: anything destructive (archive, spam, unsubscribe) must stay behind confidence
 thresholds, allowlist and mode gating; unsubscribes must stay once-per-list and capped; `restore`
@@ -110,7 +114,15 @@ gmail/triage and the modules split from them: `body`, `sent_scan`, `jev_guard`, 
 `unsubscribe_retry`), clear names, no dead code or commented-out code, no duplication of existing
 helpers, type hints, small functions, comments only where non-obvious.
 
+**Python standards**: the change follows `docs/development.md`'s "Python standards" table (ADR
+0056): outcomes that are incomplete or skipped are never reported as success, an external answer's
+completeness is checked (Gmail's and Jev's), each new test protects a named rule, contract, incident
+or risk.
+
 **Tests**: new behaviour has tests; tests assert behaviour, not implementation; no network in tests.
+Coverage stays at or above `fail_under` in `pyproject.toml`. The floor isn't raised by rule; it may
+be lowered only in the PR that removes a redundant test, with the reason in its body
+(`.claude/rules/tests.md`). Lowered to get untested code through: **major**.
 
 **Proof the test fails without the fix** (`.claude/rules/tests.md`): a bug fix, or a test added for
 a finding about a missing test, must say in the PR body ("Verification") or the dev reply that the
