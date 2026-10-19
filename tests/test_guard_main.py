@@ -579,18 +579,23 @@ def test_the_less_common_forms_of_each_refusal(command):
         "cat <<'A'\n<<'B'\nb\nA\necho ok",  # a header inside an exempted body is body text
         "echo 'it is fine' && cat <<'EOF'\n`git push -f origin x`\nEOF",  # plain, quote closed
         "gh api graphql -f query='{ viewer { login } }' ;",  # a trailing operator
+        # a harmless query in the other spellings of the field is not refused
+        "gh api graphql --field=query='{ viewer { login } }'",
+        "gh api graphql -fquery='{ viewer { login } }'",
     ],
 )
 def test_the_less_common_forms_that_must_pass(command):
     assert blocked(command) is None
 
 
-def test_no_git_on_path_names_no_branch(tmp_path, monkeypatch):
-    """git missing (or failing) is "no branch", which never refuses wrongly."""
+def test_no_git_on_path_names_no_branch(repo, tmp_path, monkeypatch):
+    """git missing (or failing) is "no branch", which never refuses wrongly: in a repository on
+    `main`, which git would name."""
     from guard_main import current_branch
 
+    assert current_branch(repo) == "main"
     monkeypatch.setenv("PATH", str(tmp_path / "nowhere"))
-    assert current_branch(tmp_path) is None
+    assert current_branch(repo) is None
 
 
 def test_an_allowed_command_exits_0_with_nothing_on_stderr(capsys):
