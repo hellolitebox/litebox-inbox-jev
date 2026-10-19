@@ -557,6 +557,52 @@ def test_ansi_c_strings_decode_as_bash_does(body, word):
     assert _bash_escapes(body) == word
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "x=$( $( $( $(git push -f origin x) ) ) )",  # deeper than the scan's recursion
+        "git push -- origin +x",  # a refspec after `--`
+        "gh api graphql --field=query='mutation { deleteRepositoryRuleset(input:{}) { id } }'",
+        "gh api graphql -fquery='mutation { deleteRepositoryRuleset(input:{}) { id } }'",
+        "gh pr --repo=o/r merge 1 --admin",
+        "echo a\\ b; cat <<'EOF'\n`git push -f origin x`\nEOF",  # a backslash before: not plain
+    ],
+)
+def test_the_less_common_forms_of_each_refusal(command):
+    """Branches the main cases don't reach (ADR 0057's forms), each one refused."""
+    assert blocked(command) is not None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat <<'A'\n<<'B'\nb\nA\necho ok",  # a header inside an exempted body is body text
+        "echo 'it is fine' && cat <<'EOF'\n`git push -f origin x`\nEOF",  # plain, quote closed
+        "gh api graphql -f query='{ viewer { login } }' ;",  # a trailing operator
+    ],
+)
+def test_the_less_common_forms_that_must_pass(command):
+    assert blocked(command) is None
+
+
+def test_no_git_on_path_names_no_branch(tmp_path, monkeypatch):
+    """git missing (or failing) is "no branch", which never refuses wrongly."""
+    from guard_main import current_branch
+
+    monkeypatch.setenv("PATH", str(tmp_path / "nowhere"))
+    assert current_branch(tmp_path) is None
+
+
+def test_an_allowed_command_exits_0_with_nothing_on_stderr(capsys):
+    assert main(io.StringIO(call("git status"))) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_a_command_that_isnt_a_string_exits_0():
+    stdin = json.dumps({"tool_name": "Bash", "tool_input": {"command": 5}})
+    assert main(io.StringIO(stdin)) == 0
+
+
 def test_the_hook_runs_with_the_hosts_python_and_isolated(tmp_path):
     script = Path(__file__).resolve().parents[1] / "scripts" / "guard_main.py"
     result = subprocess.run(

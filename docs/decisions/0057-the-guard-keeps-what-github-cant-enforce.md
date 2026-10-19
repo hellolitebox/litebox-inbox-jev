@@ -46,9 +46,10 @@ The same as litebox-automations' ADR 0010, with the same `scripts/guard_main.py`
 
 ## Alternatives considered
 
-The same as litebox-automations' ADR 0010: keep the bash interpreter, which is 1,873 lines and
-missed force pushes; drop the hook, which leaves ruleset writes unguarded; or guard force pushes
-only in the hook, which covers sessions but not people or other tools.
+The same as litebox-automations' ADR 0010: keep the bash interpreter, 1,872 lines here (1,044 of the
+hook, 828 of tests), which missed force pushes; drop the hook, which leaves ruleset writes
+unguarded; or guard force pushes only in the hook, which covers sessions but not people or other
+tools.
 
 ## Consequences
 
