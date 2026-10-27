@@ -2087,3 +2087,47 @@ def test_ex50_a_correction_on_mail_sent_as_your_group_teaches_no_rule(spec):
     )
     assert "INBOX" in gmail.emails["2"].label_ids
     assert [st["subject"] for st in ctx.classifier.states][-1] == question
+
+
+# --- EX-51 -----------------------------------------------------------------------------------
+
+
+def test_ex51_spam_counts_toward_the_archive_group(cfg, account):
+    """EX-51 (docs/how-it-decides.md §5, §3.2 archive group condition 5, ADR 0058)."""
+    sig = make_signals(sender="liz@pitch.example", sender_domain="pitch.example")
+    jev = answer("cold_outreach", cold_outreach=0.70, spam=0.30)
+    jev.needs_reply = 0.87
+    d = decide(cfg, account, sig, jev, previous_contact=PreviousContact.NEVER)
+    assert d.archive and d.archive_group and not (d.spam or d.unsubscribe or d.low_confidence)
+    assert d.add_labels == ["Jev/Outreach"]
+
+    jev = answer("spam", spam=0.60, cold_outreach=0.40)
+    d = decide(cfg, account, sig, jev, previous_contact=PreviousContact.NEVER)
+    assert d.low_confidence and not (d.archive or d.spam or d.archive_group)
+    assert d.add_labels == ["Jev/Review", "Jev/Spam"]
+
+
+# --- EX-52 -----------------------------------------------------------------------------------
+
+
+def test_ex52_a_calendar_subject_without_an_invite_is_flagged_for_jev(spec):
+    """EX-52 (docs/how-it-decides.md §5, §4.7 phishing signals, ADR 0059)."""
+    ctx, gmail, account = spec
+    fake = "Accepted: 9564698766 x Tap Play @ Fri Oct 23, 2026 4pm (me@example.com) iMsr3G"
+    real = "Accepted: Kickoff @ Mon 10am"
+    gmail.emails = {
+        "1": email("1", "litebox@lookalike.example", fake),
+        "2": email("2", "Ana Diaz <ana@client.example>", real),
+    }
+    # As `Gmail.get` reads it: the iTIP part of Google Calendar's response
+    gmail.emails["2"].calendar_method = calendar_method(calendar_payload("REPLY", real))
+    ctx.classifier.answers[fake] = answer("spam", spam=0.95, notification=0.04)
+    ctx.classifier.answers[real] = answer("notification", notification=0.99)
+    triage.run_account(ctx, account, Mode.ACT)
+
+    states = {st["subject"]: st for st in ctx.classifier.states}
+    assert states[fake]["calendar_subject_without_invite"] is True
+    assert "calendar_subject_without_invite" not in states[real]
+    assert (_row(ctx, "1").category, _row(ctx, "1").spammed) == ("spam", True)
+    assert (_row(ctx, "2").category, _row(ctx, "2").archived) == ("notification", True)
+    assert "calendar_subject_without_invite" in ctx.cfg.by_key["spam"].criteria

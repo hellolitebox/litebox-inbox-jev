@@ -99,11 +99,11 @@ not once the PR is polished.
 ## Real mail before merging
 
 A change to classification (`categories.yaml` criteria, `classifier.py` state, body extraction, the
-signals Jev receives: `link_domains`, `reply_without_thread`, `sender_auth`), to what verifies a
-sender (DMARC, ARC and group trust in `signals.py`: `dmarc_passed`, `relay_author_auth`,
-`original_sender`, `resolve_relay`) or to a destructive action (archive, spam, unsubscribe,
-`unsubscribe-retry`) is checked against real mail before merging, not only with unit tests:
-`scripts/check_branch.sh` on the server, read-only (`docs/development.md` → "Checking a branch
-against real mail"). The PR's "Verification" gets the per-email check on recent mail and, for a
-classification change, the `--reference --quiet` summary with the branch's accuracy next to the
-stored baseline. Never post email bodies.
+signals Jev receives: `link_domains`, `reply_without_thread`, `calendar_subject_without_invite`,
+`sender_auth`), to what verifies a sender (DMARC, ARC and group trust in `signals.py`:
+`dmarc_passed`, `relay_author_auth`, `original_sender`, `resolve_relay`) or to a destructive action
+(archive, spam, unsubscribe, `unsubscribe-retry`) is checked against real mail before merging, not
+only with unit tests: `scripts/check_branch.sh` on the server, read-only (`docs/development.md` →
+"Checking a branch against real mail"). The PR's "Verification" gets the per-email check on recent
+mail and, for a classification change, the `--reference --quiet` summary with the branch's accuracy
+next to the stored baseline. Never post email bodies.

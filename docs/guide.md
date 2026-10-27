@@ -69,6 +69,8 @@ spot phishing:
 
 - whether the subject says "RE:" or "FW:" while the email doesn't actually answer any earlier
   message;
+- whether the subject looks like a calendar invitation or reply ("Invitation:", "Accepted:") while
+  the email carries no actual invitation, as real calendar emails always do;
 - which websites the links really go to (just the site names, never the full links);
 - whether Gmail's own checks confirm which domain (web address) the email was sent from. For an
   email that reached you through one of your company's own groups (when whoever runs Inbox Jev has
@@ -99,7 +101,9 @@ There is one exception, with its own exception:
 
 - **Torn between two "archive" kinds.** Say a tool's weekly summary is half notification, half
   newsletter. If Jev is about 90% sure that together it belongs in one of them, it is archived
-  anyway, under its best guess. It is never unsubscribed or moved to Spam this way.
+  anyway, under its best guess. A suspicion of spam counts too: a pitch Jev thinks is 70% outreach
+  and 30% spam is archived as outreach. It is never unsubscribed or moved to Spam this way, and when
+  spam is Jev's best guess the email still needs the full 90% to go to Spam.
 - **Unless it may need your reply.** If Jev thinks the sender expects a reply, and you have written
   to them before (or the email looks at all personal), it stays in your inbox for review instead.
 

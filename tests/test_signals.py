@@ -7,6 +7,7 @@ from fakes import AUTHOR_PASS, GMAIL_PASS, group_relay_headers
 
 from inbox_jev.signals import (
     AuthVerdicts,
+    calendar_subject_without_invite,
     dmarc_passed,
     domain_of,
     extract,
@@ -558,6 +559,55 @@ def test_reply_without_thread_is_false_for_a_real_reply(header):
 def test_reply_without_thread_ignores_empty_thread_headers():
     headers = {"in-reply-to": ["  "], "references": [""]}
     assert reply_without_thread("RE: Contract renewal", headers)
+
+
+@pytest.mark.parametrize(
+    "subject",
+    [
+        "Accepted: Kickoff @ Fri Oct 23, 2026 4pm - 4:45pm (EDT) (me@example.com) iMsr3G",
+        "Declined: Kickoff @ Mon",
+        "Tentatively accepted: Kickoff @ Mon",
+        "Invitation: Kickoff @ Mon 10am",
+        "Updated invitation: Kickoff @ Mon 10am",
+        "Invitation from an unknown sender: Kickoff @ Mon",
+        "Canceled event: Kickoff @ Mon",
+        "Cancelled event: Kickoff @ Mon",
+        "Tentative: Kickoff",
+        "Canceled: Kickoff",
+        "  accepted : Kickoff",
+        "Invitación: Kickoff @ lun",
+        "Invitacion actualizada: Kickoff",
+        "Aceptado: Kickoff",
+        "Aceptada provisionalmente: Kickoff",
+        "Rechazado: Kickoff",
+        "Evento cancelado: Kickoff",
+        "Accepted\uff1a Kickoff",
+    ],
+)
+def test_calendar_subject_without_invite_flags_a_calendar_prefix_with_no_itip_part(subject):
+    assert calendar_subject_without_invite(subject, None)
+
+
+@pytest.mark.parametrize("method", ["REPLY", "REQUEST", "CANCEL"])
+def test_calendar_subject_without_invite_is_false_with_an_itip_part(method):
+    assert not calendar_subject_without_invite("Accepted: Kickoff @ Mon", method)
+
+
+@pytest.mark.parametrize(
+    "subject",
+    [
+        "Re: Invitation from an unknown sender: Interview @ Wed",  # a person's reply
+        "Fwd: Invitation: Kickoff @ Mon",
+        "Kite Bot accepted their PostHog invitation",
+        "Invitation to Our Event in SF",
+        "Action needed: Accept your Workspace invitation",
+        "Updated: pricing",  # Outlook's "Updated:" is too generic
+        "Acceptance letter",
+        "",
+    ],
+)
+def test_calendar_subject_without_invite_ignores_other_subjects(subject):
+    assert not calendar_subject_without_invite(subject, None)
 
 
 def test_sender_auth_reads_gmails_verdicts():
