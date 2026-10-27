@@ -17,7 +17,7 @@ env:
   # test-min-python job checks): the tests also run on it.
   MIN_PYTHON_VERSION: "3.11"
   # uv for every job; bump together with the ghcr.io/astral-sh/uv tag in the Dockerfile (the test
-  # job checks they match).
+  # job checks they match) and UV_VERSION in release.yml (tests/test_workflows.py checks it).
   UV_VERSION: "0.13.5"
 
 concurrency:

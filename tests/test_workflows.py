@@ -1,12 +1,15 @@
-"""Which workflow and code the QA gate runs with its write token (ADR 0056). The repo is public, so
-the gate's `pull_request_target` run gets a write token on anyone's PR, forks' included: these
-tests pin the triggers, the permissions and the one checkout of `main`'s script."""
+"""The workflows' contracts. Which workflow and code the QA gate runs with its write token (ADR
+0056): the repo is public, so the gate's `pull_request_target` run gets a write token on anyone's
+PR, forks' included, and these tests pin the triggers, the permissions and the one checkout of
+`main`'s script. And the release builds with the uv and Python CI tested
+(`.claude/rules/pins.md`)."""
 
 import re
 
 from conftest import ROOT
 
-QA_GATE = ROOT / ".github" / "workflows" / "qa-gate.yml"
+WORKFLOWS = ROOT / ".github" / "workflows"
+QA_GATE = WORKFLOWS / "qa-gate.yml"
 
 
 def top_level_keys(block: str) -> list[str]:
@@ -63,3 +66,24 @@ def test_the_qa_gate_runs_mains_script_and_never_the_prs_code():
     assert "github.head_ref" not in code
     assert "refs/pull/" not in code
     assert "dependabot" not in code
+
+
+def workflow_env(name: str) -> dict[str, str]:
+    """A workflow's top-level `env:` block, quoted string values only."""
+    workflow = (WORKFLOWS / name).read_text()
+    env = re.search(r"^env:\n((?:(?:  .*)?\n)+)", workflow, re.MULTILINE)
+    assert env is not None, f"{name} has no top-level env block"
+    return dict(re.findall(r'^  ([A-Z_]+): "([^"]*)"', env.group(1), re.MULTILINE))
+
+
+def test_the_release_builds_with_the_uv_and_python_ci_tested():
+    """`release.yml` builds the package that goes to PyPI with its own copies of `UV_VERSION` and
+    `PYTHON_VERSION`. Dependabot bumps neither, and nothing ran a release before a mismatch
+    reached a tag: the published package would be built with a uv or Python CI never ran."""
+    ci, release = workflow_env("ci.yml"), workflow_env("release.yml")
+    for pin in ("UV_VERSION", "PYTHON_VERSION"):
+        assert pin in ci, f"ci.yml sets no {pin}"
+        assert release.get(pin) == ci[pin], (
+            f"release.yml's {pin} is {release.get(pin)!r} but ci.yml's is {ci[pin]!r}: bump them "
+            "together (.claude/rules/pins.md)"
+        )

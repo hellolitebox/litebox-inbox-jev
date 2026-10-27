@@ -11,8 +11,8 @@ on:
 permissions: {}
 
 env:
+  # Both equal to ci.yml's: the release builds with what CI tested (tests/test_workflows.py).
   PYTHON_VERSION: "3.14"
-  # Keep equal to UV_VERSION in ci.yml.
   UV_VERSION: "0.13.5"
 
 jobs:

@@ -94,9 +94,9 @@ No `qa-reviewer` or `dev-fixer`; the session reviews the bump itself:
    (`.claude/rules/pins.md` lists them), all in that same PR.
 
    - `uv` (Dependabot's `docker` entry bumping the Dockerfile's `ghcr.io/astral-sh/uv` stage, tag
-     and digest): `UV_VERSION` in `ci.yml` **and** in `release.yml`. CI checks only the first; the
-     second is what a release builds the package with, so open `release.yml` whenever `ci.yml`
-     changes.
+     and digest): `UV_VERSION` in `ci.yml` **and** in `release.yml`, the one a release builds the
+     package with. The `test` job's paired-pin step fails on the first, `tests/test_workflows.py` on
+     the second.
    - Python (the `python:3.x-slim` base-image bump): `PYTHON_VERSION` in `ci.yml` and in
      `release.yml`. A **minor** change (3.14 → 3.15) is a new runtime for the image and for every
      install: it leaves this lane for the full loop. A patch or digest bump stays.
