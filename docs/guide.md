@@ -69,6 +69,8 @@ spot phishing:
 
 - whether the subject says "RE:" or "FW:" while the email doesn't actually answer any earlier
   message;
+- whether the subject looks like a calendar invitation or reply ("Invitation:", "Accepted:") while
+  the email carries no actual invitation, as real calendar emails always do;
 - which websites the links really go to (just the site names, never the full links);
 - whether Gmail's own checks confirm which domain (web address) the email was sent from. For an
   email that reached you through one of your company's own groups (when whoever runs Inbox Jev has
