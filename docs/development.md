@@ -16,9 +16,9 @@ conventions are the same for a human.
 CI, a `qa-verdict` of `success` for the head commit, i.e. an `APPROVED` review, by someone with
 write access (ADR 0054), whose `Head:` is this commit or one that `update-branch` merged cleanly
 with `main` (ADR 0055), no unresolved review threads, branch up to date with `main`), then the
-squash merge. A Claude Code hook (`scripts/guard_main.py`) refuses `--admin`, any push to `main` and
-edits to the ruleset; the ruleset on GitHub enforces the gates either way. The details are in
-`CLAUDE.md`; the Dependabot and Public Suffix List lanes in `/ship`
+squash merge. A Claude Code hook (`scripts/guard_main.py`) refuses `--admin`, any push to `main`, a
+force push and edits to the rulesets (ADR 0057); the ruleset on GitHub enforces the gates either
+way. The details are in `CLAUDE.md`; the Dependabot and Public Suffix List lanes in `/ship`
 (`.claude/skills/ship/SKILL.md`).
 
 ## Checks
@@ -33,6 +33,26 @@ uv run pytest -q tests/test_policy.py  # one file; coverage only counts on the f
 Claude Code, a long task gets a finish line it can wait on:
 `/goal scripts/check.sh passes and the PR is open` for an implementation,
 `/goal PR <n> is merged by /ship or 5 rounds are exhausted` for the loop.
+
+Coverage fails under `fail_under` in `pyproject.toml`, a floor against forgotten tests that isn't
+raised by rule: lower it only in the PR that removes a redundant test, with the reason, never to get
+untested code through (`.claude/rules/tests.md`).
+
+## Python standards
+
+How the code is written
+([ADR 0056](decisions/0056-the-qa-gate-runs-only-mains-workflow-and-tests-by-risk.md)); the QA
+reviewer checks a change against it.
+
+| Concern | Standard |
+| -- | -- |
+| Design | Decisions are pure functions (`policy.py`); I/O lives in adapters behind small protocols (`gmail.py`, the classifier, the unsubscriber); composition over inheritance |
+| Types | Typed models at every boundary; `Any` only at an untyped SDK's edge (the Google client); completeness of an external answer validated explicitly |
+| Errors | Empty, incomplete, skipped and failed are distinct outcomes, each with a defined operational consequence (exit code, a `runs` row, a digest sent or not, an alert) |
+| Retries | One policy per operation, chosen by its idempotency; an outcome that can't be known (an answer lost after a write, such as an unsubscribe request) is handled, not retried blindly |
+| Resources | Context managers; a timeout on every call; bounded pagination, sizes and memory |
+| Persistence | A schema change to deployed data has a migration story in the PR (an explicit migration, or the deploy notes' steps) and a tested way back |
+| Tests | Each one protects a named rule, contract, incident or risk (`.claude/rules/tests.md`) |
 
 ## Releasing
 

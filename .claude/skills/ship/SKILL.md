@@ -116,11 +116,11 @@ No `qa-reviewer` or `dev-fixer`; the session reviews the bump itself:
    Read: <release notes read, and why nothing applies>
    ```
 
-4. Merge gates, then merge, as above. The gate's job is skipped on Dependabot's own pushes (their
-   token is read-only), so `qa-verdict` appears only after this comment, set by the
-   comment-triggered run; until then `gh pr checks` doesn't list it at all. A Dependabot rebase
-   after the review (auto-rebase on a `main` push, or `@dependabot rebase`) moves the head and
-   leaves it with no status at all: post a new review for the new head.
+4. Merge gates, then merge, as above. The gate runs on Dependabot's pushes too (its
+   `pull_request_target` run can post, ADR 0056), so `qa-verdict` is `pending` until this comment's
+   run turns it `success`. A Dependabot rebase after the review (auto-rebase on a `main` push, or
+   `@dependabot rebase`) moves the head and turns it back to `pending`: post a new review for the
+   new head.
 
 ## PSL lane
 

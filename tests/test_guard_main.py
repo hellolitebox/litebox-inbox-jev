@@ -1,828 +1,620 @@
-"""scripts/guard_main.py, the PreToolUse hook: blocks `--admin` merges, pushes to `main` and
-ruleset writes, and nothing else. The current-branch cases run against real git repositories."""
+"""scripts/guard_main.py (ADR 0057): the four refusals, the commands the workflow runs that must
+pass, and the cases where it refuses when in doubt. The rulesets enforce the rest on GitHub."""
 
 import io
 import json
 import subprocess
-import sys
 from pathlib import Path
 
-import guard_main
 import pytest
-from conftest import ROOT
-
-GUARD = ROOT / "scripts" / "guard_main.py"
-SETTINGS = ROOT / ".claude" / "settings.json"
-
-BLOCKED = [
-    "gh pr merge 12 --squash --delete-branch --admin",
-    "gh pr merge --admin 12",
-    "n=12; gh pr merge $n --squash --admin",
-    "gh pr merge 12 --squash \\\n  --admin",
-    "echo x; (gh pr merge 12 --admin)",
-    "git push origin main",
-    "git push -u origin main",
-    "git push origin HEAD:main",
-    "git push origin 'HEAD:main'",
-    "git push --force origin +HEAD:main",
-    "git push origin +main",
-    "git push -f origin +refs/heads/main",
-    "git push origin refs/heads/main",
-    "git push origin :main",
-    "git push --delete origin main",
-    "git -C /tmp/x push origin main",
-    "git --no-pager push origin main",
-    "git push -o ci.skip origin main",
-    "git push origin feat/x main",
-    "git fetch origin && git push origin main",
-    "cd /tmp && git push origin main",
-    "sudo git push origin main",
-    "sudo -n /usr/bin/git push origin main",
-    "sudo -u root git push origin main",
-    "sudo -n -u root -g staff env -u HOME git push origin main",
-    "time -f %e git push origin main",
-    "time -p git push origin main",
-    "exec -a name git push origin main",
-    "timeout 60 git push origin main",
-    "timeout -s KILL -k 5 60 git push origin main",
-    "timeout --signal=KILL 1m git push origin main",
-    "nice git push origin main",
-    "nice -n 5 git push origin main",
-    "nice --adjustment 5 git push origin main",
-    "nice --adjustment=5 git push origin main",
-    "command git push origin main",
-    "command -p git push origin main",
-    "sudo -u root timeout 60 nice -n 5 git push origin main",
-    "git push origin HEAD:heads/main",
-    "git push origin +HEAD:heads/main",
-    "git push origin @:main",
-    "sleep 1 & git push origin main",
-    "git fetch & gh pr merge 12 --admin",
-    "git push origin main 2>&1",
-    "git push origin main &> push.log",
-    "git push origin main >&2",
-    "git push --all origin",
-    "git push --mirror origin",
-    "git push --branches",
-    "git push origin --tags main",
-    "env GIT_TRACE=1 git push origin main",
-    'GIT_SSH_COMMAND="ssh -i k" git push origin main',
-    "exec git push origin main",
-    "(git push origin main)",
-    'echo "$(git push origin main)"',
-    "gh api -X PUT repos/o/r/rulesets/1 --input r.json",
-    "gh api repos/o/r/rulesets --method DELETE",
-    "gh api --method=PATCH repos/o/r/rulesets/1",
-    "gh api -XPUT repos/o/r/rulesets/1 --input r.json",
-    "gh api repos/o/r/rulesets --input r.json",
-    "gh api repos/o/r/rulesets -f name=x -F enforcement=active",
-    "gh api --input r.json orgs/o/rulesets",
-    # Operators inside quotes don't split the command (QA round 3 on #6).
-    "gh pr merge 6 --subject 'Sync Q&A' --admin",
-    "gh pr merge 6 --body 'R&D & ops' --admin",
-    "gh pr merge 6 --squash --subject 'feat(x): y' --admin",
-    "gh pr merge 6 --body 'a; b' --admin",
-    'gh pr merge 6 --body "a | b && c" --admin',
-    "gh api 'repos/o/r/rulesets/1?a=1&b=2' -X PUT",
-    "gh api 'repos/o/r/rulesets?a=1&b=2' -f name=x",
-    "git commit -m 'x' & git push origin main",
-    # A substitution's commands are judged, and the command around it stays whole.
-    'gh pr merge "$(cat pr.txt)" --admin',
-    "echo `git push origin main`",
-    'echo "`git push origin main`"',
-    # A heredoc's body is split blind, and what follows it is read again.
-    "cat <<EOF\nit's\nEOF\ngit push origin main",
-    "git commit -F - <<'EOF' && git push origin main\ndon't\nEOF",
-    "git commit -m \"$(cat <<'EOF'\nfix: don't\nEOF\n)\" && git push origin main",
-    "bash <<EOF\ngit push origin main\nEOF",
-    # A quote in a comment opens nothing.
-    "true # it's fine\ngit push origin main",
-    # A reserved word puts the next word in command position.
-    "for b in a; do git push origin main; done",
-    "if true; then gh pr merge 6 --admin; fi",
-    "! git push origin main",
-    "{ git push origin main; }",
-    # A quote left open: bash won't run it, and the hook splits blind.
-    "gh pr merge 12 --admin 'oops",
-    "echo 'x; git push origin main",
-    # An escaped character is never a comment start, an operator, a redirection or a quote, and a
-    # backslash-newline is a line continuation unless the backslash is itself escaped (QA round 4).
-    "gh pr merge 6 --subject Fix\\ #12 --admin",
-    "echo a\\;# ; gh pr merge 1 --admin",
-    "echo a\\>&gh pr merge 1 --admin",
-    "echo x 2\\>&gh pr merge 1 --admin",
-    "echo C:\\\\\ngit push origin main",
-    "git push \\\norigin main",
-    "gh pr merge 1 --ad\\\nmin",
-    "git push origin ma\\\nin",
-    "echo \\#x ; git push origin main",
-    "echo \\' ; git push origin main",
-    'echo \\" ; git push origin main',
-    "echo a # b \\\ngit push origin main",
-    "git push origin &\\\n>f main",
-    "echo 'a\\' ; git push origin main",
-    'echo "a\\\\" ; git push origin main',
-    'echo "\\\\$(git push origin main)"',
-    'gh pr merge 1 --subject "a\\\nb" --admin',
-    "bash <<EOF\ngit push \\\norigin main\nEOF",
-    "echo 'x\\\ngit push origin main",
-    'echo "x; git push origin main',
-    "bash << EOF\ngit push origin main\nEOF",
-    "bash <<EOF\ngit push origin main \\",
-    # A heredoc delimiter after `\<`: that is a redirection from a file, not a heredoc.
-    "cat \\<<EOF\ngit push origin main",
-    # `coproc` puts the next word in command position, its name before a compound command none.
-    "coproc git push origin main",
-    "coproc pusher { git push origin main; }",
-    "coproc { gh pr merge 1 --admin; }",
-    # After word text (an escape, a quoted string) a `#` is mid-word, no comment (QA round 5).
-    "echo \\;#; gh pr merge 1 --admin",
-    "echo ''#; gh pr merge 1 --admin",
-    'echo "x"#; gh pr merge 1 --admin',
-    # `$((…) )` is a substitution holding a subshell, not arithmetic.
-    "echo $((git push origin main) )",
-    "echo $( (git push origin main) )",
-    # Arithmetic holding a substitution runs its command (QA round 1 on #8).
-    "echo $(( $(git push origin main) + 1 ))",
-    "echo $(( `git push origin main` + 1 ))",
-    'echo "$(( $(git push origin main) ))"',
-    # A redirection is no argument, wherever it stands, and a quoted `>` is no redirection.
-    "2>/dev/null git push origin main",
-    "git push origin main>log",
-    "git push origin main 2>>log",
-    "gh pr merge 1 --body '>' --admin",
-    "gh pr merge 1 --body \\> --admin",
-    "gh pr merge 1 >out --admin",
-    # `--admin=<value>` turns it on unless the value is false (QA round 1 on inbox-jev#4).
-    "gh pr merge 12 --admin=true",
-    "gh pr merge 12 --admin=1",
-    "gh pr merge 12 --admin=TRUE",
-    "gh pr merge 12 --squash --admin=t",
-]
-ALLOWED = [
-    "gh pr merge 12 --squash --delete-branch",
-    "gh pr view 12 --json mergeStateStatus",
-    "git push origin feat/x",
-    "git push -u origin chore/claude-md-diet",
-    "git push origin HEAD:feat/x",
-    'git push origin HEAD:"$BR"',
-    "git push origin feat/x:feat/x",
-    "git switch main && git pull && git push origin feat/x",
-    "git push origin main-fix",
-    "git push origin feat/main-thing",
-    "git push -o ci.skip origin feat/x",
-    "sudo -u root git push origin feat/x",
-    "git log main..HEAD",
-    "command -v git",
-    "command -V git && git status",
-    "command -pv git",
-    "timeout 60 git push origin feat/x",
-    "nice -n 5 git push origin feat/x",
-    "git push origin HEAD:heads/feat/x",
-    "git push origin @:feat/x",
-    "git push origin feat/x 2>&1 | tail -1",
-    "git push origin feat/x &> push.log",
-    "sleep 1 & git push origin feat/x",
-    "gh api repos/o/r/rulesets",
-    "gh api repos/o/r/rulesets/1 --jq .name",
-    "gh api -X GET repos/o/r/rulesets -f per_page=5",
-    "gh api -X POST repos/o/r/issues -f title=x",
-    "gh api -X POST repos/o/r/issues/1/comments -f body='the rulesets stay as they are'",
-    "gh api -f body='never weaken the rulesets' -X POST repos/o/r/issues/1/comments",
-    "echo main && git status",
-    "true # git push origin main",
-    "# gh pr merge 12 --admin",
-    'echo "git push origin main is forbidden"',
-    "grep -rn 'git push origin main' docs/",
-    "cat <<'EOF'\nNever run: git push origin main.\n"
-    "- gh pr merge 12 --admin bypasses the gate\nEOF",
-    "python3 - <<'EOF'\nx = {\"gh api -X PUT rulesets\": 1}\nprint(x)\nEOF",
-    'git commit -m "$(cat <<EOF\nfix: stop a git push origin main\nEOF\n)"',
-    "git commit -m 'A & git push origin main later'",
-    "git commit -m 'fix A & B'",
-    "git commit -m 'feat(x): y; z | w'",
-    "curl 'https://x.test/?a=1&b=2'",
-    "gh api 'repos/o/r/rulesets?per_page=5&page=2'",
-    "echo \\; git push origin main",
-    "echo $'it\\'s' && git status",
-    # Escapes keep text inside its word or its quotes (QA round 4).
-    "echo a\\ \\& git push origin main",
-    "echo a\\|git push origin main",
-    'echo "\\$(git push origin main)"',
-    'echo "\\`git push origin main\\`"',
-    'echo "a \\" ; git push origin main"',
-    "git commit -m 'C:\\\\' && git push origin feat/x",
-    "echo $'a\\' ; git push origin main'",
-    "git commit -m 'x\\\n& git push origin main'",
-    "git push \\\n  origin feat/x",
-    "echo a \\\n# git push origin main",
-    # A here-string is no heredoc: the lines after it are read as commands, quotes included.
-    "grep x <<< \"$v\"\ngit commit -m 'A & git push origin main'",
-    "coproc pusher { git push origin feat/x; }",
-    "coproc git push origin feat/x",
-    # Arithmetic runs nothing, and its `<<` opens no heredoc (QA round 5).
-    "echo $((1<<2))\ngit commit -m 'A & git push origin main'",
-    "echo \"$((1<<2))\"\ngit commit -m 'A & git push origin main'",
-    "echo $(( (1<<2) + 1 ))\ngit commit -m 'A & git push origin main'",
-    "echo $(echo $((1<<2)))\ngit commit -m 'A & git push origin main'",
-    "gh pr merge 12 --admin=false --squash",
-    "gh pr merge 12 --squash --admin=0",
-    "git push origin feat/x>log 2>&1",
-    "ls",
-    "",
-]
-CURRENT_BRANCH_PUSHES = [
-    "git push",
-    "git push origin",
-    "git push origin HEAD",
-    "git push origin @",
-    "git push -u origin HEAD",
-    "timeout 60 git push -u origin HEAD",
-    "command git push",
-    # A destination made by a substitution is taken for the current branch (QA round 4).
-    'git push origin "$(git branch --show-current)"',
-    'git push -u origin "$(git rev-parse --abbrev-ref HEAD)"',
-    "git push -u origin `git branch --show-current`",
-    'git push origin HEAD:"$(git branch --show-current)"',
-    "git push origin $(git branch --show-current):refs/heads/$(git branch --show-current)",
-    "echo C:\\\\\ngit push",
-    # A redirection is no refspec (QA round 1 on #8).
-    "git push origin 2>&1",
-    "git push 2>/dev/null",
-    "git push origin >push.log 2>&1",
-    "git push origin &>push.log",
-]
+from guard_main import commands, main, reason_to_block
 
 
-def git(cwd: Path, *args: str) -> None:
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+@pytest.fixture(scope="module")
+def repo(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A git repository with `main` checked out and a `feat/x` branch, in a worktree of its own."""
+    root = tmp_path_factory.mktemp("repo")
+
+    def run(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+
+    run("init", "-q", "-b", "main")
+    run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init")
+    run("branch", "feat/x")
+    run("worktree", "add", "-q", str(root.parent / "feat"), "feat/x")
+    return root
 
 
-def repo(path: Path, branch: str) -> Path:
-    path.mkdir()
-    git(path, "init", "-q", "-b", branch)
-    return path
+def blocked(command: str, cwd: Path | None = None) -> str | None:
+    return reason_to_block(command, cwd)
 
 
-def commit(path: Path, *files: str) -> None:
-    for name in files:
-        (path / name).parent.mkdir(parents=True, exist_ok=True)
-        (path / name).write_text(name)
-    git(path, "add", "-A")
-    git(
-        path,
-        "-c",
-        "user.name=t",
-        "-c",
-        "user.email=t@x.io",
-        "commit",
-        "-q",
-        "--allow-empty",
-        "-m",
-        "x",
+# ── 1. Rulesets ─────────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh api -X PUT repos/o/r/rulesets/1 --input body.json",
+        "gh api --method=DELETE repos/o/r/rulesets/1",
+        "gh api -XPATCH repos/o/r/rulesets/1 -f enforcement=disabled",
+        "gh api repos/o/r/rulesets -f name=x",  # a body without a method is a POST
+        "gh api repos/o/r/rulesets --input=r.json",
+        "cd /tmp && gh api --method post orgs/o/rulesets -F x=1",
+    ],
+)
+def test_a_write_to_the_rulesets_is_refused(command):
+    assert "rulesets is forbidden" in str(blocked(command))
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh api repos/o/r/rulesets/25086576 --jq .rules",
+        "gh api -X GET repos/o/r/rulesets -f per_page=100",  # an explicit GET with a query
+        "gh api repos/o/r/pulls -f title=x",  # a write, but not to the rulesets
+        "gh ruleset view 1",
+    ],
+)
+def test_reading_the_rulesets_and_other_writes_pass(command):
+    assert blocked(command) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh api graphql -f query='mutation { deleteRepositoryRuleset(input: {}) { id } }'",
+        'gh api graphql -f query="mutation{updateRepositoryRuleset(input:{}){ruleset{id}}}"',
+        "gh api graphql -F query=@mutation.graphql",  # a file's query can't be seen
+        "gh api graphql --input body.json",
+        "gh api /graphql -f query='mutation { deleteRepositoryRuleset(input: {}) { id } }'",
+        "gh api https://api.github.com/graphql -f query='mutation{createRepositoryRuleset}'",
+        'gh api graphql -f query="$(cat mutation.graphql)"',  # a query from a substitution
+        'gh api graphql -f query="$Q"',  # or a variable: unseen
+        "gh api graphql -f 'query'=\"$Q\"",
+        'gh api graphql -f query=""$Q',
+        "gh api graphql -f query='mutation { delete'${R}'Ruleset(input:{}) { id } }'",
+        'gh api graphql -f query=\'{ repository(owner:"o", name:"r") { rulesets { id } } }\'',
+    ],
+)
+def test_a_ruleset_mutation_over_graphql_is_refused(command):
+    assert "rulesets is forbidden" in str(blocked(command))
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh api graphql -f query='{ viewer { login } }'",
+        # GraphQL's own variables, in single quotes (the review-thread mutation /ship runs)
+        "gh api graphql -f query='mutation($id: ID!) { resolveReviewThread(input: {threadId: $id})"
+        " { thread { id } } }' -F id=PRRT_x",
+    ],
+)
+def test_a_graphql_read_or_other_mutation_passes(command):
+    assert blocked(command) is None
+
+
+# ── 2. Force pushes ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git push --force origin feat/x",
+        "git push --force-with-lease",
+        "git push --force-with-lease=feat/x:abc origin feat/x",
+        "git push --force-if-includes origin feat/x",
+        "git push -f",
+        "git push -uf origin feat/x",
+        "git push origin +feat/x",
+        "git push origin +HEAD:feat/x",
+        "git fetch && git rebase origin/main && git push -q --force-with-lease 2>&1 | head",
+        "git -C ../other push --force origin x",
+        "sudo -u root git push -f origin x",
+        "FOO=1 timeout 30 git push --force origin x",
+        "echo ok; git push --force origin x",
+        "git status\ngit push --force origin x",  # a second line
+        "x=$(git push --force origin x)",  # a command substitution
+        "git push \\\n  --force origin x",  # a line continuation
+        "git push --force-w origin x",  # git reads an unambiguous prefix as the long option
+        "git push --force-with=x origin x",
+        "git push --forc origin x",
+    ],
+)
+def test_a_force_push_is_refused_to_any_branch(command):
+    assert "force push is forbidden" in str(blocked(command))
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git push -u origin feat/x",
+        "git push -q origin HEAD",
+        "git push origin --delete feat/old",
+        "git push -q origin --delete fix/x 2>&1 | grep -v '^remote:'",
+        "git push --tags",
+        "git push -o ci.skip origin feat/x",  # -o takes a value: not a cluster with f
+        "git commit -m 'never git push --force origin x'",  # quoted: one word of a commit
+        "echo git push --force",  # not in command position
+        "command -v git push --force",  # only looks git up
+    ],
+)
+def test_a_normal_push_and_mentions_pass(command, repo):
+    assert blocked(command, repo.parent / "feat") is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git -c remote.origin.push=+HEAD:refs/heads/x push",
+        "git -c remote.origin.mirror=true push origin",
+        "git -c alias.p='push -f' p origin x",
+        "git --config-env=alias.p=VAR p origin x",
+        "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.p GIT_CONFIG_VALUE_0='push -f' git p",
+        "GIT_CONFIG_PARAMETERS=\"'remote.origin.mirror'='true'\" git push",
+        "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.p; git p",
+        "set -a; GIT_CONFIG_COUNT=1; GIT_CONFIG_KEY_0=alias.p; git p",  # set -a exports them
+        "git --exec-path=/tmp/evil push origin x",
+        "GIT_EXEC_PATH=/tmp/evil git push origin x",
+        "git -c include.path=/tmp/evil push origin x",
+        "git config remote.origin.push +HEAD:refs/heads/x && git push",
+        "git config --global alias.p 'push -f'",
+    ],
+)
+def test_a_config_that_can_force_or_mirror_a_push_is_refused(command):
+    assert blocked(command) is not None
+
+
+# ── 3. gh pr merge --admin ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh pr merge 6 --squash --admin",
+        "gh pr merge --admin=true 6",
+        "gh pr merge 6 --admin=1",
+        "gh pr -R o/r merge 6 --admin",  # the repo flag before the subcommand
+        "gh -R o/r pr merge 6 --admin",
+    ],
+)
+def test_an_admin_merge_is_refused(command):
+    assert "--admin` is forbidden" in str(blocked(command))
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh pr merge 6 --squash",
+        "gh pr merge 6 --admin=false",
+        "gh pr merge 6 --admin=f",  # false, as gh reads it
+        "gh pr view 6 --json mergeable",
+    ],
+)
+def test_a_normal_merge_passes(command):
+    assert blocked(command) is None
+
+
+# ── 4. Pushes to main ───────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git push origin main",
+        "git push origin HEAD:main",
+        "git push origin feat/x:refs/heads/main",
+        "git push origin x:heads/main",
+        "git push --all origin",
+        "git push --mirror",
+        "git push --mirr origin",  # an abbreviation of --mirror
+        "git push origin 'refs/heads/*:refs/heads/*'",  # a glob pushes main too
+    ],
+)
+def test_a_push_to_main_is_refused_from_any_branch(command, repo):
+    assert "pushing to `main` is forbidden" in str(blocked(command, repo.parent / "feat"))
+
+
+@pytest.mark.parametrize("command", ["git push", "git push -u origin HEAD", "git push origin @"])
+def test_pushing_the_current_branch_from_main_is_refused(command, repo):
+    assert "pushing to `main`" in str(blocked(command, repo))
+    assert blocked(command, repo.parent / "feat") is None
+
+
+def test_cd_and_git_c_move_the_checkout_the_push_is_judged_from(repo):
+    feat = repo.parent / "feat"
+    assert "pushing to `main`" in str(blocked(f"cd {repo} && git push", feat))
+    assert "pushing to `main`" in str(blocked(f"git -C {repo} push", feat))
+    assert blocked(f"cd {feat} && git push", repo) is None
+
+
+# ── When in doubt ───────────────────────────────────────────────────────────────────────────────
+
+
+def test_a_heredoc_line_that_reads_as_a_forbidden_command_is_refused_with_a_hint():
+    command = "gh pr create --body-file - <<'EOF'\nSteps:\ngit push --force origin x\nEOF"
+    reason = str(blocked(command))
+    assert "force push is forbidden" in reason and "--body-file" in reason
+
+
+def test_an_unclosed_quote_still_finds_the_command():
+    assert "force push" in str(blocked("git push --force origin x 'unterminated"))
+
+
+def test_operators_split_commands_and_quotes_keep_words_whole():
+    assert commands("a && b | c; d & e || (f)") == [["a"], ["b"], ["c"], ["d"], ["e"], ["f"]]
+    assert commands("git commit -m 'A & B; C'") == [["git", "commit", "-m", "A & B; C"]]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Forms the bash-reading guard (before ADR 0057) refused, kept refused by reading words
+        # several ways: wrappers' options, substitutions in quotes and backquotes, arithmetic,
+        # comments, escapes, line continuations, a coproc, a leading redirection, a quoted `>`.
+        "sudo -n /usr/bin/git push origin main",
+        "sudo -n -u root -g staff env -u HOME git push origin main",
+        "time -f %e git push origin main",
+        "exec -a name git push origin main",
+        "nice --adjustment 5 git push origin main",
+        'echo "$(git push origin main)"',
+        "echo `git push origin main`",
+        "echo $(( `git push origin main` + 1 ))",
+        'echo "$(( $(git push origin main) ))"',
+        "true # it's fine\ngit push origin main",
+        "echo a # b \\\ngit push origin main",
+        "echo C:\\\\\ngit push origin main",
+        "gh pr merge 6 --subject Fix\\ #12 --admin",
+        "echo a\\;# ; gh pr merge 1 --admin",
+        "coproc pusher { git push origin main; }",
+        "2>/dev/null git push origin main",
+        "gh pr merge 1 --body '>' --admin",
+    ],
+)
+def test_the_forms_the_bash_reading_guard_refused_are_still_refused(command):
+    assert blocked(command) is not None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh api -X POST repos/o/r/issues/1/comments -f body='the rulesets stay as they are'",
+        "git commit -m 'A & git push origin main later'",
+        "gh pr merge 6 --squash --subject 'Sync Q&A'",
+        "git -c push.default=current push -u origin feat/x",  # harmless push config
+        "git -c user.name=t -c user.email=t@t commit -m x",
+        "git log --grep GIT_CONFIG",  # a word, not an assignment
+        "git commit -F - <<'EOF'\nfix: refuse `git push --force` (#58, a session's push)\nEOF",
+        "gh pr create --title \"fix: x (#61)\" --body-file - <<'EOF'\n"
+        "On #58 `git push -f` ran.\nEOF",
+        "git commit -m 'docs: link #58'",
+    ],
+)
+def test_a_forbidden_command_quoted_as_text_passes(command):
+    assert blocked(command) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh pr create --body-file - <<'EOF'\nIt now refuses `git push --force origin x`.\nEOF",
+        "cat > /tmp/review.md <<'EOF'\n1. `gh api -X PUT repos/o/r/rulesets/1` passed.\nEOF",
+        # a plain rest of the header line: the workflow's `>/dev/null && echo ok`
+        "gh pr comment 61 --body-file - <<'EOF' >/dev/null && echo ok\n"
+        "`gh alias set rs 'api -X DELETE …/rulesets/1'` is refused.\nEOF",
+    ],
+)
+def test_a_markdown_code_span_where_bash_expands_nothing_passes(command):
+    """Single quotes and a quoted heredoc's body are text to bash: a backquoted command there is
+    a Markdown code span, not a substitution."""
+    assert blocked(command) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Each runs the push in bash (checked with an `echo` in its place): a quoting form the
+        # scan doesn't model, so nothing is exempted.
+        "echo $'\\'' \"$(git push -f origin x)\" \\'",
+        "true # it's\n\"$(git push -f origin x)\" '",
+        "cat <<'EOF' >/dev/null; echo \"$(git push -f origin x)\"\nbody\nEOF",
+        'cat <<"E"OF\nbody\nEOF\necho "$(git push -f origin x)"',
+        # Round 3: a `<<'EOF'` in a comment or a string, a comment after `;`, nested quotes.
+        "true # <<'EOF'\necho \"$(git push -f origin x)\"\nEOF",
+        "echo \"<<'EOF'\n$(git push -f origin x)\nEOF\"",
+        "true;# it's\n\"$(git push -f origin x)\" '",
+        'echo "$(echo "\'")" "$(git push -f origin x)" "$(echo "\'")"',
+    ],
+)
+def test_a_quoting_form_the_scan_doesnt_model_exempts_nothing(command):
+    assert "force push" in str(blocked(command))
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Round 4: an earlier unquoted heredoc, two on a line, a comment right after `)`.
+        "cat <<EOF\n<<'X'\n$(git push -f origin x)\nX\nEOF",
+        "cat <<A <<'B'\n$(git push -f origin x)\nA\nb\nB",
+        "(true)# <<'X'\necho \"$(git push -f origin x)\"\nX",
+    ],
+)
+def test_an_earlier_heredoc_or_a_comment_after_a_paren_exempts_nothing(command):
+    assert "force push" in str(blocked(command))
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Round 5: in `((…))` a `<<` is a shift, and bash runs the backquote before its error.
+        "(( 1 <<'X'\n`git push -f origin x`\nX",
+        "(( 1 <<'X'\n`gh api -X DELETE repos/o/r/rulesets/1`\nX",
+    ],
+)
+def test_a_shift_in_arithmetic_isnt_taken_for_a_heredoc(command):
+    assert blocked(command) is not None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh alias set rs 'api -X DELETE repos/o/r/rulesets/1' && gh rs",
+        "gh alias set --shell rs 'gh api -X DELETE repos/o/r/rulesets/1'",
+        "gh alias import aliases.yml",
+    ],
+)
+def test_setting_a_gh_alias_is_refused(command):
+    assert "alias" in str(blocked(command))
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'gh api graphql -fquery="$Q"',  # gh accepts the attached form
+        "gh api graphql -f qu''ery=\"$Q\"",
+        'gh api graphql -f qu"ery"="$Q"',
+        'gh api graphql -f quer\\y="$Q"',
+    ],
+)
+def test_a_graphql_query_not_written_as_one_literal_is_refused(command):
+    assert "rulesets is forbidden" in str(blocked(command))
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "set -a; read GIT_CONFIG_COUNT <<< 1; git p",
+        "set -ae",
+        "set -o allexport",
+    ],
+)
+def test_set_a_is_refused(command):
+    assert blocked(command) is not None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Round 6: a decoy literal can't stand in for an unseen query, nor a `#` in the field.
+        "echo -f query='{}' ; gh api graphql -f query=\"$Q\"",
+        "gh api graphql -f query=\"$Q # -f query='x' \"",
+        "cat <<'EOF'\n-f query='{}'\nEOF\ngh api graphql -f query=\"$Q\"",
+        # An endpoint built from a variable, for a write: the hook can't see it's a ruleset.
+        'gh api -X DELETE "$E"',
+        "E=graphql; gh api \"$E\" -f query='{ viewer { login } }'",
+        "builtin set -a",
+        "command set -a",
+    ],
+)
+def test_an_unseen_query_or_endpoint_is_refused_whatever_stands_beside_it(command):
+    assert blocked(command) is not None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Round 7: an unquoted substitution as the endpoint, a query string on the endpoint,
+        # nested quotes merging words. One rule covers them: in a write or a GraphQL call, an
+        # expansion may stand only in a plain field (`-F owner="$OWNER"`).
+        "gh api $(echo repos/o/r/rulesets) -f name=x -f enforcement=active",
+        "gh api $(echo repos/o/r/rulesets/1) --input b.json",
+        "gh api $(echo graphql) -f query='mutation { deleteRepositoryRuleset(input:{}) { id } }'",
+        "gh api 'graphql?a=1' -f query=\"$Q\"",
+        # a nested substitution keeps the call whole
+        "gh api $(echo $(echo repos/o/r)/rulesets) -f name=x",
+        'gh api graphql -F owner="$(echo "\'")" -f query="$Q" -F x="$(echo "\'")"',
+        'gh api -X PATCH "repos/o/r/issues/comments/$ID" -f body="$BODY"',  # a write: literal
+    ],
+)
+def test_an_expansion_outside_a_plain_field_in_a_gh_api_write_is_refused(command):
+    assert "rulesets is forbidden" in str(blocked(command))
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd \"$WT\" && gh api graphql -f query='{ viewer { login } }'",  # $WT is another command's
+        'gh api "repos/$R/pulls/$N" --jq .head.sha',  # a read from a variable endpoint
+        'gh api "repos/$(gh repo view --json nameWithOwner -q .nameWithOwner)/pulls" --jq length',
+    ],
+)
+def test_variables_elsewhere_or_in_a_read_pass(command):
+    assert blocked(command) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Round 8: quoting the readings misread makes a whole command disappear from them; the
+        # quote-blind reading still sees it (bash runs each of these).
+        "# it's\ngh api -X DELETE repos/o/r/rulesets/1\n# '",
+        "echo $'\\'' ; gh api -X DELETE repos/o/r/rulesets/1 ; echo '",
+        'echo "$(echo "\'")"; gh api -X DELETE repos/o/r/rulesets/1; echo "$(echo "\'")"',
+        "# it's\ngit push --force origin x\n# '",
+        # and `gh api` written with quotes or a backslash is still `gh api`
+        "gh 'api' $(echo repos/o/r/rulesets) -f name=x",
+        'gh "api" $(echo repos/o/r/rulesets) -f name=x',
+        "g\\h a\\pi $(echo repos/o/r/rulesets) -f name=x",
+        # Round 9: `$'…'` and `$"…"` are quoting too, `$'\\x67\\x68'` spelling `gh`
+        "$'gh' api -X DELETE repos/o/r/rulesets/1",
+        '$"gh" api -X DELETE repos/o/r/rulesets/1',
+        "$'\\x67\\x68' api -X DELETE repos/o/r/rulesets/1",
+        "$'git' push --force origin x",
+        "git push $'--force' origin x",
+        # Round 10: a NUL ends the word (`$'gh\\0'` is `gh`), however it is written
+        "$'gh\\0' api -X DELETE repos/o/r/rulesets/1",
+        "$'gh\\x0' api -X DELETE repos/o/r/rulesets/1",
+        "$'gh\\x00' api -X DELETE repos/o/r/rulesets/1",
+        "gh $'api\\0' -X DELETE repos/o/r/rulesets/1",
+        "$'git\\0' push --force origin x",
+        "git push $'--force\\0' origin x",
+        "$'gh\\c@' api -X DELETE repos/o/r/rulesets/1",
+        "$'\\147\\150' api -X DELETE repos/o/r/rulesets/1",  # octal
+        "$'\\u0067h' api -X DELETE repos/o/r/rulesets/1",
+        # Round 11: zsh ends the word at `\\x` with no digit and at `\\C-@`
+        "$'gh\\x' api -X DELETE repos/o/r/rulesets/1",
+        "$'gh\\C-@' api -X DELETE repos/o/r/rulesets/1",
+        "gh $'api\\x' -X DELETE repos/o/r/rulesets/1",
+        "$'git\\x' push --force origin x",
+        "git push $'--force\\x' origin x",
+        "git push $'--force\\C-@' origin x",
+        "$'g\\h' api -X DELETE repos/o/r/rulesets/1",  # zsh drops an unknown escape's backslash
+    ],
+)
+def test_quoting_misread_cant_hide_a_ruleset_write_or_a_force_push(command):
+    assert blocked(command) is not None
+
+
+def test_a_review_reply_that_mentions_a_ruleset_passes():
+    """dev-fixer's reply mutation: the word is in a field's text, not in the query."""
+    command = (
+        "gh api graphql -f query='mutation($id: ID!, $body: String!) "
+        "{ addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $id, body: $body})"
+        " { comment { id } } }' -F id=PRRT_x -f body='The second ruleset blocks it.'"
     )
+    assert blocked(command) is None
 
 
-def repo_with_branches(path: Path, branch: str, *others: str) -> Path:
-    """A repository on `branch`, with one commit and the local branches `others`."""
-    repo(path, branch)
-    commit(path, "src/a.py")
-    for other in others:
-        git(path, "branch", other)
-    return path
+def test_nested_quotes_cant_hide_a_ruleset_write_either():
+    command = 'echo "$(echo "\'")" "$(gh api -X DELETE repos/o/r/rulesets/1)" "$(echo "\'")"'
+    assert "rulesets is forbidden" in str(blocked(command))
 
 
-@pytest.mark.parametrize("command", BLOCKED)
-def test_blocked(command):
-    assert guard_main.reason_to_block(command, None) is not None
-
-
-@pytest.mark.parametrize("command", ALLOWED)
-def test_allowed(command):
-    assert guard_main.reason_to_block(command, None) is None
-
-
-@pytest.mark.parametrize("command", CURRENT_BRANCH_PUSHES)
-def test_push_of_the_current_branch_is_blocked_on_main(command, tmp_path):
-    assert guard_main.reason_to_block(command, repo(tmp_path / "r", "main")) is not None
-
-
-@pytest.mark.parametrize("command", CURRENT_BRANCH_PUSHES)
-def test_push_of_the_current_branch_passes_on_a_feature_branch(command, tmp_path):
-    assert guard_main.reason_to_block(command, repo(tmp_path / "r", "feat/x")) is None
-
-
-@pytest.mark.parametrize("command", ["git push --tags", "git push origin --tags"])
-def test_tags_without_a_refspec_push_no_branch_even_on_main(command, tmp_path):
-    on_main = repo(tmp_path / "r", "main")
-    assert guard_main.reason_to_block(command, on_main) is None
-    assert guard_main.reason_to_block("git push origin --tags HEAD", on_main) is not None
-
-
-def test_cd_in_the_command_moves_the_branch_lookup(tmp_path):
-    on_main = repo(tmp_path / "a", "main")
-    on_feature = repo(tmp_path / "b", "feat/x")
-    assert guard_main.reason_to_block(f"cd {on_feature} && git push", on_main) is None
-    assert guard_main.reason_to_block(f"cd {on_main} && git push", on_feature) is not None
-    assert guard_main.reason_to_block("cd b && git push", tmp_path) is None
-    assert guard_main.reason_to_block("cd a && git push", tmp_path) is not None
-
-
-def test_cd_in_a_subshell_moves_the_branch_lookup(tmp_path):
-    on_main = repo(tmp_path / "a", "main")
-    on_feature = repo(tmp_path / "b", "feat/x")
-    assert guard_main.reason_to_block(f"(cd {on_feature} && git push)", on_main) is None
-    assert guard_main.reason_to_block(f"(cd {on_main} && git push)", on_feature) is not None
-
-
-def test_git_dash_c_moves_the_branch_lookup_for_that_push_only(tmp_path):
-    on_main = repo(tmp_path / "a", "main")
-    on_feature = repo(tmp_path / "b", "feat/x")
-    assert guard_main.reason_to_block(f"git -C {on_feature} push", on_main) is None
-    assert guard_main.reason_to_block(f"git -C {on_main} push", on_feature) is not None
-    assert guard_main.reason_to_block("git -C b push", tmp_path) is None
-    assert guard_main.reason_to_block("git -C a push", tmp_path) is not None
-    assert guard_main.reason_to_block("git -C a -C ../b push", tmp_path) is None
-    assert guard_main.reason_to_block(f"git -C {on_main} fetch && git push", on_feature) is None
+def test_a_code_span_in_single_quotes_is_refused_rather_than_guessed():
+    """Single quotes aren't exempted (ADR 0057): their reading was the bypass. A text naming a
+    forbidden command in a code span goes in a file or a quoted heredoc, as the message says."""
+    reason = blocked("git commit -m 'Refuse `git push --force-with-lease` (ADR 0057)'")
+    assert reason is not None and "--body-file" in reason
 
 
 @pytest.mark.parametrize(
     "command",
     [
-        "git push origin HEAD:backup/$(date +%F)",
-        'git push origin "feat/$(date +%s)"',
-        "git push origin HEAD:refs/heads/backup/$(date +%F)",
+        'git commit -m "see `git push --force origin x`"',  # double quotes expand it
+        "cat <<EOF\n$(git push --force origin x)\nEOF",  # an unquoted heredoc expands it
     ],
 )
-def test_destination_only_containing_a_substitution_is_its_own_branch(command, tmp_path):
-    assert guard_main.reason_to_block(command, repo(tmp_path / "r", "main")) is None
+def test_a_substitution_where_bash_expands_it_is_refused(command):
+    assert "force push" in str(blocked(command))
 
 
-def test_substitution_refspec_on_a_feature_branch_passes(tmp_path):
-    on_feature = repo(tmp_path / "r", "feat/x")
-    command = 'git push -u origin "$(git branch --show-current)"'
-    assert guard_main.reason_to_block(command, on_feature) is None
-    assert guard_main.reason_to_block(command, None) is None  # no branch known
+# ── The hook's contract ─────────────────────────────────────────────────────────────────────────
+
+
+def call(command: str, cwd: str | None = None, tool: str = "Bash") -> str:
+    return json.dumps({"tool_name": tool, "tool_input": {"command": command}, "cwd": cwd})
+
+
+def test_a_refusal_exits_2_with_the_reason_on_stderr(capsys):
+    assert main(io.StringIO(call("git push --force origin x"))) == 2
+    assert capsys.readouterr().err.startswith("scripts/guard_main.py blocked the command")
+
+
+@pytest.mark.parametrize(
+    "stdin", ["not json", "[]", call("git push -f", tool="Edit"), '{"tool_name": "Bash"}']
+)
+def test_anything_else_exits_0(stdin):
+    assert main(io.StringIO(stdin)) == 0
+
+
+@pytest.mark.parametrize(
+    ("body", "word"),
+    [
+        (r"\x67\x68", "gh"),
+        (r"gh\0 api", "gh"),
+        (r"\147\150", "gh"),
+        (r"\u0067h", "gh"),
+        (r"a\tb", "a\tb"),
+        (r"\q", r"\q"),  # an unknown escape keeps its backslash
+        (r"gh\x api", "gh"),  # cut where bash and zsh may differ
+        (r"gh\C-@ api", "gh"),
+        (r"gh\c@", "gh"),
+    ],
+)
+def test_ansi_c_strings_decode_as_bash_does(body, word):
+    from guard_main import _bash_escapes
+
+    assert _bash_escapes(body) == word
 
 
 @pytest.mark.parametrize(
     "command",
     [
-        "git checkout main; git push",
-        "git switch main && git pull && git push",
-        "git checkout -q main && git push -u origin HEAD",
-        "git switch -c main && git push",
-        "git checkout -B main origin/main && git push",
-        "git switch --create=main && git push",
-        "git switch -cmain && git push",
-        "git -C . switch main && git push",
-        # `main` counts even where it isn't a local branch yet (git creates it from origin/main).
-        "git checkout main && git push",
-        "git checkout --track origin/main && git push",
-        "git switch -t origin/main && git push",
-        # A redirection hides no switch (QA round 1 on #8).
-        "git checkout main 2>&1 && git push",
-        "git checkout main >/dev/null 2>&1; git push",
-        "git switch main 2>/dev/null; git push",
+        "x=$( $( $( $(git push -f origin x) ) ) )",  # deeper than the scan's recursion
+        "git push -- origin +x",  # a refspec after `--`
+        "gh api graphql --field=query='mutation { deleteRepositoryRuleset(input:{}) { id } }'",
+        "gh api graphql -fquery='mutation { deleteRepositoryRuleset(input:{}) { id } }'",
+        "gh pr --repo=o/r merge 1 --admin",
+        "echo a\\ b; cat <<'EOF'\n`git push -f origin x`\nEOF",  # a backslash before: not plain
     ],
 )
-def test_a_switch_to_main_earlier_in_the_command_is_seen_by_the_push(command, tmp_path):
-    assert guard_main.reason_to_block(command, repo(tmp_path / "r", "feat/x")) is not None
+def test_the_less_common_forms_of_each_refusal(command):
+    """Branches the main cases don't reach (ADR 0057's forms), each one refused."""
+    assert blocked(command) is not None
 
 
 @pytest.mark.parametrize(
     "command",
     [
-        "git switch -c fix/x && git push -u origin HEAD",
-        "git checkout -b fix/x origin/main && git push",
-        "git switch feat/y && git push",
-        "git checkout feat/y && git push origin HEAD",
-        "git checkout feat/y 2>&1 && git push origin HEAD",
-        "git switch --orphan=gh-pages && git push",
-        "git checkout --track origin/feat/y && git push",
-        "git checkout -b fix/x &&\n  git push -u origin HEAD",
-        'git switch -c fix/x && git commit -m "$(cat msg)" && git push -u origin HEAD',
-        # A `;`, a newline or a heredoc line inside a substitution ends no outer chain: the push
-        # still runs only if the switch succeeded (QA round 2 on #8).
-        "git checkout -b feat/x && git commit -m \"$(cat <<'EOF'\nSubject\n\nBody line one.\n"
-        'Co-Authored-By: A <a@example.com>\nEOF\n)" && git push -u origin HEAD',
-        "git checkout -b feat/x && git add -A && git commit -m \"$(cat <<'EOF'\nSubject\nEOF\n)\" "
-        "&& git push -u origin HEAD 2>&1 | tail -5",
-        'git switch -c q && git commit -m "$(echo a; echo b)" && git push -u origin HEAD',
-        'git switch -c q && git commit -m "$(echo a\necho b)" && git push -u origin HEAD',
-        # A `;` inside a substitution unsettles only the switches made inside it.
-        'git switch -c a && echo "$(git switch -c b; git push)"',
-        # Outside a substitution a `;` after the switch still ends the chain (below).
-        "git switch -c fix/x; git switch -c fix/y && git push",  # pushed only if fix/y is
-        # A branch the command doesn't name is unknown: only an explicit `main` is refused.
-        "git switch - && git push",
-        "git checkout - && git push",
-        "git switch --detach v1 && git push",
+        "cat <<'A'\n<<'B'\nb\nA\necho ok",  # a header inside an exempted body is body text
+        "echo 'it is fine' && cat <<'EOF'\n`git push -f origin x`\nEOF",  # plain, quote closed
+        "gh api graphql -f query='{ viewer { login } }' ;",  # a trailing operator
+        # a harmless query in the other spellings of the field is not refused
+        "gh api graphql --field=query='{ viewer { login } }'",
+        "gh api graphql -fquery='{ viewer { login } }'",
     ],
 )
-def test_a_switch_away_from_main_earlier_in_the_command_is_seen_by_the_push(command, tmp_path):
-    on_main = repo_with_branches(tmp_path / "r", "main", "feat/y")
-    assert guard_main.reason_to_block(command, on_main) is None
+def test_the_less_common_forms_that_must_pass(command):
+    assert blocked(command) is None
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        "git checkout -b fix/x; git push -u origin HEAD",
-        "git switch -c fix/x\ngit push -u origin HEAD",
-        "git switch -c fix/x || git push -u origin HEAD",
-        "git switch -c fix/x | cat; git push -u origin HEAD",
-        "(git switch -c fix/x); git push -u origin HEAD",
-        "git switch -c a && git switch -c b; git push",
-        "git switch -c fix/x; git switch -c fix/y; git push",
-        # Inside a substitution too, a `;` lets the push run after a failed switch, and the
-        # command around a substitution runs whatever the substitution's status.
-        'echo "$(git checkout -b fix/x; git push -u origin HEAD)"',
-        'git commit -m "$(git switch -c fix/x)" && git push -u origin HEAD',
-    ],
-)
-def test_a_switch_that_may_have_failed_leaves_the_old_branch_possible(command, tmp_path):
-    """After `;`, a newline, a pipe or `||` the push runs even if the switch failed (`fix/x`
-    taken), so the branch before the switch is judged too (QA round 1 on #8)."""
-    assert guard_main.reason_to_block(command, repo(tmp_path / "r", "main")) is not None
+def test_no_git_on_path_names_no_branch(repo, tmp_path, monkeypatch):
+    """git missing (or failing) is "no branch", which never refuses wrongly: in a repository on
+    `main`, which git would name."""
+    from guard_main import current_branch
+
+    assert current_branch(repo) == "main"
+    monkeypatch.setenv("PATH", str(tmp_path / "nowhere"))
+    assert current_branch(repo) is None
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        "git checkout README.md && git push",
-        "git checkout -- feat/y && git push",
-        "git checkout feat/y -- a.txt && git push",
-        "git checkout feat/y a.txt && git push",
-        # Forms the hook can't read as a branch keep the current one (QA round 1 on #8).
-        "git checkout && git push",
-        "git checkout -p && git push",
-        "git checkout --patch feat/y && git push",
-        "git checkout src/b.py && git push",  # deleted from the worktree
-        "git checkout '*.py' && git push",
-        "git checkout ':(top)src' && git push",
-        "git checkout remote-only && git push",  # no local branch of that name
-        "git switch && git push",
-        "git switch feat/y extra && git push",
-    ],
-)
-def test_a_checkout_of_files_switches_no_branch(command, tmp_path):
-    on_main = repo_with_branches(tmp_path / "r", "main", "feat/y")
-    commit(on_main, "README.md", "src/b.py")
-    (on_main / "src" / "b.py").unlink()
-    assert guard_main.reason_to_block(command, on_main) is not None
+def test_an_allowed_command_exits_0_with_nothing_on_stderr(capsys):
+    assert main(io.StringIO(call("git status"))) == 0
+    assert capsys.readouterr().err == ""
 
 
-def test_a_switch_moves_the_branch_of_its_own_directory_only(tmp_path):
-    on_main = repo(tmp_path / "a", "main")
-    on_feature = repo(tmp_path / "b", "feat/x")
-
-    def blocked(command: str, cwd: Path) -> bool:
-        return guard_main.reason_to_block(command, cwd) is not None
-
-    assert not blocked(f"git -C {on_main} switch feat/y && git push", on_main)
-    assert blocked(f"git -C {on_feature} switch feat/y && git push", on_main)
-    assert blocked(f"cd {on_feature} && git switch main && git push", on_main)
-    assert not blocked(f"git switch main; cd {on_feature} && git push", on_main)
-    assert not blocked("cd a && git switch feat/y && cd ../a && git push", tmp_path)
+def test_a_command_that_isnt_a_string_exits_0():
+    stdin = json.dumps({"tool_name": "Bash", "tool_input": {"command": 5}})
+    assert main(io.StringIO(stdin)) == 0
 
 
-def test_a_switch_moves_the_branch_of_its_whole_worktree(tmp_path):
-    """A switch in a subdirectory moves the branch of the repository (QA round 1 on #8)."""
-    on_feature = repo_with_branches(tmp_path / "r", "feat/x", "main")
-    command = "cd src && git checkout main && cd .. && git push"
-    assert guard_main.reason_to_block(command, on_feature) is not None
-    assert guard_main.reason_to_block("git -C src switch main && git push", on_feature) is not None
-    assert guard_main.reason_to_block("cd src && git push", on_feature) is None
-
-
-@pytest.mark.parametrize(
-    ("args", "branch"),
-    [
-        (["switch", "feat/x"], guard_main.BranchSwitch("feat/x")),
-        (["switch", "-c", "x", "origin/main"], guard_main.BranchSwitch("x")),
-        (["switch", "-c"], guard_main.BranchSwitch(None)),
-        (["switch"], None),
-        (["switch", "-"], guard_main.BranchSwitch(None)),
-        (["checkout", "-"], guard_main.BranchSwitch(None)),
-        (["checkout"], None),
-        (["checkout", "main"], guard_main.BranchSwitch("main")),
-        (["checkout", "feat/x"], None),  # not known as a branch without a repository
-        (["checkout", "-t", "origin/feat/x"], guard_main.BranchSwitch("feat/x")),
-        (["switch", "--track=direct", "origin/feat/x"], guard_main.BranchSwitch("feat/x")),
-        (["checkout", "--pathspec-from-file=f"], None),
-        (["checkout", "-bx"], guard_main.BranchSwitch("x")),
-        (["checkout", "--orphan=x"], guard_main.BranchSwitch("x")),
-        (["checkout", "-d", "v1"], guard_main.BranchSwitch(None)),
-        (["checkout", "--", "a"], None),
-        (["status"], None),
-        (["push", "origin", "main"], None),
-    ],
-)
-def test_branch_switch(args, branch):
-    git = guard_main.git_subcommand(args)
-    assert git is not None
-    assert guard_main.branch_switch(git, None) == branch
-
-
-def test_unknown_directory_names_no_branch(tmp_path):
-    assert guard_main.current_branch(None) is None
-    assert guard_main.current_branch(tmp_path) is None  # not a repository
-    assert guard_main.reason_to_block("git push", tmp_path) is None
-    on_main = repo(tmp_path / "r", "main")
-    assert guard_main.reason_to_block('cd "$WT" && git push', on_main) is None
-    assert guard_main.reason_to_block('git -C "$WT" push', on_main) is None
-    assert guard_main.reason_to_block("cd missing && git push", on_main) is None
-
-
-def test_detached_head_names_no_branch(tmp_path):
-    path = repo(tmp_path / "r", "main")
-    git(
-        path,
-        "-c",
-        "user.name=t",
-        "-c",
-        "user.email=t@x.io",
-        "commit",
-        "-q",
-        "--allow-empty",
-        "-m",
-        "x",
-    )
-    git(path, "checkout", "-q", "--detach")
-    assert guard_main.current_branch(path) is None
-
-
-def test_command_words_skip_assignments_and_wrappers():
-    assert guard_main.command_words("GIT_TRACE=1 sudo -n env -i git push") == ["git", "push"]
-    assert guard_main.command_words('X="a b" git status') == ["git", "status"]
-    assert guard_main.command_words("sudo -u root git push") == ["git", "push"]
-    assert guard_main.command_words("time -p git push") == ["git", "push"]
-    assert guard_main.command_words("timeout -k 5 60 git push") == ["git", "push"]
-    assert guard_main.command_words("timeout 60 nice -n 5 git push") == ["git", "push"]
-    assert guard_main.command_words("command -p git push") == ["git", "push"]
-    assert guard_main.command_words("command -v git") == []
-    assert guard_main.command_words("command -V git") == []
-    assert guard_main.command_words("- git push origin main") == [
-        "-",
-        "git",
-        "push",
-        "origin",
-        "main",
-    ]
-    assert guard_main.command_words("echo 'a b") == ["echo", "a", "b"]  # a quote left open
-    assert guard_main.command_words('"') == []
-    assert guard_main.command_words("X=1") == []
-    assert guard_main.command_words("  ") == []
-
-
-@pytest.mark.parametrize(
-    ("command", "segments"),
-    [
-        ("a && b", ["a ", " b"]),
-        ("a || b; c | d |& e", ["a ", " b", " c ", " d ", " e"]),
-        ("a & b", ["a ", " b"]),
-        ("a 2>&1", ["a 2>&1"]),
-        ("a &> f", ["a &> f"]),
-        ("a >&2", ["a >&2"]),
-        ("a <&3", ["a <&3"]),
-        ("a\nb", ["a", "b"]),
-        ("(a) && b", ["a", " ", " b"]),
-        ("a 'b & c; d' \"e | (f)\"", ["a 'b & c; d' \"e | (f)\""]),
-        ("a \\& b", ["a \\& b"]),
-        ("a $'b\\' & c'", ["a $'b\\' & c'"]),
-        ('a "$(b; c)" d', ["b", " c", 'a "$(…)" d']),
-        ("a `b` c", ["b", "a $(…) c"]),
-        ("a $(b (c) d) e", ["b ", "c", " d", "a $(…) e"]),
-        ("a # b'c & d\ne", ["a ", "e"]),
-        ("a#b & c", ["a#b ", " c"]),
-        ("a <<<'b & c'", ["a <<<'b & c'"]),
-        ("a <<-'E'\n\tb & c\n\tE\nd", ["a <<-'E'", "\tb ", " c", "d"]),
-        ("a <<E\nb\n", ["a <<E", "b"]),  # a heredoc left open runs to the end
-        ("a 'b & c", ["a 'b ", " c"]),  # a quote left open: split blind
-        ("a $(b", ["a $", "b"]),
-        ("a \\\n&& b", ["a ", " b"]),
-        ("a $((1<<2)) b\nc", ["a $((1<<2)) b", "c"]),  # arithmetic is one word
-        ("a $((b) ) c", ["b", " ", "a $(…) c"]),  # `) )`: a substitution and a subshell
-        ("a $((1", ["a $", "", "1"]),  # left open: blind
-        ("a $(( $(b) + 1 )) c", ["b", " $(…) + 1 ", "a $(…) c"]),  # a command in arithmetic
-        ("a $(( `b` )) c", ["b", " $(…) ", "a $(…) c"]),
-    ],
-)
-def test_segments_split_outside_quotes_only(command, segments):
-    assert [segment.text for segment in guard_main.segments(command)] == segments
-
-
-@pytest.mark.parametrize(
-    ("command", "segments"),
-    [
-        ("a\\ #b", ["a\\ #b"]),  # an escaped space doesn't start a word
-        ("a \\#b", ["a \\#b"]),  # nor is an escaped `#` a comment
-        ("a\\>&b", ["a\\>", "b"]),  # an escaped `>` is no redirection
-        ("a\\;b", ["a\\;b"]),
-        ("a \\\nb", ["a b"]),  # a continuation is deleted
-        ("a\\\n#b", ["a#b"]),  # and the word goes on through it
-        ("a \\\n#b\nc", ["a ", "c"]),  # after whitespace, a comment
-        ("a \\\\\nb", ["a \\\\", "b"]),  # an escaped backslash, then a newline
-        ("a &\\\n> f", ["a &> f"]),  # a redirection through a continuation
-        ("a >\\\n&2", ["a >&2"]),
-        ('a "b\\\nc" d', ['a "bc" d']),  # in double quotes too
-        ("a 'b\\\nc' d", ["a 'b\\\nc' d"]),  # but not in single quotes
-        ("a $'b\\\nc' d", ["a $'b\\\nc' d"]),
-        ('a "\\$(b)" c', ['a "\\$(b)" c']),  # an escaped `$` opens no substitution
-        ('a "\\\\$(b)" c', ["b", 'a "\\\\$(…)" c']),  # an escaped backslash does
-        ("a # b \\\nc", ["a ", "c"]),  # a comment ends at the newline, continuation or not
-        ("$(# c\nb) d", ["b", "$(…) d"]),  # a substitution starts a command
-        ("a <<E\nb \\\nc\nE", ["a <<E", "b c"]),  # a continuation in a heredoc's body
-        ("a 'b\\\nc", ["a 'b\\", "c", "a 'bc"]),  # blind: as written and joined
-    ],
-)
-def test_segments_read_backslashes_as_bash_does(command, segments):
-    assert [segment.text for segment in guard_main.segments(command)] == segments
-
-
-def test_segments_mark_the_lines_of_a_heredocs_body():
-    """A heredoc line can't make the command around it go on past a failure: it ends no chain."""
-    assert guard_main.segments("cat <<E && b\nc ; d\nE\ne") == [
-        guard_main.Segment("cat <<E "),
-        guard_main.Segment(" b", ends_chain=True),
-        guard_main.Segment("c ", heredoc=True),
-        guard_main.Segment(" d", heredoc=True),
-        guard_main.Segment("e"),
-    ]
-
-
-def test_segments_give_a_substitutions_commands_its_depth():
-    assert guard_main.segments('a && b "$(c; d <<E\nx\nE\n)" && e') == [
-        guard_main.Segment("a "),
-        guard_main.Segment("c", ends_chain=True, depth=1),
-        guard_main.Segment(" d <<E", ends_chain=True, depth=1),
-        guard_main.Segment("x", heredoc=True, ends_chain=True, depth=1),  # the substitution's end
-        guard_main.Segment(' b "$(…)" '),
-        guard_main.Segment(" e"),
-    ]
-
-
-@pytest.mark.parametrize(
-    ("command", "ends"),
-    [
-        ("a && b", [False, False]),
-        ("a; b", [True, False]),
-        ("a || b | c |& d & e", [True, True, True, True, False]),
-        ("a\nb", [True, False]),
-        ("a &&\n b", [False, False]),  # the list goes on past the newline
-        ("a && \\\nb", [False, False]),
-        ("(a); b", [True, False]),
-        ("(a) && b", [False, False, False]),
-        # A substitution's end ends its own chain (at its depth), never the outer one.
-        ('a "$(b)" && c', [True, False, False]),
-        ('a "$(b; c)" && d', [True, True, False, False]),
-        ("a 'b; c", [True, True]),  # blind
-        # A stray `)` (bash rejects it) or a `case` pattern's ends the chain too.
-        ("a ) b", [True, False]),
-    ],
-)
-def test_segments_say_whether_what_follows_runs_whatever_their_status(command, ends):
-    assert [segment.ends_chain for segment in guard_main.segments(command)] == ends
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        "gh pr create --body \"$(cat <<'EOF'\nRun:\ngit checkout main\nEOF\n)\" && git push",
-        "cat > /tmp/body.md <<'EOF'\ngit switch main\nEOF\ngit push origin HEAD",
-        "git commit -F - <<'EOF' && git push\ngit checkout main\nEOF",
-    ],
-)
-def test_a_heredoc_line_switches_no_branch(command, tmp_path):
-    """A heredoc line is text more often than a script: it is judged as a push, never read as a
-    switch, which would move the branch the real push is judged against (QA round 2 on #8)."""
-    on_feature = repo_with_branches(tmp_path / "r", "feat/x", "main")
-    assert guard_main.reason_to_block(command, on_feature) is None
-
-
-def test_a_refusal_in_a_heredoc_suggests_a_body_file():
-    body = (
-        "gh pr create --title t --body \"$(cat <<'EOF'\nRollback:\ngit push origin main\nEOF\n)\""
-    )
-    reason = guard_main.reason_to_block(body, None)
-    assert reason is not None
-    assert "--body-file" in reason
-    assert "-F" in reason
-    plain = guard_main.reason_to_block("git push origin main", None)
-    assert plain is not None
-    assert "--body-file" not in plain
-
-
-@pytest.mark.parametrize(
-    ("segment", "words"),
-    [
-        ("git push origin 2>&1", ["git", "push", "origin"]),
-        ("git push origin > log 2> err", ["git", "push", "origin"]),
-        ("2>/dev/null git push", ["git", "push"]),
-        ("git push origin main>log", ["git", "push", "origin", "main"]),
-        ("a&>log b", ["a", "b"]),
-        ("a {fd}>f 3<&- 2>>e <<<'x y' <<-EOF b", ["a", "b"]),
-        ("echo '>' \\> \">\" b", ["echo", ">", ">", ">", "b"]),
-        ("echo 'a b' c\\ d", ["echo", "a b", "c d"]),
-        ("echo 'a b", ["echo", "a", "b"]),  # a quote left open: on whitespace
-        ("echo 'a > b c", ["echo", "a", "c"]),
-        ("echo a\\", ["echo", "a\\"]),  # a lone backslash at the end
-    ],
-)
-def test_command_words_drop_redirections(segment, words):
-    assert guard_main.command_words(segment) == words
-
-
-def test_coproc_name_before_a_compound_command_is_no_command():
-    assert guard_main.command_words("coproc NAME { git push") == ["git", "push"]
-    assert guard_main.command_words("coproc git push") == ["git", "push"]
-    assert guard_main.command_words("coproc NAME for x in y") == ["for", "x", "in", "y"]
-    assert guard_main.command_words("coproc NAME") == ["NAME"]
-
-
-def test_git_subcommand_skips_git_options_and_keeps_dash_c():
-    assert guard_main.git_subcommand(
-        ["-C", "/x", "-c", "a=b", "push", "origin"]
-    ) == guard_main.GitCommand("push", ["origin"], ["/x"])
-    assert guard_main.git_subcommand(["-C", "a", "-C", "b", "status"]) == guard_main.GitCommand(
-        "status", [], ["a", "b"]
-    )
-    assert guard_main.git_subcommand(["--no-pager", "log"]) == guard_main.GitCommand("log", [], [])
-    assert guard_main.git_subcommand(["-C"]) is None
-    assert guard_main.git_subcommand([]) is None
-
-
-@pytest.mark.parametrize(
-    ("args", "method"),
-    [
-        ([], "GET"),
-        (["-X", "PUT", "x"], "PUT"),
-        (["-XPUT", "x"], "PUT"),
-        (["-X=patch", "x"], "PATCH"),
-        (["--method", "DELETE", "x"], "DELETE"),
-        (["--method=POST", "x"], "POST"),
-        (["x", "-f", "a=b"], "POST"),
-        (["x", "-fa=b"], "POST"),
-        (["x", "--field=a=b"], "POST"),
-        (["x", "--input", "r.json"], "POST"),
-        (["-X", "GET", "x", "-f", "a=b"], "GET"),
-        (["x", "-X"], "GET"),
-    ],
-)
-def test_gh_api_method(args, method):
-    assert guard_main.gh_api_method(args) == method
-
-
-def call(command: str, cwd: str = "/") -> str:
-    return json.dumps({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": cwd})
-
-
-def test_main_blocks_with_exit_2_and_the_reason_on_stderr(capsys):
-    assert guard_main.main(io.StringIO(call("git push origin main"))) == 2
-    captured = capsys.readouterr()
-    assert "guard_main.py" in captured.err
-    assert "main" in captured.err
-    assert captured.out == ""
-
-
-def test_main_allows_with_exit_0_and_no_output(capsys):
-    assert guard_main.main(io.StringIO(call("git push origin feat/x"))) == 0
-    assert capsys.readouterr() == ("", "")
-
-
-@pytest.mark.parametrize(
-    "stdin",
-    [
-        "not json",
-        json.dumps({"tool_name": "Read", "tool_input": {"file_path": "main"}}),
-        json.dumps({"tool_name": "Bash"}),
-        json.dumps({"tool_name": "Bash", "tool_input": {"command": 5}}),
-        json.dumps(["git push origin main"]),
-    ],
-)
-def test_main_has_no_opinion_on_other_input(stdin, capsys):
-    assert guard_main.main(io.StringIO(stdin)) == 0
-    assert capsys.readouterr() == ("", "")
-
-
-def test_script_runs_as_the_hook_does():
+def test_the_hook_runs_with_the_hosts_python_and_isolated(tmp_path):
+    script = Path(__file__).resolve().parents[1] / "scripts" / "guard_main.py"
     result = subprocess.run(
-        [sys.executable, "-I", str(GUARD)],
-        input=call("gh pr merge 3 --admin"),
+        ["python3", "-I", str(script)],
+        input=call("git push --force origin x", str(tmp_path)),
         capture_output=True,
         text=True,
+        check=False,
     )
-    assert result.returncode == 2
-    assert "--admin" in result.stderr
-
-
-def test_settings_wire_the_hook_to_bash_calls():
-    settings = json.loads(SETTINGS.read_text())
-    bash_hooks = [
-        hook
-        for group in settings["hooks"]["PreToolUse"]
-        if group["matcher"] == "Bash"
-        for hook in group["hooks"]
-    ]
-    assert any(hook["type"] == "command" and GUARD.name in hook["command"] for hook in bash_hooks)
+    assert result.returncode == 2 and "force push" in result.stderr

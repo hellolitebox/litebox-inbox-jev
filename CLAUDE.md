@@ -24,8 +24,10 @@ files they cover; read one directly when you plan a change to its files.
 requests, up to date with `main`, with green `test`, `test-min-python`, `secrets`, `docker` and
 `qa-verdict` checks and no unresolved review threads. `qa-verdict` is the QA reviewer's verdict for
 the exact head commit (`scripts/qa_gate.py`, ADR 0028), and only a real review satisfies it. Never
-`--admin`, never push to `main`, never weaken the ruleset: a hook (`scripts/guard_main.py`) refuses
-those commands, and a failing check is fixed through the loop.
+`--admin`, never push to `main`, never force-push any branch (a branch behind `main` gets
+`git merge origin/main`), never weaken a ruleset ("main: PR + CI", "all branches: no force-push"): a
+hook (`scripts/guard_main.py`, ADR 0057) refuses those commands, and a failing check is fixed
+through the loop.
 
 1. **Branch** off `main`: `feat/…`, `fix/…`, `chore/…`.
 2. **Implement** with tests. The Python skills to load are selected by path

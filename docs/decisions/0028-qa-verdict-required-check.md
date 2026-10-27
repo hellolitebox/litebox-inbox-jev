@@ -3,7 +3,9 @@
 - Status: Accepted (amended by [0054](0054-qa-reviews-count-only-from-people-with-write-access.md):
   only reviews by people with write access count; and by
   [0055](0055-an-update-merge-keeps-the-verdict-only-when-git-made-it.md): an update merge keeps the
-  verdict only when its tree is the conflict-free merge of its parents)
+  verdict only when its tree is the conflict-free merge of its parents; and by
+  [0056](0056-the-qa-gate-runs-only-mains-workflow-and-tests-by-risk.md): the push-time run is
+  `main`'s workflow too, and Dependabot's PRs are no longer skipped)
 - Date: 2026-10-13
 - PR: #23
 

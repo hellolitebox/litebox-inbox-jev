@@ -3,6 +3,8 @@
 - Status: Accepted
 - Date: 2026-10-14
 - PR: #52
+- Amended 2026-10-18 by [ADR 0057](0057-the-guard-keeps-what-github-cant-enforce.md): the hook reads
+  words several ways instead of bash, and adds force pushes to any branch.
 
 ## Context
 

@@ -1,11 +1,21 @@
 name: QA gate
 
-# Turns the latest "## QA review" comment on a PR into the `qa-verdict` commit status of its head
-# (scripts/qa_gate.py). The repo ruleset requires that status, so a PR merges only when QA
-# approved the exact commit being merged. Re-evaluated on every push to the PR and on every
-# comment. The comment-triggered run uses the workflow and script from `main`.
+# Turns the latest "## QA review" comment on a PR by someone with write access (ADR 0054) into the
+# `qa-verdict` commit status of its head (scripts/qa_gate.py). The repo ruleset requires that
+# status, so a PR merges only when QA approved the exact commit being merged. Re-evaluated on every
+# push to the PR and on every comment. A PR can't replace the gate itself (ADR 0056):
+# `pull_request_target` and `issue_comment` both run the default branch's (`main`'s) copy of this
+# workflow, and its one step runs `main`'s scripts/qa_gate.py. So a PR that edits this file or the
+# script is judged by `main`'s copies; its own take effect once merged. This does not stop a PR
+# from a branch of this repo from adding or editing another `pull_request` workflow that requests
+# `statuses: write` and posts `qa-verdict` as the same app (GitHub Actions): that is caught only by
+# reviewing `.github/workflows/` diffs, and no other workflow may grant `statuses: write`. (A fork's
+# `pull_request` runs get a read-only token, so a fork can't.)
 on:
-  pull_request:
+  # Not `pull_request`: that runs the PR's own copy of this file, which could post the status
+  # without running the gate. Never check out or run the PR's code here: this run has a write
+  # token, also on Dependabot's and forks' PRs (the repo is public: anyone can open one).
+  pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
   issue_comment:
     types: [created, edited]
@@ -18,11 +28,9 @@ permissions:
 
 # One group per PR and trigger: a newer push supersedes the run for an older head, a newer comment
 # an older comment's run. A comment never cancels a push's run: dev-fixer pushes and replies
-# within seconds, and the cancelled run left a cancelled "QA gate" check on the new head (the PR
-# showed UNSTABLE) even though it had already posted `qa-verdict` (pending). A comment's run is
-# checked against `main`'s commit, not the PR head, so cancelling it marks nothing on the PR. Both
-# kinds read the PR's current state and post on the head they read, so the latest run's status
-# stands.
+# within seconds, and a cancelled push-time run left a cancelled "QA gate" check on the PR (shown
+# UNSTABLE) even though it had already posted `qa-verdict` (pending). Both kinds read the PR's
+# current state and post on the head they read, so the latest run's status stands.
 concurrency:
   group: qa-gate-${{ github.event.pull_request.number || github.event.issue.number }}-${{ github.event_name }}
   cancel-in-progress: true
@@ -34,26 +42,23 @@ jobs:
     # with the same name, green whenever the script exits 0. The job passes whenever it posted a
     # status, `pending` and `failure` included (the verdict is the status, which the ruleset
     # requires, not this job); it fails only when the gate couldn't run (a `gh api` error).
-    # Dependabot's pull_request runs get a read-only token and can't post statuses, so they are
-    # skipped: its PRs get the status from the comment-triggered run, once the session posts its
-    # review.
-    if: >-
-      (github.event_name == 'pull_request' && github.actor != 'dependabot[bot]')
-      || github.event.issue.pull_request
+    # Dependabot's PRs run here too: a `pull_request_target` run gets the token `permissions:`
+    # declares, unlike its read-only `pull_request` runs (only a PR whose base branch Dependabot
+    # created gets a read-only one, and Dependabot's PRs target `main`).
+    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       # Full history, no working tree beyond the script: to accept an update-branch merge the
-      # script fetches the PR head and the base and checks with `git merge-tree` that the merge
-      # adds nothing of its own, reading objects only (ADR 0055). Which run is trusted: an
-      # `issue_comment` run checks out `main` and runs `main`'s workflow and script, so no PR code
-      # runs there. A `pull_request` run checks out the PR's merge ref and runs the PR's own
-      # workflow and `scripts/qa_gate.py` with `statuses: write` (a fork's PR gets a read-only
-      # token and posts nothing), so a PR that edits the gate is judged by its own copy until the
-      # next review comment re-runs `main`'s. Only the comment-triggered status is authoritative;
-      # for a PR that touches the gate, read that one.
+      # script fetches the PR head and the base itself (`refs/pull/<n>/head`, `refs/heads/<base>`)
+      # and checks with `git merge-tree` that the merge adds nothing of its own, reading objects
+      # only (ADR 0055); the head it judges comes from the API, never from this checkout. The
+      # checkout is the default branch (`main`), never the PR's head or merge ref, so a PR that
+      # edits scripts/qa_gate.py can't have its own copy judge it (nor a stacked PR its base
+      # branch's copy: not `base.ref`).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
           sparse-checkout: scripts/qa_gate.py
           sparse-checkout-cone-mode: false

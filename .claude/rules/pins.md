@@ -32,5 +32,6 @@ paths:
   a comment; Dependabot bumps both halves, so keep that shape when editing by hand.
 - The `docker` job builds the image, smoke-tests it as a non-root uid and on `main` pushes it to
   GHCR: that image is what `scripts/deploy.sh` deploys (ADR 0029).
-- `[tool.coverage.report] fail_under`: raise it when coverage grows, never lower it to get a PR
-  through.
+- `[tool.coverage.report] fail_under` is a floor against forgotten tests, not raised by rule: lower
+  it only in the PR that removes a redundant test, with the reason in its body, never to get
+  untested code through (`.claude/rules/tests.md`, ADR 0056).
