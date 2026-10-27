@@ -55,6 +55,9 @@ itself.
 - A real calendar email whose iTIP part we can't parse would carry the flag and lean toward spam:
   still subject to spam's 0.90 threshold, and below it Review. The real-mail check runs the 34
   stored calendar emails to confirm none gets the flag.
+- Outlook-style prefixes (`Accepted:`, `Declined:`, `Canceled:`) also start some transactional
+  subjects ("Canceled: Your order #1234"). The flag is then a false hint, still subject to spam's
+  0.90 threshold, and below it Review. None in this account's history.
 - Code: `signals.calendar_subject_without_invite`, `classifier.build_state` and its instructions,
   the spam criteria in `categories.yaml`, the spec's state table and EX-52, the README and the
   guide's list of clues.

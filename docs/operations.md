@@ -155,9 +155,10 @@ shows the whole backlog, including re-listed "needs reply" and low-confidence em
 
 ## Phishing that reaches the inbox
 
-Jev gets phishing signals (`reply_without_thread`, `link_domains`, `sender_auth`) and the spam
-criteria look for mismatches, but no rule spams on them, and `spam` needs 0.90, like the
-unsubscribing categories ([§4.7](how-it-decides.md#47-what-jev-receives),
+Jev gets phishing signals (`reply_without_thread`, `calendar_subject_without_invite`,
+`link_domains`, `sender_auth`) and the spam criteria look for mismatches, but no rule spams on them,
+and `spam` needs 0.90, like the unsubscribing categories
+([§4.7](how-it-decides.md#47-what-jev-receives),
 [ADR 0042](decisions/0042-phishing-signals-for-jev.md)). Phishing Jev is less sure of stays in the
 inbox with `Jev/Review` by design. Don't lower `spam`'s `min_confidence` to catch it: genuine
 document, e-signature and tax-portal notices sit close to it, and a lower bar moves them to Spam.
