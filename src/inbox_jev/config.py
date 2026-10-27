@@ -306,8 +306,8 @@ class CategoriesConfig(BaseModel):
     review_label: str = "Jev/Review"
     processed_label: str = "Jev/Processed"
     auto_rule: AutoRule = Field(default_factory=AutoRule)
-    # Archive when the archive categories' probabilities add up to this, even if the top one
-    # alone is below its min_confidence. None disables it.
+    # Archive when the counted categories' (archive and spam) probabilities add up to this, even
+    # if the top one alone is below its min_confidence. None disables it.
     archive_group_min_confidence: Probability | None = None
     # needs_reply only blocks a group archive when the keep categories (important,
     # action_required) together reach this, unless I have written to the sender or their
@@ -326,8 +326,9 @@ class CategoriesConfig(BaseModel):
         if len(keys) < 2:
             raise ValueError("at least two categories are required")
         floor = self.archive_group_min_confidence
-        # The group only fires when the archive categories reach the floor, so the keep
-        # categories are at most 1 - floor; a higher value would silently disable the veto.
+        # The group only fires when the counted categories (archive and spam) reach the floor,
+        # so the keep categories are at most 1 - floor; a higher value would silently disable
+        # the veto.
         # The epsilon tolerates float rounding (1 - 0.9 == 0.09999999999999998).
         if floor is not None and self.archive_group_reply_keep_probability > 1 - floor + 1e-9:
             raise ValueError(

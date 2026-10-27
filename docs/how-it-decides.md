@@ -284,9 +284,9 @@ With the shipped thresholds (0.0), a keep answer is always applied and never goe
 | 5 | The probabilities of the counted categories add up to the floor or more. A category counts when its action is `archive`/`archive_unsubscribe`/`spam`, it is in `act_categories` (when the account sets it), and it is the top category or its threshold (the account's `min_confidence`, else the category's own) is at most the floor. Spam only adds evidence: the email is archived under the top category, never moved to Spam ([ADR 0058](decisions/0058-spam-counts-toward-the-archive-group.md)) | 0.80 / 0.90 ≤ 0.90: every archive category and spam count |
 
 `archive_group_reply_keep_probability` must be at most `1 - archive_group_min_confidence` (config
-load fails otherwise): the group only fires when the archive categories hold ≥ 0.90, so the keep
-categories hold ≤ 0.10 and a higher value could never be reached. `0` means any reply signal blocks
-the group.
+load fails otherwise): the group only fires when the counted categories (archive and spam) hold ≥
+0.90, so the keep categories hold ≤ 0.10 and a higher value could never be reached. `0` means any
+reply signal blocks the group.
 
 When the veto applies, the email falls through to Review, and since it isn't archived it also gets
 `Jev/Needs Reply`.
