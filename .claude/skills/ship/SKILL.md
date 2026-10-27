@@ -31,10 +31,13 @@ opens it from the `psl-update` issue.
 For `r` = 1, 2, …, 5:
 
 1. Spawn `qa-reviewer` (Agent tool, `subagent_type: qa-reviewer`) with the PR number and the round
-   number; from round 2 on, also the previous QA review and the dev reply, verbatim.
+   number; from round 2 on, also the previous QA review and the dev reply, verbatim. When the
+   session didn't start inside this repo, the repo's agent types aren't loaded: spawn a
+   `general-purpose` agent (it has the Skill tool) told to follow `.claude/agents/qa-reviewer.md`.
 2. Read its answer: the `**Verdict: …**` line and the `Head: <sha>` line.
 3. `APPROVED` → go to the merge gates. `CHANGES_REQUESTED` → spawn `dev-fixer`
-   (`subagent_type: dev-fixer`) with the PR number, the round number and the full review, then the
+   (`subagent_type: dev-fixer`, or a `general-purpose` agent told to follow
+   `.claude/agents/dev-fixer.md`) with the PR number, the round number and the full review, then the
    next round.
 
 After 5 rounds without `APPROVED`: stop and summarize the open disagreements for the user. Do not
@@ -86,7 +89,21 @@ No `qa-reviewer` or `dev-fixer`; the session reviews the bump itself:
 2. For a **major** bump, and for any bump of `typesafe-sdk`, `google-auth*`,
    `google-api-python-client`, `httpx`, `sqlalchemy` or `pydantic*`, read the release notes
    (`gh api repos/<owner>/<repo>/releases --jq '.[0:3][] | .name, .body'`) for breaking changes that
-   touch this code. CI's paired-pin checks cover `uv` and the Python base image.
+   touch this code. CI's paired-pin checks cover `uv` and the Python base image. When one fails,
+   push the companion bump to the Dependabot branch: every **other** copy of the pin
+   (`.claude/rules/pins.md` lists them), all in that same PR.
+
+   - `uv` (Dependabot's `docker` entry bumping the Dockerfile's `ghcr.io/astral-sh/uv` stage, tag
+     and digest): `UV_VERSION` in `ci.yml` **and** in `release.yml`. CI checks only the first; the
+     second is what a release builds the package with, so open `release.yml` whenever `ci.yml`
+     changes.
+   - Python (the `python:3.x-slim` base-image bump): `PYTHON_VERSION` in `ci.yml` and in
+     `release.yml`. A **minor** change (3.14 → 3.15) is a new runtime for the image and for every
+     install: it leaves this lane for the full loop. A patch or digest bump stays.
+     `MIN_PYTHON_VERSION` and `requires-python` are the floor, not the runtime: they don't move with
+     it.
+
+   That's not a code change: once CI is green, the PR continues in this lane.
 
 3. Post the same review comment the agent would, so the gate can pass:
 
