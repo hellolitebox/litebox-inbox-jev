@@ -1,6 +1,7 @@
 # 0006. Archive by action confidence (the archive group)
 
-- Status: Accepted (member threshold amended by [0021](0021-archive-group-member-threshold.md))
+- Status: Accepted (member threshold amended by [0021](0021-archive-group-member-threshold.md); spam
+  counts toward the sum since [0058](0058-spam-counts-toward-the-archive-group.md))
 - Date: 2026-10-12
 - PR: #8 (QA round 1, findings 2–5)
 

@@ -2087,3 +2087,21 @@ def test_ex50_a_correction_on_mail_sent_as_your_group_teaches_no_rule(spec):
     )
     assert "INBOX" in gmail.emails["2"].label_ids
     assert [st["subject"] for st in ctx.classifier.states][-1] == question
+
+
+# --- EX-51 -----------------------------------------------------------------------------------
+
+
+def test_ex51_spam_counts_toward_the_archive_group(cfg, account):
+    """EX-51 (docs/how-it-decides.md §5, §3.2 archive group condition 5, ADR 0058)."""
+    sig = make_signals(sender="liz@pitch.example", sender_domain="pitch.example")
+    jev = answer("cold_outreach", cold_outreach=0.70, spam=0.30)
+    jev.needs_reply = 0.87
+    d = decide(cfg, account, sig, jev, previous_contact=PreviousContact.NEVER)
+    assert d.archive and d.archive_group and not (d.spam or d.unsubscribe or d.low_confidence)
+    assert d.add_labels == ["Jev/Outreach"]
+
+    jev = answer("spam", spam=0.60, cold_outreach=0.40)
+    d = decide(cfg, account, sig, jev, previous_contact=PreviousContact.NEVER)
+    assert d.low_confidence and not (d.archive or d.spam or d.archive_group)
+    assert d.add_labels == ["Jev/Review", "Jev/Spam"]

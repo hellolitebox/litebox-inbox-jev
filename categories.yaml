@@ -150,9 +150,10 @@ categories:
     action: spam
     min_confidence: 0.90
 
-# Archive when the archive categories (archive and archive_unsubscribe actions) add up to this
-# probability, even if Jev's top category alone is below its min_confidence: it is sure the email
-# goes away, just not which label fits best. Never unsubscribes or spams. Remove to disable.
+# Archive when the archive categories (archive and archive_unsubscribe actions) plus spam add up
+# to this probability, even if Jev's top category alone is below its min_confidence: it is sure the
+# email goes away, just not which label fits best. Only when the top category is an archive one,
+# archived under it. Never unsubscribes or spams. Remove to disable.
 archive_group_min_confidence: 0.90
 # An email Jev thinks expects a reply skips the rule above when I have written to the sender or
 # a person at their domain (unless it comes from a no-reply address with no other Reply-To);

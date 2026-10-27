@@ -278,10 +278,10 @@ With the shipped thresholds (0.0), a keep answer is always applied and never goe
 | # | Condition | Shipped value |
 | -- | -- | -- |
 | 1 | `archive_group_min_confidence` is set (remove it to disable the group) | 0.90 |
-| 2 | Jev's top category has action `archive` or `archive_unsubscribe` (spam and keep categories never use the group) |  |
+| 2 | Jev's top category has action `archive` or `archive_unsubscribe` (an email with spam or a keep category on top never uses the group) |  |
 | 3 | Needs-reply veto doesn't apply. It applies when `needs_reply ≥ 0.7` **and** either `previous_contact` is `wrote_to_sender` / `wrote_to_their_domain` and the email can be replied to (not [`no_reply`](#48-machine-and-no-reply-addresses)), or the keep categories (`important` + `action_required`) together reach `archive_group_reply_keep_probability` | 0.05 |
 | 4 | Floor = max(`archive_group_min_confidence`, the top category's `threshold`): the group never lowers a bar | 0.90 |
-| 5 | The probabilities of the counted categories add up to the floor or more. A category counts when its action is `archive`/`archive_unsubscribe`, it is in `act_categories` (when the account sets it), and it is the top category or its threshold (the account's `min_confidence`, else the category's own) is at most the floor | 0.80 / 0.90 ≤ 0.90: every archive category counts |
+| 5 | The probabilities of the counted categories add up to the floor or more. A category counts when its action is `archive`/`archive_unsubscribe`/`spam`, it is in `act_categories` (when the account sets it), and it is the top category or its threshold (the account's `min_confidence`, else the category's own) is at most the floor. Spam only adds evidence: the email is archived under the top category, never moved to Spam ([ADR 0058](decisions/0058-spam-counts-toward-the-archive-group.md)) | 0.80 / 0.90 ≤ 0.90: every archive category and spam count |
 
 `archive_group_reply_keep_probability` must be at most `1 - archive_group_min_confidence` (config
 load fails otherwise): the group only fires when the archive categories hold ≥ 0.90, so the keep
@@ -1842,6 +1842,20 @@ probabilities that matter are shown; the rest are ~0.
   one ([3.5](#35-sender-rules),
   [ADR 0051](decisions/0051-no-learned-rules-on-a-lists-own-address.md)).
 
+### EX-51 — A pitch Jev half-suspects as spam is archived
+
+- **Test**: `test_ex51_spam_counts_toward_the_archive_group`
+- **Input**: `liz@pitch.example` sends "Re: value of the data at Example", with no earlier message
+  in the thread. Jev: cold_outreach 0.70, spam 0.30, everything else 0.00; needs_reply 0.87. I have
+  never written to her. A second email from her gets spam 0.60, cold_outreach 0.40.
+- **Outcome**: the first is archived as `cold_outreach` through the archive group, with
+  `Jev/Outreach` only: no Review, no Needs Reply, not moved to Spam, not unsubscribed. The second
+  stays in the inbox with `Jev/Review` and `Jev/Spam`.
+- **Why**: every category Jev considered takes the first email out of the inbox; before, spam's 0.30
+  didn't count and it sat in Review at 0.70. Spam is only a vote toward archiving: an email with
+  spam on top still needs spam's own 0.90 to go to Spam ([3.2](#32-confidence-outcomes-jev-path),
+  [ADR 0058](decisions/0058-spam-counts-toward-the-archive-group.md)).
+
 ## 6. Glossary
 
 - **Action**: what a category does: `keep`, `archive`, `archive_unsubscribe`, `spam`.
@@ -1849,7 +1863,7 @@ probabilities that matter are shown; the rest are ~0.
   message (RFC 8617): Gmail's verdicts for the author, read for a trusted group's email when Gmail
   validated the chain ([4.2](#42-dmarc)).
 - **Archive categories**: categories whose action is `archive` or `archive_unsubscribe`.
-- **Archive group**: archiving because the archive categories together reach
+- **Archive group**: archiving because the archive categories, plus spam, together reach
   `archive_group_min_confidence` though the top one alone doesn't reach its threshold. Never
   unsubscribes or spams. `Decision.archive_group`, logged, not stored.
 - **Auto rule**: a sender rule created by `record_auto` after `auto_rule.hits` consistent answers.
