@@ -6,12 +6,15 @@ against every Protocol they stand in for, so neither can drift from what its cal
 """
 
 import base64
+import json
 import re
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
+import httpx2
 import pytest
 from sqlalchemy.orm import Session
 from typesafe_sdk import TypeSafeAPIError
@@ -415,10 +418,26 @@ def jev_http_error(
     request_id: str | None = "req-1",
 ) -> TypeSafeAPIError:
     """An SDK HTTP error as `typesafe_sdk` raises it (type, status, body, response headers)."""
-    import httpx2
-
     headers = httpx2.Headers({"x-typesafe-request-id": request_id} if request_id else {})
     return error_type(status, body, headers, endpoint="POST https://api.typesafe.ai/v1/systemone")
+
+
+def jev_request_json(request: httpx2.Request) -> Any:
+    """The JSON body Jev receives. Since typesafe-sdk 0.7.5 the SDK sends bodies of 1 KiB or more
+    zstd-compressed (`Content-Encoding: zstd`) whenever zstd is available (Python 3.14+), so a
+    fake Jev decodes it as the real one does; any other encoding fails the test."""
+    content = request.content
+    encoding = request.headers.get("content-encoding")
+    if encoding == "zstd":
+        if sys.version_info >= (3, 14):
+            from compression.zstd import decompress
+
+            content = decompress(content)
+        else:
+            raise AssertionError("a zstd-encoded body without Python 3.14's compression.zstd")
+    elif encoding is not None:
+        raise AssertionError(f"unexpected Content-Encoding {encoding!r}")
+    return json.loads(content)
 
 
 # Sent dates of SentMailService emails without one: a minute apart, newest first, from here.

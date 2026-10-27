@@ -8,7 +8,7 @@ import logging
 import httpx2
 import pytest
 from conftest import make_classification
-from fakes import FakeClassifier, JevFails, email, jev_http_error
+from fakes import FakeClassifier, JevFails, email, jev_http_error, jev_request_json
 from sqlalchemy import event
 from sqlalchemy.exc import OperationalError
 from typesafe_sdk import (
@@ -60,7 +60,7 @@ def _echoing(status: int):
     """A Jev answering `status` with a validation message that quotes the email's body."""
 
     def handler(request):
-        state = json.loads(request.content)["state"]
+        state = jev_request_json(request)["state"]
         return httpx2.Response(
             status,
             json={"detail": f"state.body is not valid: {state['body']!r}"},

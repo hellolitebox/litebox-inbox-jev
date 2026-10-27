@@ -5,7 +5,14 @@ import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from fakes import SENT_BASE_S, HttpError, SentMailService, calendar_payload, sent_mail_gmail
+from fakes import (
+    SENT_BASE_S,
+    HttpError,
+    SentMailService,
+    calendar_payload,
+    jev_request_json,
+    sent_mail_gmail,
+)
 
 from inbox_jev import gmail as gmail_module
 from inbox_jev.body import (
@@ -419,8 +426,6 @@ def test_previous_contact_wire_values_are_the_ones_jev_is_told_about():
 
 
 def test_classifier_parses_api_response(cfg):
-    import json
-
     import httpx2
     from typesafe_sdk import TypeSafeClient
 
@@ -429,7 +434,7 @@ def test_classifier_parses_api_response(cfg):
     seen = []
 
     def handler(request):
-        seen.append(json.loads(request.content))
+        seen.append(jev_request_json(request))
         return httpx2.Response(
             200,
             json={
