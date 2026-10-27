@@ -18,7 +18,7 @@ env:
   MIN_PYTHON_VERSION: "3.11"
   # uv for every job; bump together with the ghcr.io/astral-sh/uv tag in the Dockerfile (the test
   # job checks they match).
-  UV_VERSION: "0.13.1"
+  UV_VERSION: "0.13.5"
 
 concurrency:
   # A newer push to a PR supersedes its run. Each push to main gets its own group, so main runs
