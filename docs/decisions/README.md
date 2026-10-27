@@ -73,4 +73,5 @@ decision changes: add a new one and mark the old one `Superseded by NNNN`.
 | [0055](0055-an-update-merge-keeps-the-verdict-only-when-git-made-it.md) | An update merge keeps QA's verdict only when git would have made it unchanged | Accepted | #5 |
 | [0056](0056-the-qa-gate-runs-only-mains-workflow-and-tests-by-risk.md) | The QA gate runs only `main`'s workflow; tests chosen by risk, and the Python standards | Accepted | #7 |
 | [0057](0057-the-guard-keeps-what-github-cant-enforce.md) | The guard keeps what GitHub can't enforce (ruleset writes, force pushes to any branch), refusing when in doubt; a second ruleset blocks force pushes | Accepted | — |
+| [0058](0058-spam-counts-toward-the-archive-group.md) | Spam counts toward the archive group, which still never spams | Accepted | #16 |
 | [0059](0059-calendar-subject-without-calendar-part.md) | A calendar subject without a calendar part is a phishing signal for Jev | Accepted | — |

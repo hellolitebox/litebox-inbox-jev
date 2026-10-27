@@ -12,6 +12,9 @@ from .signals import Signals, domain_of, on_domain
 from .system_labels import INBOX, SPAM
 
 ARCHIVE_ACTIONS = (Action.ARCHIVE, Action.ARCHIVE_UNSUBSCRIBE)
+# Actions whose probability counts toward the archive group: every one takes the email out of the
+# inbox. Spam counts as evidence only; the group archives, never spams (ADR 0058).
+ARCHIVE_GROUP_ACTIONS = (*ARCHIVE_ACTIONS, Action.SPAM)
 # previous_contact values meaning I have written to the sender or their domain.
 KNOWN_CONTACT = frozenset({PreviousContact.WROTE_TO_SENDER, PreviousContact.WROTE_TO_THEIR_DOMAIN})
 
@@ -312,11 +315,12 @@ def _archive_group_confident(
     threshold: float,
     previous_contact: PreviousContact | None = None,
 ) -> bool:
-    """True when the archive categories together reach `archive_group_min_confidence`.
+    """True when the archive and spam categories together reach `archive_group_min_confidence`.
 
-    Only applies when Jev's top answer is itself an archive category. Spam is never part of the
-    group: moving to Spam always needs the spam category's own confidence. The group can only add
-    confidence, never lower the bar:
+    Only applies when Jev's top answer is itself an archive category, and the email is archived
+    under it. Spam's probability counts toward the sum (it is one more vote for taking the email
+    out of the inbox, ADR 0058), but the group never moves anything to Spam: that always needs the
+    spam category's own confidence. The group can only add confidence, never lower the bar:
     - the floor is at least the top category's own threshold (`threshold`, which already
       includes an account-level min_confidence), so a stricter setting is never bypassed;
     - a member whose threshold (account-level min_confidence, else the category's own) is
@@ -345,7 +349,7 @@ def _archive_group_confident(
     acts = account.act_categories
 
     def counts(key: str) -> bool:
-        if key not in cfg.by_key or cfg.by_key[key].action not in ARCHIVE_ACTIONS:
+        if key not in cfg.by_key or cfg.by_key[key].action not in ARCHIVE_GROUP_ACTIONS:
             return False
         if acts is not None and key not in acts:
             return False

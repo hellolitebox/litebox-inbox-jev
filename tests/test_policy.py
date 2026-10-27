@@ -218,7 +218,7 @@ def test_archive_group_never_unsubscribes(cfg, account):
     [
         probs("notification", 0.6, important=0.35),  # might be personal
         probs("notification", 0.5, action_required=0.45),  # keep category not in the group
-        probs("newsletter", 0.5, marketing=0.35, spam=0.15),  # spam not in the group
+        probs("newsletter", 0.5, marketing=0.30, important=0.20),  # keep category not counted
         probs("spam", 0.5, cold_outreach=0.45),  # top answer must be an archive category
     ],
 )
@@ -226,6 +226,26 @@ def test_archive_group_stays_in_review_otherwise(cfg, account, classification):
     d = decide(cfg, account, make_signals(), classification)
     assert d.low_confidence and not (d.archive or d.spam or d.archive_group)
     assert "Jev/Review" in d.add_labels
+
+
+def test_archive_group_counts_spam_but_never_spams(cfg, account):
+    d = decide(cfg, account, make_signals(), probs("notification", 0.50, spam=0.44, important=0.04))
+    assert d.archive and d.archive_group and not (d.spam or d.low_confidence)
+    assert d.category == "notification" and d.add_labels == ["Jev/Notifications"]
+    p = plan(cfg, d, Mode.ACT)
+    assert p.archived and not p.spammed
+
+
+def test_archive_group_skips_spam_outside_act_categories(cfg, account):
+    account.act_categories = ["notification"]
+    d = decide(cfg, account, make_signals(), probs("notification", 0.50, spam=0.45))
+    assert d.low_confidence and not d.archive
+
+
+def test_archive_group_skips_spam_with_stricter_account_threshold(cfg, account):
+    account.min_confidence = {"spam": 0.99}
+    d = decide(cfg, account, make_signals(), probs("cold_outreach", 0.70, spam=0.30))
+    assert d.low_confidence and not d.archive
 
 
 def test_archive_group_disabled(cfg, account):

@@ -85,9 +85,9 @@ for each new inbox email:
 4. **Policy** turns the answer into actions, and the **mode** decides how much of that is applied:
    - at or above a category's `min_confidence`, its action applies;
    - below it, the email is still archived when Jev's top answer is an archive category and the
-     archive categories together reach 0.90 (the *archive group*: never unsubscribes or spams; an
-     email that "expects a reply" stays unless it's a stranger's pitch or a no-reply notification
-     with no keep signal);
+     archive categories, plus spam, together reach 0.90 (the *archive group*: never unsubscribes or
+     spams; an email that "expects a reply" stays unless it's a stranger's pitch or a no-reply
+     notification with no keep signal);
    - otherwise nothing destructive happens: `Jev/Review` plus the suggested label. Phishing that Jev
      calls spam below 0.90 lands here by design, already labeled `Jev/Spam`: the user removing
      `Jev/Review` (or changing another suggested label to `Jev/Spam`) makes a sender rule
