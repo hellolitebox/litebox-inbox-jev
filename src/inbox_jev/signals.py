@@ -591,6 +591,30 @@ def reply_without_thread(subject: str, headers: dict[str, list[str]]) -> bool:
     )
 
 
+# Subject prefixes calendar clients put on invitations and responses: Google Calendar in English and
+# Spanish, and Outlook ("Tentative:", "Canceled:"). Only at the start of the subject: a person's
+# "Re: Invitation from an unknown sender: …" or a product's "X accepted their invitation" isn't
+# one. Outlook's "Updated:" is left out: too generic for a subject.
+_CALENDAR_PREFIX = re.compile(
+    r"^\s*(?:updated\s+invitation|invitation(?:\s+from\s+an\s+unknown\s+sender)?"
+    r"|accepted|declined|tentatively\s+accepted|tentative|cancell?ed(?:\s+event)?"
+    r"|invitaci[oó]n(?:\s+actualizada)?|aceptad[oa](?:\s+provisionalmente)?|rechazad[oa]"
+    r"|evento\s+cancelado)\s*[:\uff1a]",
+    re.IGNORECASE,
+)
+
+
+def calendar_subject_without_invite(subject: str, calendar_method: str | None) -> bool:
+    """Whether `subject` starts like a calendar invitation or response (`_CALENDAR_PREFIX`) but
+    the email has no iTIP part (`calendar_method`, from `body.calendar_method`).
+
+    Calendar clients send invitations and RSVPs with a `text/calendar` part; a lookalike
+    "Accepted: …" without one is a phishing trick (ADR 0059). A client could send one in a form
+    we don't read, so it is a signal for Jev, not a verdict.
+    """
+    return calendar_method is None and bool(_CALENDAR_PREFIX.match(subject))
+
+
 def sender_address(from_header: str | None) -> str:
     return parseaddr(from_header or "")[1].strip().lower()
 

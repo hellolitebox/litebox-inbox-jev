@@ -91,19 +91,20 @@ must still be able to undo.
 **Real-mail check** (`docs/development.md`, "Checking a branch against real mail"; the rule in
 `.claude/rules/decision-logic.md`): if the PR changes classification (`categories.yaml` criteria,
 the classifier state or questions, `body.extract_body`, the signals Jev receives:
-`body.extract_link_domains`, `signals.sender_auth`, `reply_without_thread`, `relay_author_auth`),
-what verifies a sender (DMARC, ARC and group trust in `signals.py`: `dmarc_passed`,
-`relay_author_auth`, `original_sender`, `resolve_relay`) or a destructive path (archive, spam,
-unsubscribe, `unsubscribe-retry`), the PR body must include the output of `scripts/check_branch.sh`
-(`dry_classify.py` on real mail, read-only) or an explicit reason it isn't needed, borne out by the
-diff. Missing: **major**. Output that contains email bodies: **blocker**. A classification change
-also needs the reference summary (`check_branch.sh <branch> … --reference --quiet`,
-`docs/development.md` "Checking a branch against real mail") next to the per-email check: missing,
-**major**. Read it: the branch's accuracy against the corrections must not fall below the stored
-baseline without an explanation (`broken` pairs the PR accepts on purpose; the baseline covers only
-the corrections Jev decided, the `baseline_unknown` ones count for the branch alone), and a change
-meant to move borderline emails should show it in the ±0.05 / ±0.10 band counts. A reference set too
-small to say anything (a handful of corrections) is fine if the PR says so.
+`body.extract_link_domains`, `signals.sender_auth`, `reply_without_thread`,
+`calendar_subject_without_invite`, `relay_author_auth`), what verifies a sender (DMARC, ARC and
+group trust in `signals.py`: `dmarc_passed`, `relay_author_auth`, `original_sender`,
+`resolve_relay`) or a destructive path (archive, spam, unsubscribe, `unsubscribe-retry`), the PR
+body must include the output of `scripts/check_branch.sh` (`dry_classify.py` on real mail,
+read-only) or an explicit reason it isn't needed, borne out by the diff. Missing: **major**. Output
+that contains email bodies: **blocker**. A classification change also needs the reference summary
+(`check_branch.sh <branch> … --reference --quiet`, `docs/development.md` "Checking a branch against
+real mail") next to the per-email check: missing, **major**. Read it: the branch's accuracy against
+the corrections must not fall below the stored baseline without an explanation (`broken` pairs the
+PR accepts on purpose; the baseline covers only the corrections Jev decided, the `baseline_unknown`
+ones count for the branch alone), and a change meant to move borderline emails should show it in the
+±0.05 / ±0.10 band counts. A reference set too small to say anything (a handful of corrections) is
+fine if the PR says so.
 
 **Performance & cost**: Gmail API calls per run (quota: per-user units/sec), Jev calls per email
 (avoid repeats; rules should skip Jev), N+1 DB queries, unbounded loops or result sets, timeouts on

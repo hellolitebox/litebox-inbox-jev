@@ -108,6 +108,15 @@ def test_build_state_adds_phishing_signals_only_when_they_say_something():
         _bare_email({"subject": ["RE: Hi"], "in-reply-to": ["<1@b.com>"]}), "m@x.com", 9
     )
     assert not {"reply_without_thread", "link_domains", "sender_auth"} & state.keys()
+    assert "calendar_subject_without_invite" not in state
+
+
+def test_build_state_flags_a_calendar_subject_without_an_invite():
+    fake = _bare_email({"subject": ["Accepted: Kickoff @ Mon"]})
+    assert build_state(fake, "m@x.com", 9)["calendar_subject_without_invite"] is True
+    real = _bare_email({"subject": ["Accepted: Kickoff @ Mon"]})
+    real.calendar_method = "REPLY"
+    assert "calendar_subject_without_invite" not in build_state(real, "m@x.com", 9)
 
 
 def test_build_state_carries_link_domains_and_sender_auth():
@@ -125,7 +134,12 @@ def test_build_state_carries_link_domains_and_sender_auth():
 
 
 def test_category_instructions_explain_the_phishing_signals():
-    for key in ("sender_auth", "reply_without_thread", "link_domains"):
+    for key in (
+        "sender_auth",
+        "reply_without_thread",
+        "calendar_subject_without_invite",
+        "link_domains",
+    ):
         assert key in CATEGORY_INSTRUCTIONS
 
 

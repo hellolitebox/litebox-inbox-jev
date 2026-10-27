@@ -21,7 +21,13 @@ from typesafe_sdk import (
 from .classification import Classification, PreviousContact
 from .config import CategoriesConfig
 from .gmail import Email
-from .signals import UNKNOWN_AUTH, Signals, reply_without_thread, sender_auth
+from .signals import (
+    UNKNOWN_AUTH,
+    Signals,
+    calendar_subject_without_invite,
+    reply_without_thread,
+    sender_auth,
+)
 
 CATEGORY_Q = "category"
 NEEDS_REPLY_Q = "needs_reply"
@@ -134,7 +140,10 @@ CATEGORY_INSTRUCTIONS = (
     "sent the email, not that it is legitimate, while dmarc none or fail strengthens other "
     "signs of phishing. For an email sent via a group, sender_auth is the original sender's, "
     "for their own domain, not the group's. reply_without_thread means the subject says it is "
-    "a reply or forward (RE:, FW:) but the email answers no earlier message. link_domains lists "
+    "a reply or forward (RE:, FW:) but the email answers no earlier message. "
+    "calendar_subject_without_invite means the subject starts like a calendar invitation or "
+    "response (Invitation:, Accepted:, Declined:) but the email carries no calendar invite, "
+    "which real calendar clients always attach. link_domains lists "
     "the domains its links point to, most frequent first: links to a brand unrelated to the "
     "sender are a sign of phishing, while a service linking to its own brand or portal domains "
     "(which can differ from the sending domain) is normal."
@@ -151,7 +160,8 @@ def build_state(
     """`sig` is triage.signals_for's answer; defaults to the raw (unresolved) signals.
 
     Optional keys are left out when they say nothing: `original_sender` / `sent_via_group`
-    (no trusted group), `previous_contact` (unknown), `reply_without_thread` (false),
+    (no trusted group), `previous_contact` (unknown), `reply_without_thread` and
+    `calendar_subject_without_invite` (false),
     `link_domains` (no link) and `sender_auth` (no Authentication-Results from Gmail).
     For a trusted group relay `sender_auth` is the author's (`Signals.author_auth`, all "none"
     without Google's record), never the group's, which Gmail's own header describes.
@@ -177,6 +187,8 @@ def build_state(
     # Phishing signals, each only when there is something to say (a small state).
     if reply_without_thread(email.header("Subject"), email.headers):
         state["reply_without_thread"] = True
+    if calendar_subject_without_invite(email.header("Subject"), email.calendar_method):
+        state["calendar_subject_without_invite"] = True
     if email.link_domains:
         state["link_domains"] = email.link_domains
     if sig.relayed_by:

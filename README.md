@@ -72,13 +72,14 @@ for each new inbox email:
    `text/plain` part is just a "view this in your browser" stub) and `previous_contact`: whether you
    ever wrote to the sender or a person at their domain, from a search over your sent mail (emails
    sent only to machine addresses, like `noreply@` or a notification's `…@bounce.linkedin.com` reply
-   address, don't count). It also gets three phishing signals, each only when it says something: a
-   reply or forward subject with no `In-Reply-To`/`References` (`reply_without_thread`), the
-   registrable domains the body's links point to (`link_domains`, never a full URL) and Gmail's SPF,
-   DKIM and DMARC verdicts (`sender_auth`; for a trusted group's author, Google's ARC record of the
-   message the group received, unknown without a trusted one, never the group's own pass). The spam
-   criteria treat a pass as proof of the sending domain only and look for mismatches
-   ([§4.7](docs/how-it-decides.md#47-what-jev-receives),
+   address, don't count). It also gets four phishing signals, each only when it says something: a
+   reply or forward subject with no `In-Reply-To`/`References` (`reply_without_thread`), a subject
+   that starts like a calendar invitation or response with no calendar invite in the email
+   (`calendar_subject_without_invite`), the registrable domains the body's links point to
+   (`link_domains`, never a full URL) and Gmail's SPF, DKIM and DMARC verdicts (`sender_auth`; for a
+   trusted group's author, Google's ARC record of the message the group received, unknown without a
+   trusted one, never the group's own pass). The spam criteria treat a pass as proof of the sending
+   domain only and look for mismatches ([§4.7](docs/how-it-decides.md#47-what-jev-receives),
    [ADR 0042](docs/decisions/0042-phishing-signals-for-jev.md)). It answers with a category and its
    probabilities, "needs a reply" and the tags.
 4. **Policy** turns the answer into actions, and the **mode** decides how much of that is applied:

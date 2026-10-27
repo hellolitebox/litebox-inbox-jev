@@ -136,14 +136,16 @@ categories:
       for the attacker's own domain. Signs of phishing are mismatches: links (link_domains) to
       a brand unrelated to the sender (a notice that claims to be from one brand while its
       action link goes to another), a reply subject (RE:) with no earlier message
-      (reply_without_thread), a copied conversation between other people that I am not part
-      of; dmarc none or fail makes them stronger. Not
+      (reply_without_thread), a calendar subject (Invitation:, Accepted:) with no calendar
+      invite in the email (calendar_subject_without_invite), a copied conversation between
+      other people that I am not part of; dmarc none or fail makes them stronger. Not
       spam: a notice from an established document, e-signature, tax-return or client-portal
       service whose sender passes DMARC and whose links go to that service's own brand
       domains (they can differ from the sending domain); that is action_required or
       transactional.
-    # sender_auth, link_domains and reply_without_thread in the criteria are the phishing signals
-    # inbox-jev adds to Jev's input (docs/how-it-decides.md, 4.7; ADR 0042). No rule spams on them:
+    # sender_auth, link_domains, reply_without_thread and calendar_subject_without_invite in the
+    # criteria are the phishing signals inbox-jev adds to Jev's input (docs/how-it-decides.md,
+    # 4.7; ADR 0042, 0059). No rule spams on them:
     # phishing Jev answers below min_confidence stays in the inbox with the review label, and the
     # user's correction to Jev/Spam makes a sender rule. Lowering the bar also sends genuine
     # document, e-signature and tax-portal notices to Spam.

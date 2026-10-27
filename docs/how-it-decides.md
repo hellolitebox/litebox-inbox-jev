@@ -961,6 +961,7 @@ keeps the email out of auto rules ([3.5](#35-sender-rules)). `dry_classify.py` s
 | `original_sender`, `sent_via_group` | Only for a trusted group relay: the author and the group |
 | `previous_contact` | Only when known (`None` leaves the key out); always left out of the flags-only call for allowlist and keep-rule emails |
 | `reply_without_thread` | `true` when the subject starts with a reply or forward prefix (`RE:`, `Fwd:`, `AW:`, `WG:`, `RV:`, `RES:`, `TR:`, `SV:`, `VS:`, `ANTW:`, `ODP:`, `ENC:`, any case, numbered or repeated) and the email has neither `In-Reply-To` nor `References` (`signals.reply_without_thread`); left out otherwise |
+| `calendar_subject_without_invite` | `true` when the subject starts with a calendar client's prefix (Google Calendar in English and Spanish: `Invitation:`, `Updated invitation:`, `Invitation from an unknown sender:`, `Accepted:`, `Declined:`, `Tentatively accepted:`, `Canceled event:` / `Cancelled event:`, `Invitación:` / `Invitacion:`, `Invitación actualizada:` / `Invitacion actualizada:`, `Aceptado:` / `Aceptada:`, `Rechazado:` / `Rechazada:`, `Aceptado provisionalmente:` / `Aceptada provisionalmente:`, `Evento cancelado:`; Outlook's `Tentative:`, `Canceled:` and `Cancelled:`; any case, spaces before the colon allowed, the fullwidth colon `：` too) and the email has no iTIP part (`Email.calendar_method`, [4.6](#46-body-extraction)) (`signals.calendar_subject_without_invite`); left out otherwise. A subject that starts with anything else (`Re:`, `Fwd:`) never matches |
 | `link_domains` | The domains the body's links point to, most frequent first, at most 8 ([4.6](#46-body-extraction)); left out when there is none |
 | `sender_auth` | `{"spf", "dkim", "dmarc"}` verdicts from Gmail's own `Authentication-Results` ([4.2](#42-dmarc)); left out without one. For a trusted group relay, the author's, from Google's ARC record, all `none` without a trusted one, never the group's |
 
@@ -969,9 +970,10 @@ the instruction to judge by who wrote it and why, explaining `previous_contact` 
 pitch from a sender I never wrote to is usually cold outreach") and the phishing signals (a passing
 `sender_auth` only proves which domain sent the email, and DMARC `none` or `fail` strengthens other
 signs; for an email sent via a group, `sender_auth` is the original sender's, for their own domain;
-`reply_without_thread` is a reply subject answering nothing; links to a brand unrelated to the
-sender are a sign of phishing, while a service linking to its own brand or portal domains, even ones
-that differ from the sending domain, is normal,
+`reply_without_thread` is a reply subject answering nothing; `calendar_subject_without_invite` is a
+calendar subject with no calendar invite, which real calendar clients always attach; links to a
+brand unrelated to the sender are a sign of phishing, while a service linking to its own brand or
+portal domains, even ones that differ from the sending domain, is normal,
 [ADR 0042](decisions/0042-phishing-signals-for-jev.md)); one `Noul` for `needs_reply`, whose
 instructions are `needs_reply.question` with its yes / no examples
 ([3.2](#32-confidence-outcomes-jev-path)); one `Noul` per tag. The answer gives the category, its
@@ -1856,6 +1858,21 @@ probabilities that matter are shown; the rest are ~0.
   spam on top still needs spam's own 0.90 to go to Spam ([3.2](#32-confidence-outcomes-jev-path),
   [ADR 0058](decisions/0058-spam-counts-toward-the-archive-group.md)).
 
+### EX-52 — A lookalike calendar response without an invite
+
+- **Test**: `test_ex52_a_calendar_subject_without_an_invite_is_flagged_for_jev`
+- **Input**: in `act`, "Accepted: 9564698766 x Tap Play @ Fri Oct 23, 2026 4pm (me@example.com)
+  iMsr3G" from `litebox@lookalike.example`, with no `text/calendar` part (Jev: spam 0.95). And
+  "Accepted: Kickoff @ Mon 10am" from `ana@client.example`, with Google Calendar's `method=REPLY`
+  part (Jev: notification 0.99).
+- **Outcome**: the first email's state carries `calendar_subject_without_invite: true` and it is
+  moved to Spam; the second has no such key and is archived as `notification`.
+- **Why**: a real response or invitation carries an iTIP part; a subject that only looks like one is
+  a mismatch Jev couldn't see before (a real case split notification 0.48 / spam 0.48 and sat in
+  Review). Like `reply_without_thread`, it is a fact for Jev, not a verdict: the test pins the state
+  and the outcome of a spam answer, not Jev's judgement
+  ([ADR 0059](decisions/0059-calendar-subject-without-calendar-part.md)).
+
 ## 6. Glossary
 
 - **Action**: what a category does: `keep`, `archive`, `archive_unsubscribe`, `spam`.
@@ -1978,14 +1995,19 @@ Behaviour found while writing this spec, documented as it is today:
   list, so the correction fixes that email only and the group's next phishing goes to Jev again
   ([3.5](#35-sender-rules)). Phishing that changes address escapes it. `reply_without_thread` is
   also set for a genuine forward from a client that leaves out `In-Reply-To` and `References`, so
-  the criteria present it as one sign among others. `link_domains` sees the link as written: an ESP
-  that rewrites every link through its click tracker shows only the tracker's domain, and a lure's
-  single link can fall outside the 8 most frequent domains of a long newsletter. In plain-text parts
-  only `http://` and `https://` URLs are found (the WHATWG forms are read in `href`s). On a private
-  suffix (`github.io`, `workers.dev`) a link domain keeps the site's own label, which can name a
-  person or carry a per-recipient token ([4.6](#46-body-extraction)). The host mapping is UTS #46's
-  ignored code points, NFKC and IDNA's full stops, not the whole UTS #46 table (its few other
-  non-NFKC mappings, such as deviation characters, are left as written).
+  the criteria present it as one sign among others. `calendar_subject_without_invite` is cleared by
+  any `text/calendar` part with a well-formed `method=`, so a lookalike that attaches a bogus one
+  (`method=REPLY`) escapes it. Outlook's prefixes (`Accepted:`, `Declined:`, `Canceled:`) also start
+  some transactional subjects ("Canceled: Your order #1234"), which then carry the flag as a false
+  hint, still under `spam`'s 0.90 bar and Review below it; none did in this account's history
+  ([ADR 0059](decisions/0059-calendar-subject-without-calendar-part.md)). `link_domains` sees the
+  link as written: an ESP that rewrites every link through its click tracker shows only the
+  tracker's domain, and a lure's single link can fall outside the 8 most frequent domains of a long
+  newsletter. In plain-text parts only `http://` and `https://` URLs are found (the WHATWG forms are
+  read in `href`s). On a private suffix (`github.io`, `workers.dev`) a link domain keeps the site's
+  own label, which can name a person or carry a per-recipient token ([4.6](#46-body-extraction)).
+  The host mapping is UTS #46's ignored code points, NFKC and IDNA's full stops, not the whole UTS
+  #46 table (its few other non-NFKC mappings, such as deviation characters, are left as written).
 - Reading `Authentication-Results` per RFC 8601 ([4.2](#42-dmarc)) relies on Gmail writing the
   envelope sender and HELO name as SMTP accepted them: an unquoted local part can't hold `;`, `(`,
   `)`, `"`, `\`, `[` or `]` (RFC 5321 refuses it at `MAIL FROM`), a quoted one keeps its quotes and
