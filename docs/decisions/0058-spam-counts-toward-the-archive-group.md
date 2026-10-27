@@ -2,7 +2,7 @@
 
 - Status: Accepted (amends [0006](0006-archive-group-by-action-confidence.md))
 - Date: 2026-10-27
-- PR: —
+- PR: #16
 
 ## Context
 
