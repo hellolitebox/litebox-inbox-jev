@@ -35,7 +35,7 @@ dependencies = [
 dev = [
     "pytest>=8,<10",
     "pytest-cov>=7",
-    "ruff==0.17.1",
+    "ruff==0.17.2",
     "mypy>=2.4",
     "pre-commit>=3",
     # Markdown formatter (.mdformat.toml); pinned here and in .pre-commit-config.yaml.
