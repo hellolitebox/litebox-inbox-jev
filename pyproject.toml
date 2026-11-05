@@ -35,13 +35,13 @@ dependencies = [
 dev = [
     "pytest>=8,<10",
     "pytest-cov>=7",
-    "ruff==0.17.1",
+    "ruff==0.17.3",
     "mypy>=2.4",
     "pre-commit>=3",
     # Markdown formatter (.mdformat.toml); pinned here and in .pre-commit-config.yaml.
     "mdformat==1.0.0",
     "mdformat-gfm==1.0.0",
-    "mdformat-frontmatter==2.1.2",
+    "mdformat-frontmatter==2.2.0",
 ]
 
 [project.scripts]
