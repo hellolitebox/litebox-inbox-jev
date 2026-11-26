@@ -2,7 +2,7 @@
 # ignores images referenced only in COPY --from=). Keep it equal to the setup-uv `version` in
 # .github/workflows/ci.yml; CI fails when they differ. Both images are pinned by digest too, so
 # the same Dockerfile always builds from the same bytes; Dependabot bumps tag and digest together.
-FROM ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff AS uv
+FROM ghcr.io/astral-sh/uv:0.13.10@sha256:a3ea1357342c1a4bf9a0c53a3deb1b55379aefa037338d8113d5771efa01774f AS uv
 
 FROM python:3.14-slim@sha256:a2b82f3c48559aa0a8446d9af49826b6e2b2016f4cd2afabfe6013ec53729170
 
